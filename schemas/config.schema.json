@@ -1,0 +1,715 @@
+{
+  "$id": "https://yashwk.github.io/strikecem/schemas/config.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StrikeCEM Configuration Schema",
+  "description": "Official JSON Schema definition for StrikeCEM configuration files. Supports model definition (CAD/mesh), frequency sweeps, solvers (PO, MoM, Hybrid), mesh refinement, parallel execution, and output formats.",
+  "scem_schema_version": "1.0",
+  "type": "object",
+  "required": [
+	"model",
+	"frequency",
+	"angles",
+	"solver",
+	"output"
+  ],
+  "properties": {
+	"model": {
+	  "type": "object",
+	  "required": [
+		"path"
+	  ],
+	  "properties": {
+		"path": {
+		  "type": "string",
+		  "description": "Path to the CAD or mesh file."
+		},
+		"format": {
+		  "type": "string",
+		  "enum": [
+			"cad",
+			"mesh"
+		  ],
+		  "description": "Whether the model file is a CAD file or a pre-meshed file."
+		},
+		"units": {
+		  "type": "string",
+		  "enum": [
+			"m",
+			"mm",
+			"in"
+		  ],
+		  "default": "m",
+		  "description": "Units of the model file."
+		},
+		"symmetry": {
+		  "type": "object",
+		  "axial": {
+			"type": "boolean",
+			"default": false,
+			"description": "Whether the model has axial symmetry."
+		  },
+		  "planar": {
+			"type": "boolean",
+			"default": false,
+			"description": "Whether the model has planar symmetry."
+		  },
+		  "sector_deg": {
+			"type": "number",
+			"minimum": 0,
+			"maximum": 360,
+			"description": "Sector angle in degrees if using axial symmetry."
+		  },
+		  "planes": {
+			"type": "array",
+			"items": {
+			  "type": "string",
+			  "enum": ["xy", "yz", "zx"]
+			},
+			"description": "Planar symmetry planes."
+		  }
+		},
+		"part_tags": {
+		  "type": "object",
+		  "additionalProperties": {
+			"type": "array",
+			"items": {
+			  "type": "string",
+			  "description": "List of tags associated with the part."
+			}
+		  }
+		},
+		"mesh_source": {
+		  "type": "string",
+		  "enum": [
+			"pre_meshed",
+			"tessellate"
+		  ],
+		  "default": "pre_meshed",
+		  "description": "Whether to use a pre-meshed model or tessellate from CAD."
+		},
+		"cache_hash": {
+		  "type": "string",
+		  "description": "Hash string to identify the model for caching purposes."
+		},
+		"fix_nonmanifold": {
+		  "type": "boolean",
+		  "default": true,
+		  "description": "Whether to attempt to fix non-manifold edges in the mesh."
+		}
+	  }
+	},
+	"frequency": {
+	  "type": "object",
+	  "oneOf": [
+		{"required": ["frequency_hz"]},
+		{"required": ["sweep"]}
+	  ],
+	  "properties": {
+		"frequency_hz": {
+		  "type": "number",
+		  "minimum": 1,
+		  "description": "Frequency in Hz."
+		},
+		"sweep": {
+		  "type": "object",
+		  "required": ["start", "stop", "step"],
+		  "properties": {
+			"start": {
+			  "type": "number",
+			  "minimum": 1,
+			  "description": "Start frequency in Hz."
+			},
+			"stop": {
+			  "type": "number",
+			  "description": "Stop frequency in Hz."
+			},
+			"step": {
+			  "type": "number",
+			  "minimum": 1,
+			  "description": "Step size in Hz."
+			}
+		  },
+		  "description": "Frequency sweep parameters."
+		},
+		"medium": {
+		  "type": "object",
+		  "properties": {
+			"epsilon_r": {
+			  "type": "number",
+			  "default": 1.0,
+			  "description": "Relative permittivity of the surrounding medium."
+			},
+			"mu_r": {
+			  "type": "number",
+			  "default": 1.0,
+			  "description": "Relative permeability of the surrounding medium."
+			},
+			"sigma": {
+			  "type": "number",
+			  "default": 0.0,
+			  "description": "Conductivity of the surrounding medium in S/m."
+			}
+		  },
+		  "description": "Electromagnetic properties of the surrounding medium."
+		}
+	  },
+	  "description": "Frequency settings for the simulation."
+	},
+	"physics": {
+	  "type": "object",
+	  "properties": {
+		"monostatic": {
+		  "type": "boolean",
+		  "default": true,
+		  "description": "Whether to compute monostatic RCS (same incident and scattered directions)."
+		},
+		"polarization_basis": {
+		  "type": "string",
+		  "enum": [
+			"linear",
+			"circular"
+		  ],
+		  "default": "linear",
+		  "description": "Basis for defining incident wave polarization."
+		},
+		"incident_amplitude": {
+		  "type": "number",
+		  "default": 1.0,
+		  "description": "Amplitude of the incident electric field."
+		}
+	  },
+	  "description": "Physical parameters for the simulation."
+	},
+	"angles": {
+	  "type": "object",
+	  "oneOf": [
+		{"required": ["list"]},
+		{"required": ["azimuth", "elevation"]}
+	  ],
+	  "properties": {
+		"azimuth": {
+		  "type": "object",
+		  "properties": {
+			"start": {
+			  "type": "number",
+			  "minimum": 0,
+			  "maximum": 360,
+			  "default": 0,
+			  "description": "Starting azimuth angle in degrees."
+			},
+			"stop": {
+			  "type": "number",
+			  "maximum": 360,
+			  "default": 360,
+			  "description": "Stopping azimuth angle in degrees."
+			},
+			"step": {
+			  "type": "number",
+			  "default": 1,
+			  "description": "Azimuth step size in degrees. Must be > 0."
+			}
+		  },
+		  "description": "Azimuth angle settings."
+		},
+		"elevation": {
+		  "type": "object",
+		  "properties": {
+			"start": {
+			  "type": "number",
+			  "minimum": -90,
+			  "default": -90,
+			  "description": "Starting elevation angle in degrees."
+			},
+			"stop": {
+			  "type": "number",
+			  "maximum": 90,
+			  "default": 90,
+			  "description": "Stopping elevation angle in degrees."
+			},
+			"step": {
+			  "type": "number",
+			  "minimum": 1,
+			  "default": 1,
+			  "description": "Elevation step size in degrees. Must be > 0."
+			}
+		  },
+		  "description": "Elevation angle settings."
+		},
+		"list": {
+		  "type": "array",
+		  "items": {
+			"type": "array",
+			"items": {
+			  "type": "number"
+			},
+			"minItems": 2,
+			"maxItems": 2,
+			"description": "[azimuth, elevation] pair in degrees."
+		  },
+		  "description": "Explicit list of [azimuth, elevation] angle pairs in degrees."
+		},
+		"coarse_refine": {
+		  "type": "object",
+		  "properties": {
+			"coarse_step": {
+			  "type": "number",
+			  "default": 5,
+			  "description": "Initial coarse step size in degrees."
+			},
+			"refine_step": {
+			  "type": "number",
+			  "default": 1,
+			  "description": "Refined step size in degrees."
+			},
+			"peak_window_deg": {
+			  "type": "number",
+			  "default": 10,
+			  "description": "Window size around detected peaks to refine."
+			},
+			"peak_threshold_dB": {
+			  "type": "number",
+			  "default": 3,
+			  "description": "Threshold in dB above local average to consider a peak."
+			}
+		  },
+		  "description": "Settings for coarse-to-fine angle refinement."
+		},
+		"interpolate_mode": {
+		  "type": "string",
+		  "enum": [
+			"linear",
+			"spherical"
+		  ],
+		  "default": "linear",
+		  "description": "Method to interpolate RCS values between computed angles."
+		},
+		"parallel_batch_size": {
+		  "type": "integer",
+		  "default": 4096,
+		  "description": "Number of angles to process in parallel batches."
+		}
+	  },
+	  "description": "Angle settings for the simulation."
+	},
+	"solver": {
+	  "type": "object",
+	  "required": [
+		"type"
+	  ],
+	  "properties": {
+		"type": {
+		  "type": "string",
+		  "enum": [
+			"PO",
+			"MoM",
+			"Hybrid"
+		  ],
+		  "default": "PO",
+		  "description": "Type of electromagnetic solver to use."
+		},
+		"precision": {
+		  "type": "string",
+		  "enum": [
+			"float32",
+			"float64"
+		  ],
+		  "default": "float64",
+		  "description": "Floating point precision for computations."
+		},
+		"rcs_units": {
+		  "type": "string",
+		  "enum": [
+			"dBsm",
+			"sqm"
+		  ],
+		  "default": "dBsm",
+		  "description": "Units for RCS output."
+		},
+		"po_options": {
+		  "type": "object",
+		  "properties": {
+			"edge_correction": {
+			  "type": "string",
+			  "enum": [
+				"none",
+				"PTD-lite",
+				"PTD-full"
+			  ],
+			  "default": "PTD-full",
+			  "description": "Type of edge diffraction correction to apply in PO using PTD."
+			},
+			"curvature_correction": {
+			  "type": "boolean",
+			  "default": true,
+			  "description": "Whether to apply curvature correction in PO."
+			},
+			"shadowing": {
+			  "type": "boolean",
+			  "default": true,
+			  "description": "Whether to account for shadowing in PO using SBR."
+			},
+			"illumination_model": {
+			  "type": "string",
+			  "enum": [
+				"hard",
+				"soft"
+			  ],
+			  "default": "soft",
+			  "description": "Type of illumination model to use in PO."
+			}
+		  },
+		  "description": "Options specific to the Physical Optics (PO) solver."
+		},
+		"mom_options": {
+		  "type": "object",
+		  "properties": {
+			"equation": {
+			  "type": "string",
+			  "enum": [
+				"EFIE",
+				"MFIE",
+				"CFIE"
+			  ],
+			  "default": "EFIE",
+			  "description": "Type of integral equation to solve for MoM"
+			},
+			"basis": {
+			  "type": "string",
+			  "enum": [
+				"RWG",
+				"higher_order"
+			  ],
+			  "default": "RWG",
+			  "description": "Type of basis functions to use for MoM"
+			},
+			"engine": {
+			  "type": "string",
+			  "enum": [
+				"DENSE",
+				"HSS",
+				"FMM",
+				"MLFMM"
+			  ],
+			  "default": "MLFMM"
+			},
+			"iterative_solver": {
+			  "type": "string",
+			  "enum": [
+				"GMRES",
+				"BiCGStab"
+			  ],
+			  "default": "GMRES"
+			},
+			"tolerance": {
+			  "type": "number",
+			  "default": 1e-3,
+			  "description": "Convergence tolerance for the iterative solver."
+			},
+			"max_iterations": {
+			  "type": "integer",
+			  "default": 200,
+			  "minimum": 1,
+			  "description": "Maximum number of iterations for the iterative solver."
+			},
+			"reuse_matrix": {
+			  "type": "boolean",
+			  "default": true,
+			  "description": "Whether to reuse the system matrix for multiple frequencies if the mesh is unchanged."
+			},
+			"preconditioner": {
+			  "type": "string",
+			  "enum": [
+				"None",
+				"ILU",
+				"Block-Jacobi"
+			  ],
+			  "default": "ILU",
+			  "description": "Type of preconditioner to use for the iterative solver."
+			}
+		  },
+		  "description": "Options specific to the Method of Moments (MoM) solver."
+		},
+		"hybrid_options": {
+		  "type": "object",
+		  "properties": {
+			"mom_regions": {
+			  "type": "array",
+			  "items": {"type": "string"},
+			  "description": "List of part tags or region names assigned to MoM domain."
+			},
+			"coupling": {
+			  "type": "string",
+			  "enum": [
+				"one_way",
+				"two_way_iterative"
+			  ],
+			  "default": "one_way"
+			},
+			"max_coupling_iterations": {
+			  "type": "integer",
+			  "default": 3
+			}
+		  },
+		  "description": "Options specific to the Hybrid PO-MoM solver."
+		}
+	  },
+	  "description": "Solver settings for the simulation."
+	},
+	"polarization": {
+	  "type": "array",
+	  "items": {
+		"type": "string",
+		"enum": [
+		  "HH",
+		  "VV",
+		  "HV",
+		  "VH",
+		  "RHCP",
+		  "LHCP"
+		]
+	  },
+	  "default": [
+		"HH",
+		"VV"
+	  ],
+	  "description": "List of polarizations to compute."
+	},
+	"mesh": {
+	  "type": "object",
+	  "oneOf": [
+		{"required": ["lod"]},
+		{"required": ["global_h_over_lambda", "edges_h_over_lambda"]}
+	  ],
+	  "properties": {
+		"lod": {
+		  "type": "string",
+		  "enum": [
+			"low",
+			"medium",
+			"high",
+			"adaptive"
+		  ],
+		  "default": "adaptive",
+		  "description": "Level of detail for mesh generation."
+		},
+		"global_h_over_lambda": {
+		  "type": "number",
+		  "default": 0.1,
+		  "description": "Maximum panel size as a fraction of wavelength."
+		},
+		"smooth_body_h_over_lambda": {
+		  "type": "number",
+		  "default": 0.1666667,
+		  "description": "Panel size for smooth body regions as a fraction of wavelength."
+		},
+		"edges_h_over_lambda": {
+		  "type": "number",
+		  "default": 0.05,
+		  "description": "Panel size near edges as a fraction of wavelength."
+		},
+		"min_edge_length_m": {
+		  "type": "number",
+		  "default": 0.001,
+		  "description": "Minimum allowable edge length in model units to prevent over-refinement."
+		},
+		"max_edge_length_m": {
+		  "type": "number",
+		  "default": 1.0,
+		  "description": "Maximum allowable edge length in model units."
+		},
+		"higher_order_panels": {
+		  "type": "boolean",
+		  "default": false,
+		  "description": "Whether to use higher-order curved panels instead of flat triangles."
+		},
+		"curvature_threshold": {
+		  "type": "number",
+		  "default": 0.1,
+		  "description": "Threshold for curvature-based refinement."
+		},
+		"facet_limit": {
+		  "type": "integer",
+		  "default": 5000000,
+		  "description": "Maximum number of facets to allow in the mesh."
+		},
+		"transition_grading": {
+		  "type": "number",
+		  "default": 1.3,
+		  "description": "Grading factor for mesh size transitions."
+		},
+		"edge_strip_width_h_lambda": {
+		  "type": "number",
+		  "default": 0.5,
+		  "description": "Width of the edge refinement strip as a fraction of wavelength."
+		},
+		"symmetry_sector_deg": {
+		  "type": "number",
+		  "default": 0,
+		  "description": "Sector angle in degrees if using axial symmetry."
+		},
+		"quality_aspect_ratio_limit": {
+		  "type": "number",
+		  "default": 10,
+		  "description": "Maximum allowed aspect ratio for mesh elements."
+		}
+	  },
+	  "description": "Mesh generation and refinement settings."
+	},
+	"parallel": {
+	  "type": "object",
+	  "properties": {
+		"cpu_threads": {
+		  "type": "integer",
+		  "default": 8,
+		  "description": "Number of CPU threads to use for parallel processing."
+		},
+		"use_gpu": {
+		  "type": "boolean",
+		  "default": true,
+		  "description": "Whether to use GPU acceleration if available."
+		},
+		"gpu_device_index": {
+		  "type": "integer",
+		  "default": 0,
+		  "description": "Index of the GPU device to use if multiple are available."
+		},
+		"batch_directions": {
+		  "type": "integer",
+		  "default": 4096,
+		  "description": "Number of angles to process in each parallel batch."
+		},
+		"angle_scheduler": {
+		  "type": "string",
+		  "enum": [
+			"static",
+			"dynamic",
+			"mpi_farm"
+		  ],
+		  "default": "static",
+		  "description": "Strategy for scheduling angle computations in parallel."
+		},
+		"blas_backend": {
+		  "type": "string",
+		  "enum": [
+			"auto",
+			"MKL",
+			"OpenBLAS",
+			"cuBLAS"
+		  ],
+		  "default": "auto",
+		  "description": "BLAS library to use for linear algebra operations."
+		},
+		"max_memory_mb": {
+		  "type": "number",
+		  "default": 4096,
+		  "description": "Maximum memory to use in MB."
+		}
+	  },
+	  "description": "Parallel processing and hardware acceleration settings."
+	},
+	"output": {
+	  "type": "object",
+	  "required": [
+		"path"
+	  ],
+	  "properties": {
+		"path": {
+		  "type": "string",
+		  "default": "rcs_output.h5",
+		  "description": "Path to the output file."
+		},
+		"format": {
+		  "type": "string",
+		  "enum": [
+			"csv",
+			"hdf5",
+			"vtk",
+			"binary"
+		  ],
+		  "default": "hdf5",
+		  "description": "Output file format."
+		},
+		"fields": {
+		  "type": "array",
+		  "items": {
+			"type": "string",
+			"enum": [
+			  "azimuth",
+			  "elevation",
+			  "frequency",
+			  "polarization",
+			  "phase",
+			  "rcs_dBsm",
+			  "rcs_sqm",
+			  "real_E",
+			  "imag_E",
+			  "magnitude_E"
+			]
+		  },
+		  "default": [
+			"azimuth",
+			"elevation",
+			"frequency",
+			"polarization",
+			"phase",
+			"rcs_dBsm"
+		  ],
+		  "description": "List of data fields to include in the output. If `rcs_dBsm` and `rcs_sqm` are both chosen, units will follow `solver.rcs_units` setting."
+		},
+		"precision": {
+		  "type": "integer",
+		  "default": 6,
+		  "description": "Number of decimal places for floating point output."
+		},
+		"compression": {
+		  "type": "boolean",
+		  "default": false,
+		  "description": "Whether to compress the output file if supported."
+		},
+		"include_metadata": {
+		  "type": "boolean",
+		  "default": true,
+		  "description": "Whether to include metadata in the output file."
+		},
+		"hdf5_layout": {
+		  "type": "string",
+		  "enum": [
+			"3d_cube",
+			"flat_rows",
+			"separate_pols"
+		  ],
+		  "default": "3d_cube",
+		  "description": "Layout of datasets in HDF5 output."
+		}
+	  },
+	  "description": "Output file settings."
+	},
+	"run": {
+	  "type": "object",
+	  "properties": {
+		"checkpoint_every_n_angles": {
+		  "type": "integer",
+		  "default": 1000,
+		  "description": "Frequency of checkpointing in number of angles."
+		},
+		"resume_from_checkpoint": {
+		  "type": "string",
+		  "description": "Path to a checkpoint file to resume from."
+		},
+		"log_level": {
+		  "type": "string",
+		  "enum": [
+			"error",
+			"warn",
+			"info",
+			"debug"
+		  ],
+		  "default": "info",
+		  "description": "Logging verbosity level."
+		}
+	  },
+	  "description": "Runtime and logging settings."
+	}
+  },
+  "additionalProperties": false
+}
