@@ -1,0 +1,36 @@
+# StrikeCEM
+
+**StrikeCEM** (Strike Computational Electromagnetics) is a research and simulation framework for **computational
+electromagnetics (CEM)**, with applications in radar signature analysis, missile defense simulations, and physics-based
+modeling.
+
+The project focuses on modular, high-performance workflows for electromagnetic scattering problems, radar cross
+section (RCS) analysis.
+
+---
+
+## Features
+
+* Schema system for configuration and experiment reproducibility
+* Electromagnetic simulation workflows:
+    * Physical Optics (PO)
+    * Method of Moments (MoM)
+    * Hybrid techniques
+* GPU acceleration with CUDA
+* Advanced meshing engine:
+    * Adaptive mesh refinement
+    * Multi-resolution meshing
+    * Facet sizing based on wavelength (λ/10, λ/20, etc.)
+
+---
+
+## Schemas
+
+StrikeCEM uses JSON Schema for defining simulation configuration.
+* `config.schema.json` – core simulation setup.
+---
+
+## License
+StrikeCEM is released under the **GNU LGPL-3.0** license.  
+You are free to use, modify, and redistribute under the terms of the LGPL, while keeping modifications to StrikeCEM itself open-source.  
+See the [LICENSE](../LICENSE) file for the full text.
