@@ -31,7 +31,13 @@
 
 ## Consequences
 
-- Slice 1 (this): kernel + occlusion predicate + tests only.
+- Slice 1 (done): kernel + occlusion predicate + tests only.
+- Slice 2 (done): GO shadowing behind `ShadowOptions` (default off, no
+  CLI/schema changes). Reduction pins: lone plate and steep-dihedral
+  looks reproduce v1 PO bit-identically; stacked plates resolve exactly
+  to the upper plate alone. `lit_facets` counts truly illuminated
+  (facing and unoccluded) facets. O(n²) per unit marked in code; the
+  upgrade path is a BVH when meshes grow.
 - The `t_min` floor is absolute (1e-9 of the mesh bbox diagonal, computed
   by the caller from the mesh report); wavelength-relative flooring is
   the documented upgrade path if electrically tiny features ever arrive.

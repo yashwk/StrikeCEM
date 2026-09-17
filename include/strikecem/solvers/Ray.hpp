@@ -18,6 +18,12 @@ struct RayHit {
     double v = 0.0;
 };
 
+// GO shadowing switch. Off by default; enabled only via the solver API
+// until the schema unlocks shadowing (ADR-0004). No bounce logic here.
+struct ShadowOptions {
+    bool enabled = false;
+};
+
 // Nullopt on miss, parallel (|det| ~ 0), or degenerate triangle.
 // Accepts hits with t > t_min only.
 std::optional<RayHit> ray_triangle(const geom::Vec3d& origin, const geom::Vec3d& dir,

@@ -43,7 +43,7 @@ template <typename Real>
 PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                      const nlohmann::json& resolved, unsigned num_threads,
                      const std::vector<std::pair<uint32_t, uint32_t>>& units,
-                     const FringeOptions& fringe) {
+                     const FringeOptions& fringe, const ShadowOptions& shadow) {
     using C = std::complex<Real>;
     PoResult out;
     const auto& medium = resolved["frequency"]["medium"];
@@ -100,6 +100,22 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                static_cast<Real>(mesh.normals[t].y),
                                static_cast<Real>(mesh.normals[t].z)};
             if (!(dot(n, r_hat) > Real(0))) continue; // hard shadow: n.(-k_hat)
+            // GO shadowing (ADR-0004): skip facets occluded from the
+            // observer. lit counts truly illuminated facets below.
+            // ponytail: O(facets) occlusion per lit facet, O(n^2) per unit —
+            // fine for v1 scenes, the upgrade path is a BVH when meshes grow.
+            if (shadow.enabled) {
+                const geom::Vec3d center_d{static_cast<double>(centroid.x),
+                                           static_cast<double>(centroid.y),
+                                           static_cast<double>(centroid.z)};
+                const geom::Vec3d r_hat_d{static_cast<double>(r_hat.x),
+                                          static_cast<double>(r_hat.y),
+                                          static_cast<double>(r_hat.z)};
+                const geom::Vec3d diag = mesh.report.bbox_max - mesh.report.bbox_min;
+                if (occluded(mesh, center_d, r_hat_d, 2.0 * diag.length(),
+                             static_cast<uint32_t>(t)))
+                    continue;
+            }
             ++lit;
             const Real area = static_cast<Real>(mesh.areas[t]);
             const C ein_phase = std::exp(C(0, -k * dot(k_hat, centroid)));
@@ -210,7 +226,7 @@ std::vector<std::pair<uint32_t, uint32_t>> all_units(const SamplePlan& plan) {
 PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
                        const nlohmann::json& resolved,
                        const std::vector<std::pair<uint32_t, uint32_t>>& units,
-                       const FringeOptions& fringe) {
+                       const FringeOptions& fringe, const ShadowOptions& shadow) {
     const std::string precision = resolved["solver"].value("precision", "float64");
     const unsigned threads = resolved["execution"].value("cpu_threads", 1u);
     if (fringe.enabled) {
@@ -224,24 +240,25 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
         return cuda::solve_po_cuda_units(mesh, plan, resolved, device, units);
     }
     if (precision == "float32")
-        return solve_typed<float>(mesh, plan, resolved, threads, units, fringe);
-    return solve_typed<double>(mesh, plan, resolved, threads, units, fringe);
+        return solve_typed<float>(mesh, plan, resolved, threads, units, fringe, shadow);
+    return solve_typed<double>(mesh, plan, resolved, threads, units, fringe, shadow);
 }
 } // namespace
 
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,
-                  const nlohmann::json& resolved, const FringeOptions& fringe) {
+                  const nlohmann::json& resolved, const FringeOptions& fringe,
+                  const ShadowOptions& shadow) {
     std::vector<std::pair<uint32_t, uint32_t>> units;
     for (uint32_t fi = 0; fi < plan.frequencies_hz.size(); ++fi)
         for (uint32_t di = 0; di < plan.directions.size(); ++di) units.emplace_back(fi, di);
-    return solve_backend(mesh, plan, resolved, units, fringe);
+    return solve_backend(mesh, plan, resolved, units, fringe, shadow);
 }
 
 PoResult solve_po_units(const NormalizedMesh& mesh, const SamplePlan& plan,
                         const nlohmann::json& resolved,
                         const std::vector<std::pair<uint32_t, uint32_t>>& units,
-                        const FringeOptions& fringe) {
-    return solve_backend(mesh, plan, resolved, units, fringe);
+                        const FringeOptions& fringe, const ShadowOptions& shadow) {
+    return solve_backend(mesh, plan, resolved, units, fringe, shadow);
 }
 
 } // namespace strikecem

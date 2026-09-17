@@ -6,6 +6,7 @@
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
+#include "strikecem/solvers/Ray.hpp"
 
 namespace {
 
@@ -141,6 +142,75 @@ TEST(PoSolver, ConductivityWarns) {
     const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
     EXPECT_TRUE(strikecem::solve_po(c.mesh, plan, lossy).warnings.size() == 1);
     EXPECT_TRUE(strikecem::solve_po(c.mesh, plan, c.rc.value).warnings.empty());
+}
+
+// GO shadowing (ADR-0004 slice 2): occlusion-gated PO behind ShadowOptions.
+// Schema stays locked (shadowing const false); no CLI changes.
+TEST(PoSolver, ShadowReductionPlate) {
+    // Nothing to shadow on a lone plate: bit-identical to v1 PO.
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {45.0, -45.0}}, {"HH", "VV"});
+    const auto po = strikecem::solve_po(c.mesh, plan, c.rc.value);
+    const strikecem::ShadowOptions shadow{true};
+    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, shadow);
+    ASSERT_EQ(po.samples.size(), go.samples.size());
+    for (size_t i = 0; i < po.samples.size(); ++i) {
+        EXPECT_EQ(go.samples[i].scattering, po.samples[i].scattering);
+        EXPECT_EQ(go.samples[i].rcs_sqm, po.samples[i].rcs_sqm);
+        EXPECT_EQ(go.samples[i].lit_facets, po.samples[i].lit_facets);
+    }
+}
+
+TEST(PoSolver, ShadowReductionDihedral) {
+    // Steep Q1 look (az 0, el -78.5) lights all four facets with no
+    // occlusion: horizontal rays clear the vertical plate above z = 1 and
+    // vertical rays climb away from z = 0. Bit-identical to v1 PO.
+    const Case c = load_case("valid_dihedral.json");
+    const auto plan = make_plan({10e9}, {{0.0, -78.5}}, {"HH"});
+    const auto po = strikecem::solve_po(c.mesh, plan, c.rc.value);
+    ASSERT_EQ(po.samples[0].lit_facets, 4u);
+    const strikecem::ShadowOptions shadow{true};
+    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, shadow);
+    ASSERT_EQ(po.samples.size(), go.samples.size());
+    for (size_t i = 0; i < po.samples.size(); ++i)
+        EXPECT_EQ(go.samples[i].scattering, po.samples[i].scattering);
+}
+
+strikecem::NormalizedMesh stacked_plates() {
+    // 1x1 plate at z=1 (tris 0,1) over one at z=0 (tris 2,3), both normal
+    // +z: a look from +z lights all four by facing, but the lower pair
+    // sits in the upper plate's shadow.
+    strikecem::NormalizedMesh m;
+    m.vertices = {{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1},
+                  {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    m.triangles = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7}};
+    m.normals = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}};
+    m.areas.assign(4, 0.5);
+    m.report.bbox_min = {0, 0, 0};
+    m.report.bbox_max = {1, 1, 1};
+    return m;
+}
+
+TEST(PoSolver, ShadowBlocksLowerPlate) {
+    const Case c = load_case("valid_minimal.json"); // resolved physics/medium only
+    const auto mesh = stacked_plates();
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
+    const auto po = strikecem::solve_po(mesh, plan, c.rc.value);
+    ASSERT_EQ(po.samples[0].lit_facets, 4u);
+    const strikecem::ShadowOptions shadow{true};
+    const auto go = strikecem::solve_po(mesh, plan, c.rc.value, {}, shadow);
+    EXPECT_EQ(go.samples[0].lit_facets, 2u); // only the upper pair is lit
+    EXPECT_LT(std::abs(go.samples[0].scattering), std::abs(po.samples[0].scattering));
+    // Exact: shadowed stack == upper plate alone without shadowing.
+    strikecem::NormalizedMesh upper;
+    upper.vertices = {{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+    upper.triangles = {{0, 2, 1}, {0, 3, 2}};
+    upper.normals = {{0, 0, 1}, {0, 0, 1}};
+    upper.areas.assign(2, 0.5);
+    upper.report.bbox_min = {0, 0, 1};
+    upper.report.bbox_max = {1, 1, 1};
+    const auto ref = strikecem::solve_po(upper, plan, c.rc.value);
+    EXPECT_EQ(go.samples[0].scattering, ref.samples[0].scattering);
 }
 
 } // namespace
