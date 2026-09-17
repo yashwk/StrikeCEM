@@ -7,6 +7,8 @@
 
 #include "strikecem/solvers/UtdWedge.hpp"
 
+#include <array>
+
 namespace strikecem {
 namespace {
 
@@ -107,6 +109,50 @@ std::optional<std::complex<double>> fringe_amplitude(const MeshEdge& edge, doubl
     const auto integral = along_edge_integral(edge, k, s_hat, r_hat); // throws on zero length
     const auto d = utd_coefficient(kt, edge.length, n, ang.phi, ang.phi_prime);
     return (pol == 's' ? d.soft : d.hard) * integral;
+}
+
+std::optional<std::array<std::complex<double>, 3>> fringe_vector(
+    const MeshEdge& edge, double k, const geom::Vec3d& s_hat, const geom::Vec3d& r_hat,
+    const std::array<std::complex<double>, 3>& e_inc) {
+    for (const auto& c : e_inc)
+        if (!std::isfinite(c.real() + c.imag())) throw std::invalid_argument("e_inc not finite");
+    if (!(k > 0.0) || !std::isfinite(k))
+        throw std::invalid_argument("wavenumber must be positive and finite");
+    if (!is_unit(s_hat) || !is_unit(r_hat))
+        throw std::invalid_argument("edge fringe directions must be unit vectors");
+    const double t_len = edge.tangent.length();
+    if (!(t_len > 0.0)) throw std::invalid_argument("edge tangent must be non-zero");
+    if (!(edge.length > 0.0)) throw std::invalid_argument("edge length must be positive");
+    const TransverseAngles ang =
+        edge.boundary ? edge_transverse_angles(edge, s_hat, r_hat)
+                      : wedge_transverse_angles(edge, s_hat, r_hat);
+    if (!ang.valid) return std::nullopt;
+    const geom::Vec3d t = edge.tangent * (1.0 / t_len);
+    const double n = edge.boundary ? 2.0 : edge.wedge_n;
+    const auto d = utd_coefficient(k * ang.sin_beta0, edge.length, n, ang.phi, ang.phi_prime);
+    const auto integral = along_edge_integral(edge, k, s_hat, r_hat);
+    const std::complex<double> cs = d.soft * integral, ch = d.hard * integral;
+    const std::complex<double> epar = e_inc[0] * t.x + e_inc[1] * t.y + e_inc[2] * t.z;
+    // Transverse remainder, projected radiative (Pt(v) = v - (v.r) r).
+    const std::array<std::complex<double>, 3> eperp = {
+        e_inc[0] - epar * t.x, e_inc[1] - epar * t.y, e_inc[2] - epar * t.z};
+    const double rx = r_hat.x, ry = r_hat.y, rz = r_hat.z;
+    const std::complex<double> along = eperp[0] * rx + eperp[1] * ry + eperp[2] * rz;
+    std::array<std::complex<double>, 3> out;
+    const std::complex<double> cpar = cs * epar, cperp[3] = {ch * (eperp[0] - along * rx),
+                                                             ch * (eperp[1] - along * ry),
+                                                             ch * (eperp[2] - along * rz)};
+    out[0] = cpar * t.x + cperp[0];
+    out[1] = cpar * t.y + cperp[1];
+    out[2] = cpar * t.z + cperp[2];
+    // Far field is transverse: project the remainder radiative. Exact
+    // no-op at normal incidence (t . r = 0, eperp . r = 0 there); the
+    // oblique remainder rides with the D2 calibration benchmark.
+    const std::complex<double> rad = out[0] * rx + out[1] * ry + out[2] * rz;
+    out[0] -= rad * rx;
+    out[1] -= rad * ry;
+    out[2] -= rad * rz;
+    return out;
 }
 
 std::complex<double> along_edge_integral(const MeshEdge& edge, double k,

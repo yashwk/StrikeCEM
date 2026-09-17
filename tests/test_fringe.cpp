@@ -1,6 +1,7 @@
-// 3D fringe geometry tests (ADR-0003 slice C): face0_dir field, rim
-// frame at broadside/edge-on, integral vs quadrature, sinc nulls,
-// bounds, and deferred-cone flags. No amplitude physics yet.
+// 3D fringe geometry tests (ADR-0003 slices C/D1/D2a): face0_dir/face1_dir
+// fields, rim/wedge frames, integral vs quadrature, sinc nulls, fringe
+// amplitude identity, and vector (per-transmit) decomposition.
+#include <array>
 #include <cmath>
 #include <complex>
 #include <gtest/gtest.h>
@@ -347,6 +348,88 @@ TEST(Fringe, FringeNulloptEndOn) {
     EXPECT_THROW(strikecem::fringe_amplitude(e, 2.0 * kPi, s, r, 'x'), std::invalid_argument);
     EXPECT_THROW(strikecem::fringe_amplitude(e, 0.0, s, r, 's'), std::invalid_argument);
 }
+TEST(Fringe, VectorParallelDecomposition) {
+    // Normal incidence, E along the edge: pure soft problem, F = Fs * t.
+    const auto mesh = load_mesh("valid_minimal.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const double k = 2.0 * kPi;
+    const geom::Vec3d s(0, 0, -1), r(0, 0, 1);
+    for (const auto& e : model.edges) {
+        const std::array<std::complex<double>, 3> ein = {e.tangent.x, e.tangent.y, e.tangent.z};
+        const auto f = strikecem::fringe_vector(e, k, s, r, ein);
+        const auto fs = strikecem::fringe_amplitude(e, k, s, r, 's');
+        ASSERT_TRUE(f.has_value() && fs.has_value());
+        EXPECT_NEAR(std::abs((*f)[0] - *fs * e.tangent.x), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs((*f)[1] - *fs * e.tangent.y), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs((*f)[2] - *fs * e.tangent.z), 0.0, 1e-12);
+    }
+}
+
+TEST(Fringe, VectorPerpDecomposition) {
+    // Normal incidence, E transverse to the edge: pure hard problem.
+    const auto mesh = load_mesh("valid_minimal.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const double k = 2.0 * kPi;
+    const geom::Vec3d s(0, 0, -1), r(0, 0, 1);
+    for (const auto& e : model.edges) {
+        const geom::Vec3d et = geom::cross(s, e.tangent).normalized();
+        const std::array<std::complex<double>, 3> ein = {et.x, et.y, et.z};
+        const auto f = strikecem::fringe_vector(e, k, s, r, ein);
+        const auto fh = strikecem::fringe_amplitude(e, k, s, r, 'h');
+        ASSERT_TRUE(f.has_value() && fh.has_value());
+        EXPECT_NEAR(std::abs((*f)[0] - *fh * et.x), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs((*f)[1] - *fh * et.y), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs((*f)[2] - *fh * et.z), 0.0, 1e-12);
+    }
+}
+
+TEST(Fringe, VectorRadiativeAndLinear) {
+    const auto mesh = load_mesh("valid_minimal.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const double k = 2.0 * kPi;
+    const geom::Vec3d s(0, 0, -1), r = unit(0.6, 0.0, 0.8);
+    const auto& e = model.edges[0];
+    const std::array<std::complex<double>, 3> e1 = {1.0, 0.0, 0.0};
+    const std::array<std::complex<double>, 3> e2 = {{0.0, 1.0, 0.0}};
+    const auto f1 = strikecem::fringe_vector(e, k, s, r, e1);
+    const auto f2 = strikecem::fringe_vector(e, k, s, r, e2);
+    ASSERT_TRUE(f1.has_value() && f2.has_value());
+    // Far field stays transverse to the observer ray, even oblique.
+    for (const auto& f : {*f1, *f2})
+        EXPECT_NEAR(std::abs(f[0] * r.x + f[1] * r.y + f[2] * r.z), 0.0, 1e-12);
+    // Linearity in the incident field (pins the split assembly).
+    const std::complex<double> a(0.5, 0.0), b(0.0, 1.0);
+    const std::array<std::complex<double>, 3> emix = {a * e1[0] + b * e2[0],
+                                                      a * e1[1] + b * e2[1],
+                                                      a * e1[2] + b * e2[2]};
+    const auto fm = strikecem::fringe_vector(e, k, s, r, emix);
+    ASSERT_TRUE(fm.has_value());
+    for (int i = 0; i < 3; ++i)
+        EXPECT_NEAR(std::abs((*fm)[i] - (a * (*f1)[i] + b * (*f2)[i])), 0.0, 1e-12);
+    // Complex (circular-like) incident field: finite and transverse.
+    const std::array<std::complex<double>, 3> ecirc = {
+        std::complex<double>(1.0 / std::sqrt(2.0), 0.0), std::complex<double>(0.0, 1.0 / std::sqrt(2.0)),
+        std::complex<double>(0.0, 0.0)};
+    const auto fc = strikecem::fringe_vector(e, k, s, r, ecirc);
+    ASSERT_TRUE(fc.has_value());
+    EXPECT_TRUE(std::isfinite(fc->at(0).real() + fc->at(2).imag()));
+    EXPECT_NEAR(std::abs((*fc)[0] * r.x + (*fc)[1] * r.y + (*fc)[2] * r.z), 0.0, 1e-12);
+}
+
+TEST(Fringe, VectorNulloptEndOn) {
+    const auto mesh = load_mesh("valid_minimal.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const geom::Vec3d s(1, 0, 0), r(-1, 0, 0);
+    const std::array<std::complex<double>, 3> ein = {0.0, 0.0, 1.0};
+    bool found = false;
+    for (const auto& e : model.edges) {
+        if (std::abs(e.tangent.x) < 0.9) continue;
+        EXPECT_FALSE(strikecem::fringe_vector(e, 2.0 * kPi, s, r, ein).has_value());
+        found = true;
+    }
+    EXPECT_TRUE(found);
+}
+
 TEST(Fringe, BadInputsThrow) {
     const auto e = synthetic_edge(1.0);
     const geom::Vec3d s(0, 0, -1), r(0, 0, 1), bad(0, 0, 2);

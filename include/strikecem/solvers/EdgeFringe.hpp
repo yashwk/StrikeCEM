@@ -63,6 +63,17 @@ std::optional<std::complex<double>> fringe_amplitude(const MeshEdge& edge, doubl
                                                      const geom::Vec3d& s_hat,
                                                      const geom::Vec3d& r_hat, char pol);
 
+// Scattered vector amplitude for incident E_inc (any complex amplitude;
+// e0 scaling passes through linearly): F = Pt[Ds (E.t) t + Dh Pt(E_perp)],
+// E_perp = E - (E.t) t, Pt(v) = v - (v.r) r. The parallel/transverse
+// split is exact at normal incidence (translation invariance; both
+// projectors are no-ops there); the outer projector keeps the oblique
+// remainder radiative, in the ADR-0001 projector spirit. nullopt when
+// the frame is invalid; throws like fringe_amplitude otherwise.
+std::optional<std::array<std::complex<double>, 3>> fringe_vector(
+    const MeshEdge& edge, double k, const geom::Vec3d& s_hat, const geom::Vec3d& r_hat,
+    const std::array<std::complex<double>, 3>& e_inc);
+
 // Along-edge line integral I = int_edge e^{jk(r_hat - s_hat).r'} dl'
 // = e^{jk(r_hat - s_hat).c} L sinc(k L a / 2), a = (r_hat - s_hat).t_hat,
 // c = edge center. Phase convention matches PhysicalOptics (outgoing
