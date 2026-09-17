@@ -1,7 +1,7 @@
 # ADR-0001 — PO far-field uses the transverse projector r̂×(r̂×J)
 
-- **Status:** accepted (implementation); diverges from design-doc SPEC §3
-  until the design docs are amended
+- **Status:** accepted (implementation); design docs amended 2026-09-18
+  (SPEC §3, IMPLEMENTATION §7.3, FULL §6.1) — no longer diverging
 - **Date:** 2026-09-17
 - **Context:** the design documents state the v1 PO facet contribution as
   `F_m = (jkη/4π)·A·[r̂×J_m]·e^{+jkr̂·rc}` (SPEC §3, IMPLEMENTATION §7.3).
@@ -36,9 +36,7 @@ behavior and fails under the design-doc form.
 
 ## Consequences
 
-- This implementation intentionally diverges from design-doc SPEC §3 and
-  IMPLEMENTATION §7.3 until those are amended upstream.
+- Implementation and design docs agree on the double-cross form since
+  2026-09-18; the single-cross form survives nowhere.
 - Golden tests encode the corrected behavior; do not "fix" them to match
   the single-cross form.
-- If upstream keeps the single-cross form, this ADR must be revisited —
-  the two forms disagree on every off-trivial channel assignment.

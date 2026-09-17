@@ -213,4 +213,19 @@ TEST(PoSolver, ShadowBlocksLowerPlate) {
     EXPECT_EQ(go.samples[0].scattering, ref.samples[0].scattering);
 }
 
+TEST(PoSolver, ShadowWarnsGoLimitations) {
+    // FULL §9.4: GO shadowing must warn that it does not replace
+    // diffraction and misses multi-bounce energy.
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
+    const auto po = strikecem::solve_po(c.mesh, plan, c.rc.value);
+    for (const auto& w : po.warnings) EXPECT_EQ(w.find("GO shadowing"), std::string::npos);
+    const strikecem::ShadowOptions shadow{true};
+    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, shadow);
+    bool found = false;
+    for (const auto& w : go.warnings)
+        if (w.find("GO shadowing") != std::string::npos) found = true;
+    EXPECT_TRUE(found);
+}
+
 } // namespace

@@ -71,3 +71,18 @@
   is rejected by the existing identity check. All three ADR benchmarks
   pass (Sommerfeld exact, plate rim, dihedral valley): PTD/UTD track
   complete, schema unlocked.
+- Roadmap placement (2026-09-18 reconciliation): the SPEC roadmap puts
+  PTD/UTD in v2.0, after v1.2 Materials + GO/SBR. This track shipped
+  first as a SPEC §12 backward-compatible 1.0 extension (monostatic
+  only, so no bistatic leak), not as a v2.0 capability. Materials is
+  still untouched.
+- Naming map: schema value `fringe` is the FULL §10.2 fringe-field
+  concept evaluated with FULL §10.3 UTD coefficients (KP, soft/hard).
+  It is neither Michaeli-current PTD-lite nor a full PTD formulation;
+  the neutral name stays to avoid claiming either.
+- Refusal timing: CUDA + fringe is refused at solve time (exit 4,
+  before touching the device), not at validate time. The integration
+  doc asks validate to catch unsupported features; here the combination
+  is schema-valid but backend-limited, and run-time refusal with an
+  actionable error satisfies the fail-closed intent with a single
+  code path.

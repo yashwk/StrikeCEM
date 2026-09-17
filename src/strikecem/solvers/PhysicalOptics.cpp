@@ -6,10 +6,12 @@
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <mutex>
 #include <numbers>
+#include <string>
 #include <thread>
 
 #include "strikecem/solvers/Projection.hpp"
@@ -51,6 +53,12 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const double mu_r = medium["mu_r"].get<double>();
     if (medium["sigma"].get<double>() != 0.0)
         out.warnings.push_back("medium conductivity is ignored in v1 PO");
+    // FULL §9.4: GO shadowing must warn that it does not replace
+    // diffraction and misses multi-bounce energy.
+    if (shadow.enabled)
+        out.warnings.push_back(
+            "GO shadowing enabled: hard shadow boundaries without edge diffraction; "
+            "multi-bounce not included");
     const double eta = kEta0 * std::sqrt(mu_r / eps_r);
     const double e0 = resolved["physics"]["incident_amplitude"].get<double>();
 
@@ -59,6 +67,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const size_t npol = plan.polarizations.size();
     const size_t nunits = units.size();
     out.samples.resize(nunits * npol);
+    std::atomic<size_t> fringe_skipped{0};
 
     auto run_unit = [&](size_t pos) {
         const size_t fi = units[pos].first;
@@ -151,7 +160,11 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                         std::complex<double>(static_cast<double>(tx_e[tx].y) / e0_d, 0.0),
                         std::complex<double>(static_cast<double>(tx_e[tx].z) / e0_d, 0.0)};
                     const auto fv = fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_unit);
-                    if (!fv) continue; // end-on edge: no transverse frame
+                    if (!fv) {
+                        // Frame validity is tx-independent: count once per edge-unit.
+                        if (tx == 0) ++fringe_skipped; // FULL §10.3: report skipped wedges
+                        continue; // end-on edge: no transverse frame
+                    }
                     for (int i = 0; i < 3; ++i)
                         f_tx[tx][i] +=
                             C(static_cast<Real>((*fv)[i].real() * e0_d),
@@ -209,6 +222,10 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         for (auto& t : threads) t.join();
         if (first_error) std::rethrow_exception(first_error);
     }
+    if (fringe.enabled && fringe_skipped.load() > 0)
+        out.warnings.push_back("fringe correction skipped " +
+                               std::to_string(fringe_skipped.load()) +
+                               " edge-sample(s): no transverse frame (end-on incidence)");
     return out;
 }
 

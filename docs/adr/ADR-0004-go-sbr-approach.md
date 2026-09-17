@@ -20,14 +20,20 @@
    test required: with nothing shadowed, results must equal v1 PO
    exactly (the new path reproduces the old numbers, not approximately).
 3. Two-bounce specular chains third, benchmarked against the analytic
-   square-dihedral double-bounce RCS (sigma = 8·pi·a²·b²/lambda²).
-   Trihedral and curved-surface divergence are explicitly out of scope
-   for this track (documented future work, not placeholders).
+   square-dihedral double-bounce RCS (sigma = 8·pi·a²·b²/lambda²) and
+   the analytic trihedral return (FULL §9.4 requires both; trihedral is
+   therefore in scope for the unlock slice, curved-surface divergence
+   stays out as documented future work).
 4. Benchmark order: kernel unit cases, shadowing reduction + shadowed
-   plate, dihedral analytic. Schema keeps `shadowing: const false` and
-   gains no bounce knob until all three pass; only then is a
-   backward-compatible extension proposed. No schema change in these
-   slices.
+   plate, dihedral + trihedral analytic. Schema keeps
+   `shadowing: const false` and gains no bounce knob until all pass;
+   only then is a backward-compatible extension proposed. No schema
+   change in these slices.
+5. Unlock additionally requires (IMPLEMENTATION §12.3, FULL §9): a BVH
+   (or equivalent) acceleration structure replacing the O(n²) scan,
+   ray/bounce provenance metadata (density, max bounces, thresholds),
+   and a GO output warning identifying edge/shadow limitations
+   (FULL §9.4: GO does not replace diffraction).
 
 ## Consequences
 

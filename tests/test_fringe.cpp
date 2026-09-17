@@ -546,6 +546,24 @@ TEST(Fringe, SolverGuards) {
     // not enter the device runtime or LSan flags libcuda's own init.)
 }
 
+TEST(Fringe, SkippedEdgesWarned) {
+    // End-on rims contribute nothing and must be counted (FULL §10.3),
+    // not silently dropped: plate edge-on skips exactly the 2 x-rims.
+    const std::string config = fixture("valid_minimal.json");
+    auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
+    const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+    const auto model = strikecem::extract_edges(mesh);
+    const strikecem::FringeOptions on{true, &model};
+    const auto edge_on = strikecem::solve_po(mesh, make_fringe_plan({10e9}, {{0.0, 0.0}}, {"HH"}),
+                                             rc.value, on);
+    bool found = false;
+    for (const auto& w : edge_on.warnings)
+        if (w.find("skipped 2 edge-sample(s)") != std::string::npos) found = true;
+    EXPECT_TRUE(found);
+    const auto broad = strikecem::solve_po(mesh, make_fringe_plan({10e9}, {{0.0, -90.0}}, {"HH"}),
+                                           rc.value, on);
+    for (const auto& w : broad.warnings) EXPECT_EQ(w.find("skipped"), std::string::npos);
+}
 TEST(Fringe, SolverFloat32Smoke) {
     const std::string config = fixture("valid_minimal.json");
     auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
