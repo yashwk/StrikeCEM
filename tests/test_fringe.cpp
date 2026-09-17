@@ -532,15 +532,8 @@ TEST(Fringe, SolverGuards) {
     rc_cuda.value["execution"]["accelerator"] = "cuda";
     const strikecem::FringeOptions on{true, &model};
     EXPECT_THROW(strikecem::solve_po(mesh, plan, rc_cuda.value, on), strikecem::cuda::CudaError);
-    // Fringe off + CUDA routes to the device path when one answers, else
-    // the stub throws: accept either, the fringe flag changes nothing.
-    const strikecem::FringeOptions off{false, &model};
-    try {
-        const auto gpu = strikecem::solve_po(mesh, plan, rc_cuda.value, off);
-        EXPECT_EQ(gpu.samples.size(), 1u);
-    } catch (const strikecem::cuda::CudaError&) {
-        EXPECT_FALSE(strikecem::cuda::cuda_available());
-    }
+    // (Fringe-off CUDA routing is the GPU suite's domain; this test must
+    // not enter the device runtime or LSan flags libcuda's own init.)
 }
 
 TEST(Fringe, SolverFloat32Smoke) {
