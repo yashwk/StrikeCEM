@@ -42,7 +42,7 @@
   CLI/schema changes). Reduction pins: lone plate and steep-dihedral
   looks reproduce v1 PO bit-identically; stacked plates resolve exactly
   to the upper plate alone. `lit_facets` counts truly illuminated
-  (facing and unoccluded) facets. O(n²) per unit marked in code; the
+  (facing and unoccluded) facets. O(n²) per unit; the
   upgrade path is a BVH when meshes grow.
 - The `t_min` floor is absolute (1e-9 of the mesh bbox diagonal, computed
   by the caller from the mesh report); wavelength-relative flooring is

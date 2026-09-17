@@ -1,5 +1,3 @@
-// Edge model tests (ADR-0003): rim/crease selection, wedge parameter,
-// convexity, threshold policy, and determinism.
 #include <cmath>
 #include <gtest/gtest.h>
 
@@ -21,7 +19,7 @@ TEST(Edges, PlateHasRimsOnly) {
     const auto mesh = load_mesh("valid_minimal.json");
     const auto model = strikecem::extract_edges(mesh);
     ASSERT_EQ(model.edges.size(), 4u);
-    EXPECT_EQ(model.smooth_skipped, 1u); // coplanar diagonal
+    EXPECT_EQ(model.smooth_skipped, 1u);
     for (const auto& e : model.edges) {
         EXPECT_TRUE(e.boundary);
         EXPECT_DOUBLE_EQ(e.wedge_n, 2.0);
@@ -36,7 +34,7 @@ TEST(Edges, CubeHasTwelveConvexCreases) {
     const auto mesh = load_mesh("valid_cube.json");
     const auto model = strikecem::extract_edges(mesh);
     ASSERT_EQ(model.edges.size(), 12u);
-    EXPECT_EQ(model.smooth_skipped, 6u); // face diagonals
+    EXPECT_EQ(model.smooth_skipped, 6u);
     for (const auto& e : model.edges) {
         EXPECT_FALSE(e.boundary);
         EXPECT_TRUE(e.convex);
@@ -75,7 +73,7 @@ TEST(Edges, ThresholdSuppressesCreases) {
     const auto mesh = load_mesh("valid_cube.json");
     const auto model = strikecem::extract_edges(mesh, 2.0);
     EXPECT_TRUE(model.edges.empty());
-    EXPECT_EQ(model.smooth_skipped, 18u); // 12 creases + 6 diagonals
+    EXPECT_EQ(model.smooth_skipped, 18u);
 }
 
 TEST(Edges, DeterministicAcrossRuns) {
@@ -99,4 +97,4 @@ TEST(Edges, NonManifoldThrows) {
     EXPECT_THROW(strikecem::extract_edges(mesh), std::invalid_argument);
 }
 
-} // namespace
+}

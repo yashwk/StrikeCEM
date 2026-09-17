@@ -1,6 +1,3 @@
-// 3D fringe geometry tests (ADR-0003 slices C/D1/D2a): face0_dir/face1_dir
-// fields, rim/wedge frames, integral vs quadrature, sinc nulls, fringe
-// amplitude identity, and vector (per-transmit) decomposition.
 #include <array>
 #include <cmath>
 #include <complex>
@@ -62,7 +59,6 @@ TEST(Fringe, Face0DirPointsIntoFace) {
         for (const auto& e : model.edges) {
             EXPECT_NEAR(e.face0_dir.length(), 1.0, 1e-12) << name;
             EXPECT_NEAR(geom::dot(e.face0_dir, e.tangent), 0.0, 1e-12) << name;
-            // Into face tri0: positive dot with centroid-minus-midpoint.
             const auto& ft = mesh.triangles[static_cast<uint32_t>(e.tri0)];
             const geom::Vec3d c =
                 (mesh.vertices[ft[0]] + mesh.vertices[ft[1]] + mesh.vertices[ft[2]]) * (1.0 / 3.0);
@@ -73,8 +69,6 @@ TEST(Fringe, Face0DirPointsIntoFace) {
 }
 
 TEST(Fringe, BroadsideBackscatterSymmetric) {
-    // Plate in z=0, wave traveling -z, observer +z: every rim sees the
-    // same transverse geometry, integral = L (centers are in-plane).
     const auto mesh = load_mesh("valid_minimal.json");
     const auto model = strikecem::extract_edges(mesh);
     ASSERT_EQ(model.edges.size(), 4u);
@@ -83,7 +77,7 @@ TEST(Fringe, BroadsideBackscatterSymmetric) {
         const auto ang = strikecem::edge_transverse_angles(e, s, r);
         ASSERT_TRUE(ang.valid);
         EXPECT_NEAR(ang.sin_beta0, 1.0, 1e-12);
-        EXPECT_NEAR(ang.phi, ang.phi_prime, 1e-12); // backscatter: same ray
+        EXPECT_NEAR(ang.phi, ang.phi_prime, 1e-12);
         const auto integral = strikecem::along_edge_integral(e, 2.0 * kPi, s, r);
         EXPECT_NEAR(integral.real(), 1.0, 1e-12);
         EXPECT_NEAR(integral.imag(), 0.0, 1e-12);
@@ -91,14 +85,12 @@ TEST(Fringe, BroadsideBackscatterSymmetric) {
 }
 
 TEST(Fringe, IntegralMatchesQuadrature) {
-    // Independent cross-check: closed-form sinc vs brute-force Simpson of
-    // the line integral (pins phase convention and null structure).
     const auto e = synthetic_edge(1.7);
     const double k = 4.0;
     const geom::Vec3d s(0, 0, -1), r = unit(0.6, 0.0, 0.8);
     const geom::Vec3d d = r - s;
     const geom::Vec3d c = (e.p0 + e.p1) * 0.5;
-    const int n = 4096; // even
+    const int n = 4096;
     const double h = e.length / n;
     std::complex<double> num{0.0, 0.0};
     for (int i = 0; i <= n; ++i) {
@@ -113,9 +105,8 @@ TEST(Fringe, IntegralMatchesQuadrature) {
 }
 
 TEST(Fringe, SincNullAtPredictedAngle) {
-    // Monostatic, kL/2 * a = pi with a = (r-s).t = 1: first sinc null.
     const auto e = synthetic_edge(1.0);
-    const double k = 2.0 * kPi; // L = lambda
+    const double k = 2.0 * kPi;
     const geom::Vec3d s = unit(-0.5, 0.0, -std::sqrt(3.0) / 2.0);
     const geom::Vec3d r = s * -1.0;
     const auto integral = strikecem::along_edge_integral(e, k, s, r);
@@ -130,7 +121,6 @@ TEST(Fringe, BoundAndLengthScaling) {
          {geom::Vec3d(0, 0, 1), unit(0.6, 0.0, 0.8), unit(-0.5, 0.5, 0.7071067811865476)}) {
         EXPECT_LE(std::abs(strikecem::along_edge_integral(e1, 2.0 * kPi, s, r)),
                   e1.length * (1.0 + 1e-12));
-        // Broadside doubling: same center phase, sinc = 1 both times.
         const geom::Vec3d rb(0, 0, 1);
         if (r.x == 0.0 && r.y == 0.0) {
             const auto i1 = strikecem::along_edge_integral(e1, 2.0 * kPi, s, rb);
@@ -144,7 +134,7 @@ TEST(Fringe, BoundAndLengthScaling) {
 TEST(Fringe, EndOnInvalidButIntegralDefined) {
     const auto mesh = load_mesh("valid_minimal.json");
     const auto model = strikecem::extract_edges(mesh);
-    const geom::Vec3d s(1, 0, 0), r(-1, 0, 0); // travel along +x
+    const geom::Vec3d s(1, 0, 0), r(-1, 0, 0);
     bool found_end_on = false;
     for (const auto& e : model.edges) {
         if (std::abs(e.tangent.x) < 0.9) continue;
@@ -169,11 +159,6 @@ TEST(Fringe, NonRimInvalidButIntegralDefined) {
 }
 
 TEST(Fringe, EdgeOnPlateAssembly) {
-    // Plate-rim structural benchmark (ADR-0003 order: plate first).
-    // Incidence in-plane: PO lights nothing (all n.r_hat = 0, and the
-    // solver's hard-shadow rule needs n.r_hat > 0), while the two rims
-    // transverse to incidence stay valid with finite KP coefficients —
-    // the fringe is the entire return there.
     const auto mesh = load_mesh("valid_minimal.json");
     const auto model = strikecem::extract_edges(mesh);
     const geom::Vec3d s(1, 0, 0), r(-1, 0, 0);
@@ -188,14 +173,13 @@ TEST(Fringe, EdgeOnPlateAssembly) {
         EXPECT_NEAR(ang.phi, ang.phi_prime, 1e-12);
         if (std::abs(ang.phi) < 1e-9) saw_zero = true;
         if (std::abs(ang.phi - kPi) < 1e-9) saw_pi = true;
-        // Grazing shadow-boundary angles through the validated 2D core.
         const auto d = strikecem::utd_coefficient(k, 1.0, 2.0, ang.phi, ang.phi_prime);
         EXPECT_TRUE(std::isfinite(d.soft.real() + d.soft.imag() + d.hard.real() + d.hard.imag()));
         const auto integral = strikecem::along_edge_integral(e, k, s, r);
         EXPECT_TRUE(std::isfinite(integral.real() + integral.imag()));
     }
-    EXPECT_EQ(valid, 2); // y-rims diffract; x-rims are end-on (flagged)
-    EXPECT_TRUE(saw_zero && saw_pi); // leading/trailing rim pair
+    EXPECT_EQ(valid, 2);
+    EXPECT_TRUE(saw_zero && saw_pi);
 }
 
 TEST(Fringe, Face1DirIntoFace1) {
@@ -230,8 +214,6 @@ const strikecem::MeshEdge& dihedral_valley(const strikecem::EdgeModel& model) {
 }
 
 TEST(Fringe, ValleyFrameExterior) {
-    // Dihedral valley (n = 1.5), look from -x: arrival/observation at
-    // frame angle pi, inside the exterior cone (0, 1.5*pi).
     const auto mesh = load_mesh("valid_dihedral.json");
     const auto model = strikecem::extract_edges(mesh);
     const auto& v = dihedral_valley(model);
@@ -244,7 +226,6 @@ TEST(Fringe, ValleyFrameExterior) {
     EXPECT_NEAR(ang.phi_prime, kPi, 1e-9);
     EXPECT_GT(ang.phi, 0.0);
     EXPECT_LT(ang.phi, 1.5 * kPi);
-    // Rims reject the wedge frame and vice versa.
     for (const auto& e : model.edges) {
         if (!e.boundary) continue;
         EXPECT_FALSE(strikecem::wedge_transverse_angles(e, s, r).valid);
@@ -254,9 +235,6 @@ TEST(Fringe, ValleyFrameExterior) {
 }
 
 TEST(Fringe, LabelingSymmetry) {
-    // D is invariant under simultaneous face-label flip
-    // (phi, phi') -> (2n pi - phi, 2n pi - phi'): the fringe does not
-    // depend on which adjacent face the mesh lists first.
     const double k = 2.0 * kPi, n = 1.5;
     for (const auto [phi, phip] :
          {std::make_pair(1.0, 2.0), {0.5, 4.0}, {2.5, 1.2}, {0.3, 4.4}}) {
@@ -268,7 +246,6 @@ TEST(Fringe, LabelingSymmetry) {
 }
 
 TEST(Fringe, FringeBroadsideIdentity) {
-    // F = D x I exactly: recompute both factors independently.
     const auto mesh = load_mesh("valid_minimal.json");
     const auto model = strikecem::extract_edges(mesh);
     const double k = 2.0 * kPi;
@@ -307,9 +284,6 @@ TEST(Fringe, ValleyFringeFiniteAndSplit) {
 }
 
 TEST(Fringe, ValleyArcSweep) {
-    // Monostatic arc in the transverse plane, frame angles 0.2..4.2 rad
-    // (exterior cone): frame tracks the look direction, fringe is finite
-    // and continuous by refinement.
     const auto mesh = load_mesh("valid_dihedral.json");
     const auto model = strikecem::extract_edges(mesh);
     const auto& v = dihedral_valley(model);
@@ -338,7 +312,6 @@ TEST(Fringe, ValleyArcSweep) {
         }
         return worst;
     };
-    // Spot-check the frame at three predicted angles.
     fringe_at(1.0);
     fringe_at(2.0);
     fringe_at(4.0);
@@ -361,7 +334,6 @@ TEST(Fringe, FringeNulloptEndOn) {
     EXPECT_THROW(strikecem::fringe_amplitude(e, 0.0, s, r, 's'), std::invalid_argument);
 }
 TEST(Fringe, VectorParallelDecomposition) {
-    // Normal incidence, E along the edge: pure soft problem, F = Fs * t.
     const auto mesh = load_mesh("valid_minimal.json");
     const auto model = strikecem::extract_edges(mesh);
     const double k = 2.0 * kPi;
@@ -378,7 +350,6 @@ TEST(Fringe, VectorParallelDecomposition) {
 }
 
 TEST(Fringe, VectorPerpDecomposition) {
-    // Normal incidence, E transverse to the edge: pure hard problem.
     const auto mesh = load_mesh("valid_minimal.json");
     const auto model = strikecem::extract_edges(mesh);
     const double k = 2.0 * kPi;
@@ -406,10 +377,8 @@ TEST(Fringe, VectorRadiativeAndLinear) {
     const auto f1 = strikecem::fringe_vector(e, k, s, r, e1);
     const auto f2 = strikecem::fringe_vector(e, k, s, r, e2);
     ASSERT_TRUE(f1.has_value() && f2.has_value());
-    // Far field stays transverse to the observer ray, even oblique.
     for (const auto& f : {*f1, *f2})
         EXPECT_NEAR(std::abs(f[0] * r.x + f[1] * r.y + f[2] * r.z), 0.0, 1e-12);
-    // Linearity in the incident field (pins the split assembly).
     const std::complex<double> a(0.5, 0.0), b(0.0, 1.0);
     const std::array<std::complex<double>, 3> emix = {a * e1[0] + b * e2[0],
                                                       a * e1[1] + b * e2[1],
@@ -418,7 +387,6 @@ TEST(Fringe, VectorRadiativeAndLinear) {
     ASSERT_TRUE(fm.has_value());
     for (int i = 0; i < 3; ++i)
         EXPECT_NEAR(std::abs((*fm)[i] - (a * (*f1)[i] + b * (*f2)[i])), 0.0, 1e-12);
-    // Complex (circular-like) incident field: finite and transverse.
     const std::array<std::complex<double>, 3> ecirc = {
         std::complex<double>(1.0 / std::sqrt(2.0), 0.0), std::complex<double>(0.0, 1.0 / std::sqrt(2.0)),
         std::complex<double>(0.0, 0.0)};
@@ -466,7 +434,6 @@ TEST(Fringe, BadInputsThrow) {
 }
 
 TEST(Fringe, SolverOffByDefault) {
-    // Disabled flag (even with a model attached) reproduces PO exactly.
     const std::string config = fixture("valid_minimal.json");
     auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
     const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
@@ -483,8 +450,6 @@ TEST(Fringe, SolverOffByDefault) {
 }
 
 TEST(Fringe, SolverMatchesManualAssembly) {
-    // Solver accumulation == independent per-edge vector sum projected on
-    // the receive basis: pins the hook, not just the core.
     const std::string config = fixture("valid_minimal.json");
     auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
     const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
@@ -512,8 +477,6 @@ TEST(Fringe, SolverMatchesManualAssembly) {
 }
 
 TEST(Fringe, SolverNullFillsDarkSide) {
-    // Dark side: PO is exactly zero; PO + fringe is finite (the fringe is
-    // the entire return) and matches the manual edge sum.
     const std::string config = fixture("valid_minimal.json");
     auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
     const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
@@ -537,18 +500,13 @@ TEST(Fringe, SolverGuards) {
     const auto plan = make_fringe_plan({10e9}, {{0.0, -90.0}}, {"HH"});
     const strikecem::FringeOptions null_model{true, nullptr};
     EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, null_model), std::invalid_argument);
-    // Fringe + CUDA fails closed (exit 4 at the CLI) before touching any device.
     auto rc_cuda = rc;
     rc_cuda.value["execution"]["accelerator"] = "cuda";
     const strikecem::FringeOptions on{true, &model};
     EXPECT_THROW(strikecem::solve_po(mesh, plan, rc_cuda.value, on), strikecem::cuda::CudaError);
-    // (Fringe-off CUDA routing is the GPU suite's domain; this test must
-    // not enter the device runtime or LSan flags libcuda's own init.)
 }
 
 TEST(Fringe, SkippedEdgesWarned) {
-    // End-on rims contribute nothing and must be counted (FULL §10.3),
-    // not silently dropped: plate edge-on skips exactly the 2 x-rims.
     const std::string config = fixture("valid_minimal.json");
     auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
     const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
@@ -578,8 +536,6 @@ TEST(Fringe, SolverFloat32Smoke) {
         EXPECT_TRUE(std::isfinite(row.scattering.real() + row.rcs_sqm));
 }
 
-// End-to-end CLI wiring (slice D2d): schema value, provenance, CUDA
-// refusal, and fringe-aware resume.
 std::string write_fringe_config(const fs::path& dir, const std::string& name,
                                 const std::string& edge_correction, const std::string& format,
                                 bool cuda = false) {
@@ -619,7 +575,7 @@ TEST(Fringe, CliCsvProvenance) {
     ASSERT_TRUE(sidecar_in.good());
     const auto sidecar = nlohmann::json::parse(sidecar_in);
     EXPECT_EQ(sidecar["solver"]["edge_correction"], "fringe");
-    EXPECT_EQ(sidecar["solver"]["fringe_edges"], 4u); // plate.stl: 4 rims
+    EXPECT_EQ(sidecar["solver"]["fringe_edges"], 4u);
     std::ifstream csv_in(dir / "out.csv");
     std::string header;
     ASSERT_TRUE(static_cast<bool>(std::getline(csv_in, header)));
@@ -627,7 +583,7 @@ TEST(Fringe, CliCsvProvenance) {
     std::string line;
     while (std::getline(csv_in, line))
         if (!line.empty()) ++rows;
-    EXPECT_EQ(rows, 2u); // 1 freq x 1 dir x default [HH, VV]
+    EXPECT_EQ(rows, 2u);
     fs::remove_all(dir, ec);
 }
 
@@ -673,9 +629,6 @@ TEST(Fringe, Hdf5Provenance) {
 }
 
 TEST(Fringe, ResumeSolvesMissingWithFringe) {
-    // Complete fringe DB -> fake chunk 0 missing -> resume with fringe
-    // reproduces the fresh solve; resume with a no-fringe config is
-    // rejected (config_hash covers edge_correction).
     const fs::path dir = fs::temp_directory_path() / "scem_fringe_resume";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -721,4 +674,4 @@ TEST(Fringe, ResumeSolvesMissingWithFringe) {
     fs::remove_all(dir, ec);
 }
 
-} // namespace
+}

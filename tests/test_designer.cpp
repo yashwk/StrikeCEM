@@ -1,5 +1,3 @@
-// StrikeDesigner package tests (SPEC FR-12): manifest validation, hash
-// pinning, identity agreement, component warnings, and provenance flow.
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -40,7 +38,6 @@ TEST(Designer, ObjGroupsParsed) {
         strikecem::parse_obj(package("valid") + "/geometry/target.obj");
     ASSERT_EQ(grouped.groups.size(), 1u);
     EXPECT_EQ(grouped.groups[0], "body");
-    // Groups survive the normalize + cache round trip.
     auto rc = strikecem::load_config(package("valid") + "/config.json", SCEM_SCHEMA_PATH);
     const auto mesh = strikecem::load_normalized_mesh(
         rc.value, package("valid"), rc.schema_version);
@@ -158,4 +155,4 @@ TEST(Designer, ProvenanceCarriesIdentity) {
     fs::remove_all(dir, ec);
 }
 
-} // namespace
+}

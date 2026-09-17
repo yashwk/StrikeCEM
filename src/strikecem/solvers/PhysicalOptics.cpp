@@ -53,8 +53,6 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const double mu_r = medium["mu_r"].get<double>();
     if (medium["sigma"].get<double>() != 0.0)
         out.warnings.push_back("medium conductivity is ignored in v1 PO");
-    // FULL §9.4: GO shadowing must warn that it does not replace
-    // diffraction and misses multi-bounce energy.
     if (shadow.enabled)
         out.warnings.push_back(
             "GO shadowing enabled: hard shadow boundaries without edge diffraction; "
@@ -109,10 +107,6 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                static_cast<Real>(mesh.normals[t].y),
                                static_cast<Real>(mesh.normals[t].z)};
             if (!(dot(n, r_hat) > Real(0))) continue; // hard shadow: n.(-k_hat)
-            // GO shadowing (ADR-0004): skip facets occluded from the
-            // observer. lit counts truly illuminated facets below.
-            // ponytail: O(facets) occlusion per lit facet, O(n^2) per unit —
-            // fine for v1 scenes, the upgrade path is a BVH when meshes grow.
             if (shadow.enabled) {
                 const geom::Vec3d center_d{static_cast<double>(centroid.x),
                                            static_cast<double>(centroid.y),
@@ -143,7 +137,6 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                 for (int i = 0; i < 3; ++i) f_tx[tx][i] += coeff * t2[i];
             }
         }
-        // Edge-diffraction fringe: same f_tx accumulation, per transmit.
         if (fringe.enabled) {
             const geom::Vec3d s_hat_d{static_cast<double>(k_hat.x),
                                       static_cast<double>(k_hat.y),
@@ -161,9 +154,8 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                         std::complex<double>(static_cast<double>(tx_e[tx].z) / e0_d, 0.0)};
                     const auto fv = fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_unit);
                     if (!fv) {
-                        // Frame validity is tx-independent: count once per edge-unit.
-                        if (tx == 0) ++fringe_skipped; // FULL §10.3: report skipped wedges
-                        continue; // end-on edge: no transverse frame
+                        if (tx == 0) ++fringe_skipped;
+                        continue;
                     }
                     for (int i = 0; i < 3; ++i)
                         f_tx[tx][i] +=

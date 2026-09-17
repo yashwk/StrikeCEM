@@ -1,8 +1,3 @@
-// Plate/dihedral RCS benchmarks (ADR-0003 slice D2c): broadside fringe is
-// a small correction, the predicted first PO null is filled by fringe,
-// oblique cross-pol vanishes by symmetry, and the dihedral is y-mirror
-// symmetric with fringe on. Bounds carry 4x+ headroom over probed values;
-// null locations come from aperture theory, not from the implementation.
 #include <cmath>
 #include <complex>
 #include <gtest/gtest.h>
@@ -18,7 +13,6 @@ constexpr double kPi = 3.141592653589793;
 
 std::string fixture(const std::string& name) { return std::string(SCEM_FIXTURE_DIR) + "/" + name; }
 
-// 1x1 m plate in z=0, n x n quads, normal +z (probe-measured fixture).
 strikecem::NormalizedMesh grid_plate(int n) {
     strikecem::NormalizedMesh m;
     for (int j = 0; j <= n; ++j)
@@ -57,7 +51,6 @@ TEST(Benchmark, PlateBroadsideFringeIsSmallCorrection) {
         const auto plan = single_sample(3e9, 0.0, -90.0, {pol});
         const auto po = strikecem::solve_po(mesh, plan, rc.value);
         const auto total = strikecem::solve_po(mesh, plan, rc.value, on);
-        // Aperture check: |s| = A/lambda at broadside.
         EXPECT_NEAR(std::abs(po.samples[0].scattering), 1.0 / (strikecem::kSpeedOfLight / 3e9), 0.05);
         EXPECT_LT(std::abs(total.samples[0].scattering - po.samples[0].scattering),
                   0.05 * std::abs(po.samples[0].scattering));
@@ -69,22 +62,19 @@ TEST(Benchmark, PlateFirstNullFilled) {
     const auto mesh = grid_plate(100);
     const auto model = strikecem::extract_edges(mesh);
     const strikecem::FringeOptions on{true, &model};
-    const double lambda = strikecem::kSpeedOfLight / 3e9; // plate is 10 lambda wide
+    const double lambda = strikecem::kSpeedOfLight / 3e9;
     const double null_el = -90.0 + strikecem::rad_to_deg(std::asin(lambda / 1.0));
     const auto plan = single_sample(3e9, 0.0, null_el, {"HH"});
     const auto po = strikecem::solve_po(mesh, plan, rc.value);
     const auto total = strikecem::solve_po(mesh, plan, rc.value, on);
     const auto broad = strikecem::solve_po(mesh, single_sample(3e9, 0.0, -90.0, {"HH"}), rc.value);
     const double ref = std::abs(broad.samples[0].scattering);
-    EXPECT_LT(std::abs(po.samples[0].scattering), 0.01 * ref); // null is deep
+    EXPECT_LT(std::abs(po.samples[0].scattering), 0.01 * ref);
     EXPECT_GT(std::abs(total.samples[0].scattering), 0.0);
-    // Fringe is the majority of the return at the null.
     EXPECT_LT(std::abs(po.samples[0].scattering), 0.5 * std::abs(total.samples[0].scattering));
 }
 
 TEST(Benchmark, PlateObliqueCrossPolVanishes) {
-    // y-mirror symmetry kills depolarization, PO and fringe alike: a sign
-    // error in the vector assembly would leak here.
     const auto rc = load_rc("valid_minimal.json");
     const auto mesh = grid_plate(100);
     const auto model = strikecem::extract_edges(mesh);
@@ -100,14 +90,6 @@ TEST(Benchmark, PlateObliqueCrossPolVanishes) {
 }
 
 TEST(Benchmark, DihedralYMirrorSymmetric) {
-    // Valley runs along y: ky -> -ky looks are identical, PO and fringe.
-    // The mesh below is exactly y-mirror symmetric as sets (each unit
-    // quad split into 4 via its fixed center vertex), so any asymmetry
-    // would be a solver bug, not mesh quadrature: the diagonal split of
-    // dihedral.obj is NOT mirror symmetric, hence a dedicated fixture.
-    // Plates span y in [-0.5, 0.5] so the mirror plane runs through the
-    // origin: otherwise the plane offset injects a global phase and only
-    // magnitudes match.
     const auto rc = load_rc("valid_dihedral.json");
     strikecem::NormalizedMesh mesh;
     mesh.vertices = {{0, -0.5, 0}, {1, -0.5, 0}, {1, 0.5, 0}, {0, 0.5, 0}, {0.5, 0, 0},
@@ -120,7 +102,7 @@ TEST(Benchmark, DihedralYMirrorSymmetric) {
     const auto model = strikecem::extract_edges(mesh);
     size_t interior = 0;
     for (const auto& e : model.edges) interior += e.boundary ? 0 : 1;
-    ASSERT_EQ(interior, 1u); // the valley; rims plus coplanar spokes skipped
+    ASSERT_EQ(interior, 1u);
     const strikecem::FringeOptions on{true, &model};
     auto plan_for = [](double ky) {
         geom::Vec3d k_hat(0.5, ky, -0.7);
@@ -147,4 +129,4 @@ TEST(Benchmark, DihedralYMirrorSymmetric) {
     }
 }
 
-} // namespace
+}

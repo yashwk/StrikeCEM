@@ -1,4 +1,3 @@
-// Straight-edge diffraction model (ADR-0003).
 #include "strikecem/solvers/EdgeModel.hpp"
 
 #include <algorithm>
@@ -10,17 +9,17 @@ namespace strikecem {
 namespace {
 
 struct EdgeKey {
-    uint32_t v0, v1; // sorted vertex indices
+    uint32_t v0, v1;
     bool operator<(const EdgeKey& o) const {
         return v0 != o.v0 ? v0 < o.v0 : v1 < o.v1;
     }
 };
 
-} // namespace
+}
 
 EdgeModel extract_edges(const NormalizedMesh& mesh, double dihedral_threshold_rad) {
     EdgeModel model;
-    std::map<EdgeKey, std::vector<std::pair<uint32_t, bool>>> uses; // tri, forward
+    std::map<EdgeKey, std::vector<std::pair<uint32_t, bool>>> uses;
     for (uint32_t t = 0; t < mesh.triangles.size(); ++t) {
         const auto& tri = mesh.triangles[t];
         for (int e = 0; e < 3; ++e) {
@@ -38,10 +37,6 @@ EdgeModel extract_edges(const NormalizedMesh& mesh, double dihedral_threshold_ra
         edge.length = span.length();
         if (!(edge.length > 0.0)) throw std::invalid_argument("zero-length mesh edge");
         edge.tangent = span * (1.0 / edge.length);
-        // Interior directions of the adjacent faces, projected
-        // perpendicular to the edge: the screen reference for rims
-        // (face1 duplicates face0 there), the wedge-frame rays for
-        // interior creases.
         const geom::Vec3d m = (mesh.vertices[va] + mesh.vertices[vb]) * 0.5;
         auto inward_of = [&](int32_t t) {
             const auto& ft = mesh.triangles[static_cast<uint32_t>(t)];
@@ -79,13 +74,7 @@ EdgeModel extract_edges(const NormalizedMesh& mesh, double dihedral_threshold_ra
                 ++model.smooth_skipped;
                 continue;
             }
-            // Exterior wedge parameter: half-plane rim n = 2.
             const double wedge_n = 2.0 - deviation / 3.141592653589793;
-            // Convexity from the material-side test: w points from the edge
-            // midpoint toward the adjacent triangle centroids; b is the
-            // exterior bisector. dot < 0 (beyond fp tolerance) = convex
-            // ridge; a symmetric right-angle valley tests exactly zero and
-            // classifies concave, which is the correct side.
             const auto& t0 = mesh.triangles[tris[0].first];
             const auto& t1 = mesh.triangles[tris[1].first];
             const geom::Vec3d c0 =
@@ -109,4 +98,4 @@ EdgeModel extract_edges(const NormalizedMesh& mesh, double dihedral_threshold_ra
     return model;
 }
 
-} // namespace strikecem
+}

@@ -33,12 +33,9 @@ struct PoResult {
     std::vector<std::string> warnings;
 };
 
-// Fringe (edge-diffraction) correction, off by default. Enabled only via
-// this API until the schema exposes edge_correction (slice D2d); the
-// schema still rejects anything but "none".
 struct FringeOptions {
     bool enabled = false;
-    const EdgeModel* edges = nullptr; // owned by the caller; required when enabled
+    const EdgeModel* edges = nullptr;
 };
 
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,

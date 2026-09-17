@@ -1,4 +1,3 @@
-// StrikeDesigner export-package validation (SPEC FR-12).
 #include "strikecem/io/DesignerPackage.hpp"
 
 #include <algorithm>
@@ -26,7 +25,7 @@ std::string read_text_file(const fs::path& path, const char* what) {
 
 const char* kSupportedCoordinateSystem = "strike-right-handed-z-up";
 
-} // namespace
+}
 
 DesignerIdentity validate_designer_package(const nlohmann::json& resolved,
                                            const std::string& config_path) {
@@ -41,7 +40,7 @@ DesignerIdentity validate_designer_package(const nlohmann::json& resolved,
     const fs::path root = config_dir.empty() ? fs::current_path() : config_dir;
     const fs::path manifest_path = root / "export_manifest.json";
     std::error_code ec;
-    if (!fs::exists(manifest_path, ec)) return identity; // direct config mode
+    if (!fs::exists(manifest_path, ec)) return identity;
     identity.packaged = true;
 
     const std::string manifest_bytes = read_text_file(manifest_path, "export manifest");
@@ -74,14 +73,12 @@ DesignerIdentity validate_designer_package(const nlohmann::json& resolved,
     if (!fs::exists(geometry_path, ec))
         throw MeshError("export manifest geometry not found: " + geometry_path.string());
 
-    // Geometry hash pins the exact bytes; fail closed on mismatch or stale export.
     std::ifstream geom(geometry_path, std::ios::binary);
     std::ostringstream ss;
     ss << geom.rdbuf();
     if (sha256_hex(ss.str()) != required_str("geometry_sha256"))
         throw MeshError("export manifest geometry hash mismatch: " + geometry_path.string());
 
-    // The manifest geometry, units, and identity must agree with the config.
     const std::string model_rel = resolved["model"]["path"].get<std::string>();
     const fs::path model_path =
         fs::path(model_rel).is_absolute() ? fs::path(model_rel) : root / model_rel;
@@ -96,8 +93,6 @@ DesignerIdentity validate_designer_package(const nlohmann::json& resolved,
     identity.design_id = design_id;
     identity.revision = revision;
 
-    // Component groups are traceability metadata in v1 (all surfaces PEC):
-    // verified against OBJ group names, warned — never silently dropped.
     if (manifest.contains("component_manifest")) {
         std::string mesh_ext = model_path.extension().string();
         std::transform(mesh_ext.begin(), mesh_ext.end(), mesh_ext.begin(),
@@ -124,4 +119,4 @@ DesignerIdentity validate_designer_package(const nlohmann::json& resolved,
     return identity;
 }
 
-} // namespace strikecem
+}

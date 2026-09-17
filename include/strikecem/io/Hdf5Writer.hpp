@@ -26,8 +26,6 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
 // Resume a partial database: verifies identity, re-verifies committed chunk
 // checksums, solves only missing units, and commits touched chunks.
 // Returns rows solved (0 when already complete). Throws OutputError.
-// config_hash covers edge_correction, so fringe/none mixing is rejected by
-// the identity check without a dedicated attribute.
 size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
                           const NormalizedMesh& mesh, const std::string& path,
                           const FringeOptions& fringe = {});

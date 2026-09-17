@@ -1,5 +1,3 @@
-// Fresnel core (ADR-0005 slice 1). Conventions: e^{+jwt}; passive walls
-// (Im(eps), Im(mu) <= 0); Hecht reflected-basis signs.
 #include "strikecem/solvers/Fresnel.hpp"
 
 #include <cmath>
@@ -16,7 +14,7 @@ bool finite_c(const std::complex<double>& z) {
     return std::isfinite(z.real() + z.imag());
 }
 
-} // namespace
+}
 
 std::complex<double> refractive_index(const ComplexMedium& m) {
     if (!finite_c(m.eps_r) || !finite_c(m.mu_r))
@@ -45,10 +43,8 @@ FresnelResult fresnel(const ComplexMedium& medium, const ComplexMedium& wall,
     const std::complex<double> e1 = wave_impedance(medium);
     const std::complex<double> e2 = wave_impedance(wall);
     const double sin_theta_i = std::sqrt(std::max(0.0, 1.0 - cos_theta_i * cos_theta_i));
-    const std::complex<double> s = n1 * sin_theta_i / n2; // complex Snell
+    const std::complex<double> s = n1 * sin_theta_i / n2;
     std::complex<double> ct = std::sqrt(std::complex<double>{1.0, 0.0} - s * s);
-    // Decaying transmitted wave under e^{+jwt}: Im(n2*ct) <= 0 selects the
-    // physical branch (principal sqrt alone grows in TIR).
     if ((n2 * ct).imag() > 0.0) ct = -ct;
     const std::complex<double> ci{cos_theta_i, 0.0};
     FresnelResult out;
@@ -64,4 +60,4 @@ FresnelResult fresnel(const ComplexMedium& medium, const ComplexMedium& wall,
     return out;
 }
 
-} // namespace strikecem
+}

@@ -23,7 +23,7 @@ struct RawTriangle {
 std::vector<RawTriangle> parse_stl(const std::filesystem::path& path);
 struct ObjMesh {
     std::vector<RawTriangle> triangles;
-    std::vector<std::string> groups; // named g/o blocks in file order
+    std::vector<std::string> groups;
 };
 ObjMesh parse_obj(const std::filesystem::path& path);
 
@@ -49,7 +49,7 @@ struct NormalizedMesh {
     std::vector<std::array<uint32_t, 3>> triangles;
     std::vector<geom::Vec3d> normals;
     std::vector<double> areas;
-    std::vector<std::string> groups; // named OBJ groups/o-names (STL: empty)
+    std::vector<std::string> groups;
     MeshReport report;
     bool repaired = false;
     MeshReport report_before; // valid only when repaired

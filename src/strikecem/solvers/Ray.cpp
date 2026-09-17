@@ -1,4 +1,3 @@
-// Ray kernel (ADR-0004 slice 1): Möller–Trumbore, double-sided.
 #include "strikecem/solvers/Ray.hpp"
 
 #include <cmath>
@@ -8,8 +7,8 @@
 namespace strikecem {
 namespace {
 
-constexpr double kDetEps = 1e-18; // near-exact parallel rejection (double)
-constexpr double kBaryTol = 1e-9; // edge/vertex watertight tolerance
+constexpr double kDetEps = 1e-18;
+constexpr double kBaryTol = 1e-9;
 
 bool is_unit(const geom::Vec3d& v) {
     if (!std::isfinite(v.x + v.y + v.z)) return false;
@@ -17,7 +16,7 @@ bool is_unit(const geom::Vec3d& v) {
     return std::isfinite(n) && std::abs(n - 1.0) <= 1e-6;
 }
 
-} // namespace
+}
 
 std::optional<RayHit> ray_triangle(const geom::Vec3d& origin, const geom::Vec3d& dir,
                                    const geom::Vec3d& a, const geom::Vec3d& b,
@@ -26,17 +25,17 @@ std::optional<RayHit> ray_triangle(const geom::Vec3d& origin, const geom::Vec3d&
     const geom::Vec3d e2 = c - a;
     const geom::Vec3d p = geom::cross(dir, e2);
     const double det = geom::dot(e1, p);
-    if (std::abs(det) < kDetEps) return std::nullopt; // parallel or degenerate
+    if (std::abs(det) < kDetEps) return std::nullopt;
     const double inv = 1.0 / det;
     const geom::Vec3d q = origin - a;
-    const double u = geom::dot(q, p) * inv;
-    if (u < -kBaryTol || u > 1.0 + kBaryTol) return std::nullopt;
+    const double bary_u = geom::dot(q, p) * inv;
+    if (bary_u < -kBaryTol || bary_u > 1.0 + kBaryTol) return std::nullopt;
     const geom::Vec3d r = geom::cross(q, e1);
-    const double v = geom::dot(dir, r) * inv;
-    if (v < -kBaryTol || u + v > 1.0 + kBaryTol) return std::nullopt;
+    const double bary_v = geom::dot(dir, r) * inv;
+    if (bary_v < -kBaryTol || bary_u + bary_v > 1.0 + kBaryTol) return std::nullopt;
     const double t = geom::dot(e2, r) * inv;
     if (!(t > t_min) || !std::isfinite(t)) return std::nullopt;
-    return RayHit{t, tri, u, v};
+    return RayHit{t, tri, bary_u, bary_v};
 }
 
 std::optional<RayHit> ray_mesh(const NormalizedMesh& mesh, const geom::Vec3d& origin,
@@ -72,4 +71,4 @@ bool occluded(const NormalizedMesh& mesh, const geom::Vec3d& p, const geom::Vec3
     return false;
 }
 
-} // namespace strikecem
+}

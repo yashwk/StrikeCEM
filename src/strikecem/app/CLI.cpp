@@ -173,9 +173,6 @@ int run(int argc, char** argv) {
         for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         NormalizedMesh mesh =
             load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
-        // Fringe correction is off unless the schema exposes edge_correction
-        // "fringe" (slice D2d). The loader rejects non-manifold input, so
-        // extraction cannot throw here.
         EdgeModel edge_model;
         FringeOptions fringe;
         if (rc.value["solver"]["po_options"].value("edge_correction", "none") == "fringe") {

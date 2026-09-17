@@ -1,6 +1,3 @@
-// 2D UTD wedge diffraction (ADR-0003). Conventions: e^{+jwt}, screen on
-// x >= 0 (half-plane), exterior angle phi in (0, 2*pi) CCW from +x.
-// Arrival angle phi' is the math angle of (-travel direction).
 #include "strikecem/solvers/UtdWedge.hpp"
 
 #include <cmath>
@@ -12,20 +9,18 @@ namespace {
 
 constexpr double kPi = std::numbers::pi;
 
-// Fresnel auxiliary functions, derived by repeated integration by parts
-// (all powers verified term-by-term; the crossover test pins truncation).
 long double aux_f(long double x) {
-    const long double p1 = kPi * x;                 // pi*x
-    const long double p3x5 = p1 * p1 * p1 * x * x;  // pi^3*x^5
-    const long double p5x9 = p3x5 * p1 * p1 * x * x * x * x; // pi^5*x^9
-    const long double p7x13 = p5x9 * p1 * p1 * x * x * x * x; // pi^7*x^13
+    const long double p1 = kPi * x;
+    const long double p3x5 = p1 * p1 * p1 * x * x;
+    const long double p5x9 = p3x5 * p1 * p1 * x * x * x * x;
+    const long double p7x13 = p5x9 * p1 * p1 * x * x * x * x;
     return 1.0L / p1 - 3.0L / p3x5 + 105.0L / p5x9 - 10395.0L / p7x13;
 }
 
 long double aux_g(long double x) {
-    const long double p2x3 = kPi * kPi * x * x * x;             // pi^2*x^3
-    const long double p4x7 = p2x3 * kPi * kPi * x * x * x * x;  // pi^4*x^7
-    const long double p6x11 = p4x7 * kPi * kPi * x * x * x * x; // pi^6*x^11
+    const long double p2x3 = kPi * kPi * x * x * x;
+    const long double p4x7 = p2x3 * kPi * kPi * x * x * x * x;
+    const long double p6x11 = p4x7 * kPi * kPi * x * x * x * x;
     return 1.0L / p2x3 - 15.0L / p4x7 + 945.0L / p6x11;
 }
 
@@ -35,7 +30,6 @@ void fresnel_cs(long double x, long double& c, long double& s) {
     const long double ax = fabsl(x);
     long double cc, ss;
     if (ax <= kCrossover) {
-        // Power series in long double (cancellation-safe headroom).
         const long double x2 = ax * ax;
         const long double p = kPi / 2.0L;
         long double term_c = ax, term_s = p * ax * x2 / 3.0L;
@@ -67,15 +61,14 @@ double norm_angle(double a) {
     return a;
 }
 
-// Segment [p, p - t*s], t > 0, hits the screen ray x >= 0, y = 0.
 bool hits_screen(double px, double py, double sx, double sy) {
-    if (std::abs(sy) < 1e-300) return false; // parallel: never crosses
+    if (std::abs(sy) < 1e-300) return false;
     const double t = py / sy;
     if (!(t > 0.0)) return false;
     return px - t * sx >= 0.0;
 }
 
-} // namespace
+}
 
 double fresnel_c(double x) {
     long double c, s;
@@ -94,7 +87,6 @@ std::complex<double> utd_transition(double x) {
     if (x == 0.0) return {0.0, 0.0};
     const double t0 = std::sqrt(2.0 * x / kPi);
     const double c = fresnel_c(t0), s = fresnel_s(t0);
-    // F = 2j*sqrt(x)*e^{jx}*sqrt(pi/2)*[(1/2 - C) - j*(1/2 - S)]
     const std::complex<double> rest((0.5 - c), -(0.5 - s));
     const std::complex<double> phase(std::cos(x), std::sin(x));
     return std::complex<double>(0.0, 2.0 * std::sqrt(x)) * phase * std::sqrt(kPi / 2.0) * rest;
@@ -114,7 +106,6 @@ WedgeCoefficients utd_coefficient(double k, double rho, double n, double phi, do
         const double tm = (kPi - beta) / (2.0 * n);
         const double cp = std::cos(tp) / std::sin(tp);
         const double cm = std::cos(tm) / std::sin(tm);
-        // cot/0 with F = 0 is the two-sided average 0 (antisymmetric jump).
         if (std::isfinite(cp)) out += cp * utd_transition(k * rho * ap);
         if (std::isfinite(cm)) out += cm * utd_transition(k * rho * am);
         return out;
@@ -134,10 +125,10 @@ std::complex<double> utd_go_incident(double k, double sx, double sy, double x, d
 
 std::complex<double> utd_go_reflected(char pol, double k, double sx, double sy, double x,
                                       double y, double e0) {
-    if (std::abs(sy) < 1e-300) return {0.0, 0.0}; // grazing: no reflection
-    const double t = y / -sy; // travel mirrored direction (sx, -sy) back to y = 0
+    if (std::abs(sy) < 1e-300) return {0.0, 0.0};
+    const double t = y / -sy;
     if (!(t > 0.0)) return {0.0, 0.0};
-    if (x - t * sx < 0.0) return {0.0, 0.0}; // specular point off the screen
+    if (x - t * sx < 0.0) return {0.0, 0.0};
     const double r = (pol == 's') ? -1.0 : 1.0;
     return r * e0 * std::exp(std::complex<double>(0.0, -k * (sx * x - sy * y)));
 }
@@ -160,4 +151,4 @@ std::complex<double> utd_total(char pol, double k, double sx, double sy, double 
            utd_diffracted(pol, k, sx, sy, x, y, e0);
 }
 
-} // namespace strikecem
+}
