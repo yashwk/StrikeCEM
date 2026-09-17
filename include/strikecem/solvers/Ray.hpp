@@ -13,8 +13,9 @@ struct RayHit {
     double bary_v = 0.0;
 };
 
-struct ShadowOptions {
-    bool enabled = false;
+struct GoOptions {
+    bool shadowing = false;
+    bool two_bounce = false;
 };
 
 std::optional<RayHit> ray_triangle(const geom::Vec3d& origin, const geom::Vec3d& dir,

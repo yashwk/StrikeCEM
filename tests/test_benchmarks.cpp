@@ -129,4 +129,56 @@ TEST(Benchmark, DihedralYMirrorSymmetric) {
     }
 }
 
+strikecem::NormalizedMesh dihedral_grids(int n) {
+    strikecem::NormalizedMesh m;
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i) m.vertices.push_back({double(i) / n, double(j) / n, 0.0});
+    auto h = [&](int i, int j) { return uint32_t(j * (n + 1) + i); };
+    const uint32_t vbase = uint32_t(m.vertices.size());
+    for (int j = 0; j <= n; ++j)
+        for (int k = 0; k <= n; ++k) m.vertices.push_back({0.0, double(j) / n, double(k) / n});
+    auto w = [&](int j, int k) { return vbase + uint32_t(j * (n + 1) + k); };
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            m.triangles.push_back({h(i, j), h(i + 1, j), h(i + 1, j + 1)});
+            m.triangles.push_back({h(i, j), h(i + 1, j + 1), h(i, j + 1)});
+            m.normals.push_back({0, 0, 1});
+            m.normals.push_back({0, 0, 1});
+            m.areas.push_back(0.5 / (n * n));
+            m.areas.push_back(0.5 / (n * n));
+        }
+    for (int j = 0; j < n; ++j)
+        for (int k = 0; k < n; ++k) {
+            m.triangles.push_back({w(j, k), w(j + 1, k), w(j + 1, k + 1)});
+            m.triangles.push_back({w(j, k), w(j + 1, k + 1), w(j, k + 1)});
+            m.normals.push_back({1, 0, 0});
+            m.normals.push_back({1, 0, 0});
+            m.areas.push_back(0.5 / (n * n));
+            m.areas.push_back(0.5 / (n * n));
+        }
+    m.report.bbox_min = {0, 0, 0};
+    m.report.bbox_max = {1, 1, 1};
+    return m;
+}
+
+TEST(Benchmark, TwoBounceDihedralAnalytic) {
+    const auto rc = load_rc("valid_dihedral.json");
+    const auto mesh = dihedral_grids(10);
+    const auto plan = single_sample(1e9, 180.0, -45.0, {"HH", "VV"});
+    const auto po = strikecem::solve_po(mesh, plan, rc.value);
+    const strikecem::GoOptions go{false, true};
+    const auto total = strikecem::solve_po(mesh, plan, rc.value, {}, go);
+    ASSERT_EQ(total.samples.size(), 2u);
+    const double lambda = strikecem::kSpeedOfLight / 1e9;
+    const double analytic = 8.0 * kPi / (lambda * lambda);
+    for (size_t i = 0; i < 2; ++i) {
+        const double ratio = total.samples[i].rcs_sqm / analytic;
+        EXPECT_GT(ratio, 0.8);
+        EXPECT_LT(ratio, 1.2);
+        EXPECT_LT(std::abs(po.samples[i].scattering), 0.1 * std::abs(total.samples[i].scattering));
+    }
+    const double mean = 0.5 * (total.samples[0].rcs_sqm + total.samples[1].rcs_sqm);
+    EXPECT_LT(std::abs(total.samples[0].rcs_sqm - total.samples[1].rcs_sqm), 0.3 * mean);
+}
+
 }

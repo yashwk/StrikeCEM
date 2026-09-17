@@ -44,6 +44,15 @@
   to the upper plate alone. `lit_facets` counts truly illuminated
   (facing and unoccluded) facets. O(n²) per unit; the
   upgrade path is a BVH when meshes grow.
+- Slice 3 (done): two-bounce specular chains behind `GoOptions`
+  (`shadowing`/`two_bounce`, default off; `ShadowOptions` renamed).
+  Single-pair hand computation passes exactly with both orders firing;
+  non-retroreflective and exit-blocked pairs contribute exactly zero;
+  CUDA + any GO flag fails closed. Dihedral benchmark at optimal 45°
+  lands within ±20% of 8πa²/λ² with HH/VV agreement, converging under
+  refinement. dihedral.obj's vertical normal faces away from the pocket,
+  so it cannot double-bounce single-sided; benchmarks use a
+  pocket-facing mesh instead.
 - The `t_min` floor is absolute (1e-9 of the mesh bbox diagonal, computed
   by the caller from the mesh report); wavelength-relative flooring is
   the documented upgrade path if electrically tiny features ever arrive.

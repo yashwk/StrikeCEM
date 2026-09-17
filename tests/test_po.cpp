@@ -1,10 +1,12 @@
 // PO reference solver tests: shadowing, symmetry, reciprocity, the ADR-0001
 // single-triangle closed form, precision behavior, and determinism.
+#include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
 
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/MeshLoader.hpp"
+#include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 #include "strikecem/solvers/Ray.hpp"
 
@@ -148,8 +150,8 @@ TEST(PoSolver, ShadowReductionPlate) {
     const Case c = load_case("valid_minimal.json");
     const auto plan = make_plan({10e9}, {{0.0, -90.0}, {45.0, -45.0}}, {"HH", "VV"});
     const auto po = strikecem::solve_po(c.mesh, plan, c.rc.value);
-    const strikecem::ShadowOptions shadow{true};
-    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, shadow);
+    const strikecem::GoOptions opts{true};
+    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, opts);
     ASSERT_EQ(po.samples.size(), go.samples.size());
     for (size_t i = 0; i < po.samples.size(); ++i) {
         EXPECT_EQ(go.samples[i].scattering, po.samples[i].scattering);
@@ -163,8 +165,8 @@ TEST(PoSolver, ShadowReductionDihedral) {
     const auto plan = make_plan({10e9}, {{0.0, -78.5}}, {"HH"});
     const auto po = strikecem::solve_po(c.mesh, plan, c.rc.value);
     ASSERT_EQ(po.samples[0].lit_facets, 4u);
-    const strikecem::ShadowOptions shadow{true};
-    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, shadow);
+    const strikecem::GoOptions opts{true};
+    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, opts);
     ASSERT_EQ(po.samples.size(), go.samples.size());
     for (size_t i = 0; i < po.samples.size(); ++i)
         EXPECT_EQ(go.samples[i].scattering, po.samples[i].scattering);
@@ -188,8 +190,8 @@ TEST(PoSolver, ShadowBlocksLowerPlate) {
     const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
     const auto po = strikecem::solve_po(mesh, plan, c.rc.value);
     ASSERT_EQ(po.samples[0].lit_facets, 4u);
-    const strikecem::ShadowOptions shadow{true};
-    const auto go = strikecem::solve_po(mesh, plan, c.rc.value, {}, shadow);
+    const strikecem::GoOptions opts{true};
+    const auto go = strikecem::solve_po(mesh, plan, c.rc.value, {}, opts);
     EXPECT_EQ(go.samples[0].lit_facets, 2u);
     EXPECT_LT(std::abs(go.samples[0].scattering), std::abs(po.samples[0].scattering));
     strikecem::NormalizedMesh upper;
@@ -208,12 +210,100 @@ TEST(PoSolver, ShadowWarnsGoLimitations) {
     const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
     const auto po = strikecem::solve_po(c.mesh, plan, c.rc.value);
     for (const auto& w : po.warnings) EXPECT_EQ(w.find("GO shadowing"), std::string::npos);
-    const strikecem::ShadowOptions shadow{true};
-    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, shadow);
+    const strikecem::GoOptions opts{true};
+    const auto go = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, opts);
     bool found = false;
     for (const auto& w : go.warnings)
         if (w.find("GO shadowing") != std::string::npos) found = true;
     EXPECT_TRUE(found);
+}
+
+TEST(PoSolver, TwoBounceSinglePairHandComputed) {
+    strikecem::NormalizedMesh mesh;
+    mesh.vertices = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    mesh.triangles = {{0, 1, 2}, {0, 2, 3}};
+    mesh.normals = {{0, 0, 1}, {1, 0, 0}};
+    mesh.areas = {0.5, 0.5};
+    mesh.report.bbox_min = {0, 0, 0};
+    mesh.report.bbox_max = {1, 1, 1};
+    const Case rc = load_case("valid_minimal.json");
+    const auto plan = make_plan({299792458.0}, {{180.0, -45.0}}, {"HH"});
+    const auto po = strikecem::solve_po(mesh, plan, rc.rc.value);
+    const strikecem::GoOptions go{false, true};
+    const auto total = strikecem::solve_po(mesh, plan, rc.rc.value, {}, go);
+    const std::complex<double> pair(0.0, std::sqrt(2.0) / 4.0);
+    EXPECT_NEAR(std::abs(total.samples[0].scattering - po.samples[0].scattering - 2.0 * pair),
+                0.0, 1e-9);
+}
+
+TEST(PoSolver, TwoBounceNonRetroSkipped) {
+    const Case c = load_case("valid_minimal.json");
+    const auto mesh = stacked_plates();
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
+    const auto po = strikecem::solve_po(mesh, plan, c.rc.value);
+    const strikecem::GoOptions go{false, true};
+    const auto total = strikecem::solve_po(mesh, plan, c.rc.value, {}, go);
+    ASSERT_EQ(po.samples.size(), total.samples.size());
+    for (size_t i = 0; i < po.samples.size(); ++i)
+        EXPECT_EQ(total.samples[i].scattering, po.samples[i].scattering);
+}
+
+TEST(PoSolver, TwoBounceBlockedExitSkipped) {
+    strikecem::NormalizedMesh corner;
+    corner.vertices = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    corner.triangles = {{0, 1, 2}, {0, 2, 3}};
+    corner.normals = {{0, 0, 1}, {1, 0, 0}};
+    corner.areas = {0.5, 0.5};
+    corner.report.bbox_min = {0, 0, 0};
+    corner.report.bbox_max = {1, 1, 1};
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{180.0, -45.0}}, {"HH"});
+    const strikecem::GoOptions go{false, true};
+    const auto open = strikecem::solve_po(corner, plan, c.rc.value, {}, go);
+    const auto open_po = strikecem::solve_po(corner, plan, c.rc.value);
+    EXPECT_NE(open.samples[0].scattering, open_po.samples[0].scattering);
+    strikecem::NormalizedMesh blocked = corner;
+    const geom::Vec3d r(0.7071067811865476, 0.0, 0.7071067811865476);
+    const geom::Vec3d ctr = r * 2.0 + geom::Vec3d(0.0, 1.0 / 3.0, 0.0);
+    const geom::Vec3d e1(0.0, 1.0, 0.0);
+    const geom::Vec3d e2 = geom::cross(r, e1);
+    const uint32_t b0 = uint32_t(blocked.vertices.size());
+    blocked.vertices.push_back(ctr - e1 - e2);
+    blocked.vertices.push_back(ctr + e1 - e2);
+    blocked.vertices.push_back(ctr + e1 + e2);
+    blocked.vertices.push_back(ctr - e1 + e2);
+    blocked.triangles.push_back({b0, b0 + 1, b0 + 2});
+    blocked.triangles.push_back({b0, b0 + 2, b0 + 3});
+    blocked.normals.push_back(r * -1.0);
+    blocked.normals.push_back(r * -1.0);
+    blocked.areas.push_back(2.0);
+    blocked.areas.push_back(2.0);
+    for (const auto& vtx : blocked.vertices) {
+        blocked.report.bbox_min.x = std::min(blocked.report.bbox_min.x, vtx.x);
+        blocked.report.bbox_min.y = std::min(blocked.report.bbox_min.y, vtx.y);
+        blocked.report.bbox_min.z = std::min(blocked.report.bbox_min.z, vtx.z);
+        blocked.report.bbox_max.x = std::max(blocked.report.bbox_max.x, vtx.x);
+        blocked.report.bbox_max.y = std::max(blocked.report.bbox_max.y, vtx.y);
+        blocked.report.bbox_max.z = std::max(blocked.report.bbox_max.z, vtx.z);
+    }
+    const auto shut = strikecem::solve_po(blocked, plan, c.rc.value, {}, go);
+    const auto shut_po = strikecem::solve_po(blocked, plan, c.rc.value);
+    ASSERT_EQ(shut.samples.size(), shut_po.samples.size());
+    for (size_t i = 0; i < shut.samples.size(); ++i)
+        EXPECT_EQ(shut.samples[i].scattering, shut_po.samples[i].scattering);
+}
+
+TEST(PoSolver, TwoBounceCudaRefused) {
+    const Case c = load_case("valid_minimal.json");
+    auto cuda_cfg = c.rc.value;
+    cuda_cfg["execution"]["accelerator"] = "cuda";
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
+    const strikecem::GoOptions bounce{false, true};
+    EXPECT_THROW(strikecem::solve_po(c.mesh, plan, cuda_cfg, {}, bounce),
+                 strikecem::cuda::CudaError);
+    const strikecem::GoOptions shade{true, false};
+    EXPECT_THROW(strikecem::solve_po(c.mesh, plan, cuda_cfg, {}, shade),
+                 strikecem::cuda::CudaError);
 }
 
 } // namespace
