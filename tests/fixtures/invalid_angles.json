@@ -1,0 +1,11 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {"path": "../../examples/plate.stl"},
+  "frequency": {"frequency_hz": 10000000000},
+  "angles": {
+    "azimuth": {"start": 0, "stop": 180, "step": 1},
+    "elevation": {"start": 0, "stop": 95, "step": 1}
+  },
+  "solver": {"type": "PO"},
+  "output": {"path": "x.h5"}
+}

@@ -1,26 +1,30 @@
 # StrikeCEM
 
-**StrikeCEM** (Strike Computational Electromagnetics) is a research and simulation framework for **computational
-electromagnetics (CEM)**, with applications in radar signature analysis and physics-based
-modeling.
+**StrikeCEM** (Strike Computational Electromagnetics) generates radar
+cross-section (RCS) databases from surface meshes for offline use by
+StrikeEngine.
 
-The project focuses on, high-performance workflows for electromagnetic scattering problems, radar cross
-section (RCS) analysis.
+## Stable v1 scope
+
+* Geometry: STL/OBJ triangle meshes (m, mm, in) with rigid transforms
+* Physics: PEC, plane-wave illumination, monostatic RCS
+* Solver: Physical Optics (PO) on CPU, float32/float64
+* Sampling: regular azimuth/elevation grid or explicit direction list
+* Polarization: HH, VV, HV, VH, RHCP, LHCP (default HH + VV)
+* Output: CSV with JSON sidecar, or flat-row HDF5
+* CLI: `strikecem validate | estimate | run`
+
+The machine-readable contract is
+[config.schema.json](schemas/config.schema.json) – the v1 configuration
+schema. Unsupported features (other solvers, GPU execution, materials,
+bistatic output, CAD input) are rejected, never silently substituted.
 
 ---
 
-## Features
+## Status
 
-* Schema system for configuration and experiment reproducibility
-* Electromagnetic simulation solvers:
-    * Physical Optics (PO)
-    * Method of Moments (MoM)
-    * Hybrid (PO + MoM)
-* GPU acceleration with CUDA
-* Advanced meshing engine:
-    * Adaptive mesh refinement
-    * Multi-resolution meshing
-    * Facet sizing based on wavelength (λ/10, λ/20, etc.)
+Early scaffold (Phase 0): source layout and build exist; configuration
+loader, mesh pipeline, solver, output writer, and CLI are in progress.
 
 ---
 

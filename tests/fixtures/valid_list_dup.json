@@ -1,0 +1,8 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {"path": "../../examples/plate.stl"},
+  "frequency": {"frequency_hz": 10000000000},
+  "angles": {"list": [[0, 0], [360, 0], [45, 10], [45, 10]]},
+  "solver": {"type": "PO"},
+  "output": {"path": "list.h5"}
+}

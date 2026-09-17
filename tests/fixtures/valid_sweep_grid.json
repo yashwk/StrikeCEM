@@ -1,0 +1,12 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {"path": "../../examples/plate.stl", "units": "mm"},
+  "frequency": {"sweep": {"start": 10000000000, "stop": 12000000000, "step": 1000000000}},
+  "angles": {
+    "azimuth": {"start": 0, "stop": 360, "step": 90},
+    "elevation": {"start": 0, "stop": 0, "step": 1}
+  },
+  "polarization": ["HH", "VV", "HV", "VH", "RHCP", "LHCP"],
+  "solver": {"type": "PO", "precision": "float32"},
+  "output": {"path": "sweep.csv", "format": "csv"}
+}
