@@ -39,7 +39,8 @@ std::string hostname() {
 } // namespace
 
 void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
-                           const NormalizedMesh& mesh, const PoResult& result) {
+                           const NormalizedMesh& mesh, const PoResult& result,
+                           const DesignerIdentity& designer) {
     const auto& output = rc.value["output"];
     const fs::path csv_path(output["path"].get<std::string>());
     const int precision = output["precision"].get<int>();
@@ -93,10 +94,17 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                        {"triangles", mesh.report.triangle_count},
                        {"surface_area_m2", mesh.report.total_area_m2},
                        {"repaired", mesh.repaired}};
-    if (rc.value.contains("integration"))
-        sidecar["designer"] = rc.value["integration"];
-    else
+    if (!designer.design_id.empty()) {
+        sidecar["designer"] = {{"design_id", designer.design_id},
+                               {"revision", designer.revision},
+                               {"export_id", designer.export_id},
+                               {"export_manifest_hash",
+                                designer.manifest_hash.empty()
+                                    ? nlohmann::json(nullptr)
+                                    : nlohmann::json(designer.manifest_hash)}};
+    } else {
         sidecar["designer"] = nullptr;
+    }
     sidecar["warnings"] = nlohmann::json::array();
     for (const auto& w : plan.warnings) sidecar["warnings"].push_back(w);
     for (const auto& w : result.warnings) sidecar["warnings"].push_back(w);

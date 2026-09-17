@@ -21,7 +21,11 @@ struct RawTriangle {
 
 // Parsed without units/transform applied; exposed for unit tests.
 std::vector<RawTriangle> parse_stl(const std::filesystem::path& path);
-std::vector<RawTriangle> parse_obj(const std::filesystem::path& path);
+struct ObjMesh {
+    std::vector<RawTriangle> triangles;
+    std::vector<std::string> groups; // named g/o blocks in file order
+};
+ObjMesh parse_obj(const std::filesystem::path& path);
 
 struct MeshReport {
     size_t vertex_count = 0;
@@ -45,6 +49,7 @@ struct NormalizedMesh {
     std::vector<std::array<uint32_t, 3>> triangles;
     std::vector<geom::Vec3d> normals;
     std::vector<double> areas;
+    std::vector<std::string> groups; // named OBJ groups/o-names (STL: empty)
     MeshReport report;
     bool repaired = false;
     MeshReport report_before; // valid only when repaired

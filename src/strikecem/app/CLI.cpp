@@ -10,6 +10,7 @@
 
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/CsvWriter.hpp"
+#include "strikecem/io/DesignerPackage.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/runtime/Estimate.hpp"
@@ -59,11 +60,20 @@ void print_mesh_report(const MeshReport& r) {
 }
 
 int cmd_validate(const ResolvedConfig& rc, const std::string& config_path) {
+    const DesignerIdentity designer = validate_designer_package(rc.value, config_path);
+    for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
     NormalizedMesh mesh =
         load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
     std::cout << "scem_schema_version: " << rc.schema_version << "\n";
     std::cout << "resolved_config_hash: " << rc.hash << "\n";
     std::cout << "model: " << rc.value["model"]["path"].get<std::string>() << "\n";
+    if (designer.packaged) {
+        std::cout << "package: export_manifest.json ok\n";
+        std::cout << "design_id: " << designer.design_id << "\n";
+        std::cout << "design_revision: " << designer.revision << "\n";
+        if (!designer.export_id.empty()) std::cout << "export_id: " << designer.export_id << "\n";
+        std::cout << "export_manifest_hash: " << designer.manifest_hash << "\n";
+    }
     print_mesh_report(mesh.report);
     if (mesh.repaired) {
         std::cout << "repaired: yes (triangles " << mesh.report_before.triangle_count << " -> "
@@ -159,6 +169,8 @@ int run(int argc, char** argv) {
         std::cout << "resolved_config_hash: " << rc.hash << "\n";
         SamplePlan plan = build_sample_plan(rc.value);
         print_warnings(plan);
+        const DesignerIdentity designer = validate_designer_package(rc.value, config_path);
+        for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         NormalizedMesh mesh =
             load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
         const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
@@ -209,9 +221,9 @@ int run(int argc, char** argv) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (format == "csv")
-            write_csv_and_sidecar(rc, plan, mesh, result);
+            write_csv_and_sidecar(rc, plan, mesh, result, designer);
         else
-            write_hdf5_output(rc, plan, mesh, result);
+            write_hdf5_output(rc, plan, mesh, result, designer);
         if (!bench_profile.empty())
             write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count,
                                     plan.sample_count(), solve_seconds,

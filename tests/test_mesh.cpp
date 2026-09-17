@@ -50,11 +50,11 @@ TEST(Mesh, ParseBinaryStl) {
 }
 
 TEST(Mesh, ParseObjTriangle) {
-    const auto tris = strikecem::parse_obj(example("triangle.obj"));
-    ASSERT_EQ(tris.size(), 1u);
-    EXPECT_DOUBLE_EQ(tris[0].a.x, 0.0);
-    EXPECT_DOUBLE_EQ(tris[0].b.x, 1.0);
-    EXPECT_DOUBLE_EQ(tris[0].c.y, 1.0);
+    const auto obj = strikecem::parse_obj(example("triangle.obj"));
+    ASSERT_EQ(obj.triangles.size(), 1u);
+    EXPECT_DOUBLE_EQ(obj.triangles[0].a.x, 0.0);
+    EXPECT_DOUBLE_EQ(obj.triangles[0].b.x, 1.0);
+    EXPECT_DOUBLE_EQ(obj.triangles[0].c.y, 1.0);
 }
 
 TEST(Mesh, PlateReport) {

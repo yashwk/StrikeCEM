@@ -178,7 +178,7 @@ std::string hash_normalized(const BuiltMesh& m) {
 
 // Cache layout v3: magic + key-input echo + counts + mesh hash +
 // repair metadata + payload.
-constexpr char kMagic[] = "SCEMMESH03";
+constexpr char kMagic[] = "SCEMMESH04";
 
 void append_u64(std::string& out, uint64_t v) {
     out.append(reinterpret_cast<const char*>(&v), sizeof(v));
@@ -282,6 +282,15 @@ bool try_load_cache(const std::string& key, const std::string& key_echo,
         p += hash_len;
         const uint64_t repaired_flag = take_u64(p, end, "repair flag");
         const MeshReport stored_before = take_report(p, end);
+        const uint64_t ngroups = take_u64(p, end, "group count");
+        if (ngroups > 100'000) return false;
+        std::vector<std::string> groups;
+        for (uint64_t i = 0; i < ngroups; ++i) {
+            const uint64_t len = take_u64(p, end, "group name");
+            if (len > 4096 || p + len > end) return false;
+            groups.emplace_back(p, len);
+            p += len;
+        }
         if (nverts > 100'000'000 || ntris > 100'000'000) return false;
         const size_t need = nverts * sizeof(geom::Vec3d) + ntris * 3 * sizeof(uint32_t) +
                             ntris * sizeof(geom::Vec3d) + ntris * sizeof(double);
@@ -297,6 +306,7 @@ bool try_load_cache(const std::string& key, const std::string& key_echo,
         p += ntris * sizeof(geom::Vec3d);
         out.areas.resize(ntris);
         std::memcpy(out.areas.data(), p, ntris * sizeof(double));
+        out.groups = std::move(groups);
         // Rebuild the report from payload so resume never trusts a stale one.
         std::vector<RawTriangle> raw;
         raw.reserve(ntris);
@@ -332,6 +342,11 @@ void store_cache(const std::string& key, const std::string& key_echo, const fs::
     bytes += mesh.normalized_mesh_hash;
     append_u64(bytes, mesh.repaired ? 1 : 0);
     append_report(bytes, mesh.report_before);
+    append_u64(bytes, mesh.groups.size());
+    for (const auto& g : mesh.groups) {
+        append_u64(bytes, g.size());
+        bytes += g;
+    }
     bytes.append(reinterpret_cast<const char*>(mesh.vertices.data()),
                  mesh.vertices.size() * sizeof(geom::Vec3d));
     bytes.append(reinterpret_cast<const char*>(mesh.triangles.data()),
@@ -411,11 +426,11 @@ std::vector<RawTriangle> parse_stl(const fs::path& path) {
     throw MeshLoadError("ASCII STL missing endsolid in " + path.string());
 }
 
-std::vector<RawTriangle> parse_obj(const fs::path& path) {
+ObjMesh parse_obj(const fs::path& path) {
     std::ifstream in(path);
     if (!in) throw MeshLoadError("cannot open mesh file: " + path.string());
     std::vector<geom::Vec3d> verts;
-    std::vector<RawTriangle> tris;
+    ObjMesh mesh;
     std::string line;
     while (std::getline(in, line)) {
         std::istringstream ls(line);
@@ -426,6 +441,11 @@ std::vector<RawTriangle> parse_obj(const fs::path& path) {
             if (!(ls >> v.x >> v.y >> v.z))
                 throw MeshLoadError("malformed OBJ vertex in " + path.string());
             verts.push_back(v);
+        } else if (tag == "g" || tag == "o") {
+            std::string name;
+            if (ls >> name &&
+                std::find(mesh.groups.begin(), mesh.groups.end(), name) == mesh.groups.end())
+                mesh.groups.push_back(name);
         } else if (tag == "f") {
             std::vector<geom::Vec3d> face;
             std::string token;
@@ -438,10 +458,10 @@ std::vector<RawTriangle> parse_obj(const fs::path& path) {
                 throw MeshLoadError("OBJ face with fewer than 3 vertices in " + path.string());
             // Fan triangulation for polygonal faces.
             for (size_t i = 1; i + 1 < face.size(); ++i)
-                tris.push_back({face[0], face[i], face[i + 1]});
+                mesh.triangles.push_back({face[0], face[i], face[i + 1]});
         }
     }
-    return tris;
+    return mesh;
 }
 
 NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::path& config_dir,
@@ -483,7 +503,9 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
         if (ends_with(".stl")) {
             raw = parse_stl(mesh_path);
         } else if (ends_with(".obj")) {
-            raw = parse_obj(mesh_path);
+            ObjMesh obj = parse_obj(mesh_path);
+            raw = std::move(obj.triangles);
+            mesh.groups = std::move(obj.groups);
         } else {
             throw MeshLoadError("unsupported mesh extension (v1 accepts .stl/.obj): " + rel);
         }

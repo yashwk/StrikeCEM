@@ -15,6 +15,7 @@
 #include <H5Cpp.h>
 
 #include "strikecem/io/Checksum.hpp"
+#include "strikecem/io/DesignerPackage.hpp"
 #include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
@@ -344,7 +345,8 @@ void check_resume_identity(H5::H5File& file, const ResolvedConfig& rc, const Sam
 } // namespace
 
 void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
-                       const NormalizedMesh& mesh, const PoResult& result) {
+                       const NormalizedMesh& mesh, const PoResult& result,
+                       const DesignerIdentity& designer) {
     H5::Exception::dontPrint();
     const fs::path out_path(rc.value["output"]["path"].get<std::string>());
     const bool float32 = rc.value["solver"]["precision"].get<std::string>() == "float32";
@@ -417,16 +419,10 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         write_str_attr(file, "normalized_mesh_hash", mesh.normalized_mesh_hash);
         write_str_attr(file, "sample_plan_hash", plan.hash);
         write_str_attr(file, "solver_type", rc.value["solver"]["type"].get<std::string>());
-        if (rc.value.contains("integration") && rc.value["integration"].contains("designer")) {
-            const auto& d = rc.value["integration"]["designer"];
-            write_str_attr(file, "design_id", d["design_id"].get<std::string>());
-            write_str_attr(file, "design_revision", d["revision"].get<std::string>());
-            write_str_attr(file, "export_id", d.value("export_id", std::string()));
-        } else {
-            write_str_attr(file, "design_id", "");
-            write_str_attr(file, "design_revision", "");
-            write_str_attr(file, "export_id", "");
-        }
+        write_str_attr(file, "design_id", designer.design_id);
+        write_str_attr(file, "design_revision", designer.revision);
+        write_str_attr(file, "export_id", designer.export_id);
+        write_str_attr(file, "export_manifest_hash", designer.manifest_hash);
         write_str_attr(file, "tool_version", SCEM_VERSION);
         write_str_attr(file, "git_revision", SCEM_GIT_REVISION);
         write_str_attr(file, "build_type", SCEM_BUILD_TYPE);

@@ -1,0 +1,13 @@
+{
+  "export_format_version": "1.0",
+  "design_id": "test-plate",
+  "design_revision": "7",
+  "designer_version": "0.0-test",
+  "geometry_path": "geometry/target.obj",
+  "geometry_sha256": "35fba0c2ae72db7235fed40e5cff88b6876a06f5da81523938d8139ac4c6b3da",
+  "units": "m",
+  "source_coordinate_system": "strike-right-handed-z-up",
+  "component_manifest": [
+    {"component_id": "plate", "name": "Plate", "group": "body"}
+  ]
+}

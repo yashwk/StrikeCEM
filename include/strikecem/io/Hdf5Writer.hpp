@@ -9,6 +9,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "strikecem/io/DesignerPackage.hpp"
+
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/io/OutputError.hpp"
@@ -17,7 +19,8 @@
 namespace strikecem {
 
 void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
-                       const NormalizedMesh& mesh, const PoResult& result);
+                       const NormalizedMesh& mesh, const PoResult& result,
+                       const DesignerIdentity& designer = {});
 
 // Resume a partial database: verifies identity, re-verifies committed chunk
 // checksums, solves only missing units, and commits touched chunks.
