@@ -42,7 +42,8 @@ template <typename Real> CVec3<Real> to_complex(const Vec3<Real>& v) {
 template <typename Real>
 PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                      const nlohmann::json& resolved, unsigned num_threads,
-                     const std::vector<std::pair<uint32_t, uint32_t>>& units) {
+                     const std::vector<std::pair<uint32_t, uint32_t>>& units,
+                     const FringeOptions& fringe) {
     using C = std::complex<Real>;
     PoResult out;
     const auto& medium = resolved["frequency"]["medium"];
@@ -117,6 +118,31 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                 for (int i = 0; i < 3; ++i) f_tx[tx][i] += coeff * t2[i];
             }
         }
+        // Edge-diffraction fringe: same f_tx accumulation, per transmit.
+        if (fringe.enabled) {
+            const geom::Vec3d s_hat_d{static_cast<double>(k_hat.x),
+                                      static_cast<double>(k_hat.y),
+                                      static_cast<double>(k_hat.z)};
+            const geom::Vec3d r_hat_d{static_cast<double>(r_hat.x),
+                                      static_cast<double>(r_hat.y),
+                                      static_cast<double>(r_hat.z)};
+            const double k_d = static_cast<double>(k);
+            const double e0_d = static_cast<double>(e0_r);
+            for (const MeshEdge& edge : fringe.edges->edges) {
+                for (int tx = 0; tx < 2; ++tx) {
+                    const std::array<std::complex<double>, 3> e_unit = {
+                        std::complex<double>(static_cast<double>(tx_e[tx].x) / e0_d, 0.0),
+                        std::complex<double>(static_cast<double>(tx_e[tx].y) / e0_d, 0.0),
+                        std::complex<double>(static_cast<double>(tx_e[tx].z) / e0_d, 0.0)};
+                    const auto fv = fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_unit);
+                    if (!fv) continue; // end-on edge: no transverse frame
+                    for (int i = 0; i < 3; ++i)
+                        f_tx[tx][i] +=
+                            C(static_cast<Real>((*fv)[i].real() * e0_d),
+                              static_cast<Real>((*fv)[i].imag() * e0_d));
+                }
+            }
+        }
         // Linear scattering matrix S[rx][tx], rows/cols (H, V).
         const Vec3<Real> rx_e[2] = {eh, ev};
         std::complex<double> f_tx_d[2][3];
@@ -183,30 +209,39 @@ std::vector<std::pair<uint32_t, uint32_t>> all_units(const SamplePlan& plan) {
 
 PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
                        const nlohmann::json& resolved,
-                       const std::vector<std::pair<uint32_t, uint32_t>>& units) {
+                       const std::vector<std::pair<uint32_t, uint32_t>>& units,
+                       const FringeOptions& fringe) {
     const std::string precision = resolved["solver"].value("precision", "float64");
     const unsigned threads = resolved["execution"].value("cpu_threads", 1u);
+    if (fringe.enabled) {
+        if (fringe.edges == nullptr)
+            throw std::invalid_argument("fringe correction enabled without an edge model");
+        if (resolved["execution"].value("accelerator", "cpu") == "cuda")
+            throw cuda::CudaError("fringe correction is CPU-only in v1");
+    }
     if (resolved["execution"].value("accelerator", "cpu") == "cuda") {
         const int device = resolved["execution"].value("cuda_device_id", 0);
         return cuda::solve_po_cuda_units(mesh, plan, resolved, device, units);
     }
-    if (precision == "float32") return solve_typed<float>(mesh, plan, resolved, threads, units);
-    return solve_typed<double>(mesh, plan, resolved, threads, units);
+    if (precision == "float32")
+        return solve_typed<float>(mesh, plan, resolved, threads, units, fringe);
+    return solve_typed<double>(mesh, plan, resolved, threads, units, fringe);
 }
 } // namespace
 
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,
-                  const nlohmann::json& resolved) {
+                  const nlohmann::json& resolved, const FringeOptions& fringe) {
     std::vector<std::pair<uint32_t, uint32_t>> units;
     for (uint32_t fi = 0; fi < plan.frequencies_hz.size(); ++fi)
         for (uint32_t di = 0; di < plan.directions.size(); ++di) units.emplace_back(fi, di);
-    return solve_backend(mesh, plan, resolved, units);
+    return solve_backend(mesh, plan, resolved, units, fringe);
 }
 
 PoResult solve_po_units(const NormalizedMesh& mesh, const SamplePlan& plan,
                         const nlohmann::json& resolved,
-                        const std::vector<std::pair<uint32_t, uint32_t>>& units) {
-    return solve_backend(mesh, plan, resolved, units);
+                        const std::vector<std::pair<uint32_t, uint32_t>>& units,
+                        const FringeOptions& fringe) {
+    return solve_backend(mesh, plan, resolved, units, fringe);
 }
 
 } // namespace strikecem

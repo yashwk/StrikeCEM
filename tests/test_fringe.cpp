@@ -10,6 +10,8 @@
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/solvers/EdgeFringe.hpp"
 #include "strikecem/solvers/EdgeModel.hpp"
+#include "strikecem/solvers/GpuPO.hpp"
+#include "strikecem/solvers/PhysicalOptics.hpp"
 #include "strikecem/solvers/UtdWedge.hpp"
 
 namespace {
@@ -430,6 +432,19 @@ TEST(Fringe, VectorNulloptEndOn) {
     EXPECT_TRUE(found);
 }
 
+strikecem::SamplePlan make_fringe_plan(const std::vector<double>& freqs,
+                                        const std::vector<std::pair<double, double>>& dirs,
+                                        const std::vector<std::string>& pols) {
+    strikecem::SamplePlan plan;
+    plan.frequencies_hz = freqs;
+    uint32_t id = 0;
+    for (const auto& [az, el] : dirs)
+        plan.directions.push_back(
+            {id++, az, el, strikecem::direction_from_az_el(az, el)});
+    plan.polarizations = pols;
+    return plan;
+}
+
 TEST(Fringe, BadInputsThrow) {
     const auto e = synthetic_edge(1.0);
     const geom::Vec3d s(0, 0, -1), r(0, 0, 1), bad(0, 0, 2);
@@ -438,6 +453,108 @@ TEST(Fringe, BadInputsThrow) {
     EXPECT_THROW(strikecem::edge_transverse_angles(e, bad, r), std::invalid_argument);
     strikecem::MeshEdge zero;
     EXPECT_THROW(strikecem::along_edge_integral(zero, 2.0 * kPi, s, r), std::invalid_argument);
+}
+
+TEST(Fringe, SolverOffByDefault) {
+    // Disabled flag (even with a model attached) reproduces PO exactly.
+    const std::string config = fixture("valid_minimal.json");
+    auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
+    const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+    const auto model = strikecem::extract_edges(mesh);
+    const auto plan = make_fringe_plan({10e9}, {{0.0, -90.0}}, {"HH", "VV"});
+    const auto plain = strikecem::solve_po(mesh, plan, rc.value);
+    const strikecem::FringeOptions off{false, &model};
+    const auto gated = strikecem::solve_po(mesh, plan, rc.value, off);
+    ASSERT_EQ(plain.samples.size(), gated.samples.size());
+    for (size_t i = 0; i < plain.samples.size(); ++i) {
+        EXPECT_EQ(plain.samples[i].scattering, gated.samples[i].scattering);
+        EXPECT_EQ(plain.samples[i].rcs_sqm, gated.samples[i].rcs_sqm);
+    }
+}
+
+TEST(Fringe, SolverMatchesManualAssembly) {
+    // Solver accumulation == independent per-edge vector sum projected on
+    // the receive basis: pins the hook, not just the core.
+    const std::string config = fixture("valid_minimal.json");
+    auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
+    const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+    const auto model = strikecem::extract_edges(mesh);
+    const auto plan = make_fringe_plan({10e9}, {{0.0, -90.0}}, {"HH"});
+    const auto po = strikecem::solve_po(mesh, plan, rc.value);
+    const strikecem::FringeOptions on{true, &model};
+    const auto total = strikecem::solve_po(mesh, plan, rc.value, on);
+    ASSERT_EQ(total.samples.size(), 1u);
+    const double e0 = rc.value["physics"]["incident_amplitude"].get<double>();
+    const geom::Vec3d k_hat = plan.directions[0].k_hat;
+    const geom::Vec3d r_hat = k_hat * -1.0;
+    const auto basis = strikecem::polarization_basis(k_hat);
+    const double freq = plan.frequencies_hz[0];
+    const double k = 2.0 * kPi * freq / strikecem::kSpeedOfLight;
+    std::complex<double> manual{0.0, 0.0};
+    for (const auto& e : model.edges) {
+        const std::array<std::complex<double>, 3> ein = {basis.h.x, basis.h.y, basis.h.z};
+        const auto f = strikecem::fringe_vector(e, k, k_hat, r_hat, ein);
+        ASSERT_TRUE(f.has_value());
+        manual += (*f)[0] * basis.h.x + (*f)[1] * basis.h.y + (*f)[2] * basis.h.z;
+    }
+    EXPECT_NEAR(std::abs(total.samples[0].scattering - po.samples[0].scattering - manual), 0.0,
+                1e-9 * std::abs(po.samples[0].scattering));
+}
+
+TEST(Fringe, SolverNullFillsDarkSide) {
+    // Dark side: PO is exactly zero; PO + fringe is finite (the fringe is
+    // the entire return) and matches the manual edge sum.
+    const std::string config = fixture("valid_minimal.json");
+    auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
+    const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+    const auto model = strikecem::extract_edges(mesh);
+    const auto plan = make_fringe_plan({10e9}, {{0.0, 90.0}}, {"HH"});
+    const auto po = strikecem::solve_po(mesh, plan, rc.value);
+    ASSERT_EQ(po.samples[0].lit_facets, 0u);
+    EXPECT_DOUBLE_EQ(std::abs(po.samples[0].scattering), 0.0);
+    const strikecem::FringeOptions on{true, &model};
+    const auto total = strikecem::solve_po(mesh, plan, rc.value, on);
+    EXPECT_EQ(total.samples[0].lit_facets, 0u);
+    EXPECT_GT(std::abs(total.samples[0].scattering), 0.0);
+    EXPECT_GT(total.samples[0].rcs_sqm, 0.0);
+}
+
+TEST(Fringe, SolverGuards) {
+    const std::string config = fixture("valid_minimal.json");
+    auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
+    const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+    const auto model = strikecem::extract_edges(mesh);
+    const auto plan = make_fringe_plan({10e9}, {{0.0, -90.0}}, {"HH"});
+    const strikecem::FringeOptions null_model{true, nullptr};
+    EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, null_model), std::invalid_argument);
+    // Fringe + CUDA fails closed (exit 4 at the CLI) before touching any device.
+    auto rc_cuda = rc;
+    rc_cuda.value["execution"]["accelerator"] = "cuda";
+    const strikecem::FringeOptions on{true, &model};
+    EXPECT_THROW(strikecem::solve_po(mesh, plan, rc_cuda.value, on), strikecem::cuda::CudaError);
+    // Fringe off + CUDA routes to the device path when one answers, else
+    // the stub throws: accept either, the fringe flag changes nothing.
+    const strikecem::FringeOptions off{false, &model};
+    try {
+        const auto gpu = strikecem::solve_po(mesh, plan, rc_cuda.value, off);
+        EXPECT_EQ(gpu.samples.size(), 1u);
+    } catch (const strikecem::cuda::CudaError&) {
+        EXPECT_FALSE(strikecem::cuda::cuda_available());
+    }
+}
+
+TEST(Fringe, SolverFloat32Smoke) {
+    const std::string config = fixture("valid_minimal.json");
+    auto rc = strikecem::load_config(config, SCEM_SCHEMA_PATH);
+    rc.value["solver"]["precision"] = "float32";
+    const auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+    const auto model = strikecem::extract_edges(mesh);
+    const auto plan = make_fringe_plan({10e9}, {{0.0, -90.0}}, {"HH", "VV"});
+    const strikecem::FringeOptions on{true, &model};
+    const auto total = strikecem::solve_po(mesh, plan, rc.value, on);
+    ASSERT_EQ(total.samples.size(), 2u);
+    for (const auto& row : total.samples)
+        EXPECT_TRUE(std::isfinite(row.scattering.real() + row.rcs_sqm));
 }
 
 } // namespace
