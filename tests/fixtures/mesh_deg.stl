@@ -1,4 +1,4 @@
-solid plate
+solid plate_with_degenerate
 facet normal 0 0 1
  outer loop
   vertex 0 0 0
@@ -13,4 +13,11 @@ facet normal 0 0 1
   vertex 0 1 0
  endloop
 endfacet
-endsolid plate
+facet normal 0 0 0
+ outer loop
+  vertex 2 0 0
+  vertex 3 0 0
+  vertex 4 0 0
+ endloop
+endfacet
+endsolid plate_with_degenerate
