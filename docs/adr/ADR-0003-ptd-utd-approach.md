@@ -39,3 +39,13 @@
   (zero phantom edges).
 - Fringe physics must consume `MeshEdge` as-is; any extra per-edge data
   it needs is a new field with a test, not a parallel structure.
+- Slice C (3D fringe geometry, done): `MeshEdge.face0_dir` (unit, into
+  face tri0, perpendicular to tangent) feeds `solvers/EdgeFringe` — rim
+  transverse frame (`phi`/`phi_prime`/`sin_beta0`) plus the analytic
+  along-edge integral in PO phase convention, cross-checked against
+  brute-force quadrature with a predicted sinc null. Plate-rim
+  structural benchmark passes (edge-on: PO lights nothing, the two
+  transverse rims stay valid with finite KP coefficients).
+- Deferred to slice D: coupling validated-2D-pattern × integral,
+  absolute spreading calibration, `n != 2` wedge-frame mapping, end-on
+  cones. Schema stays locked (`edge_correction: const none`).

@@ -38,6 +38,19 @@ EdgeModel extract_edges(const NormalizedMesh& mesh, double dihedral_threshold_ra
         edge.length = span.length();
         if (!(edge.length > 0.0)) throw std::invalid_argument("zero-length mesh edge");
         edge.tangent = span * (1.0 / edge.length);
+        // Interior direction of face tri0, projected perpendicular to the
+        // edge: the screen reference for rims (wedge-frame mapping for
+        // n != 2 creases is a later slice).
+        const auto& ft = mesh.triangles[static_cast<uint32_t>(t0)];
+        const geom::Vec3d c0 =
+            (mesh.vertices[ft[0]] + mesh.vertices[ft[1]] + mesh.vertices[ft[2]]) * (1.0 / 3.0);
+        const geom::Vec3d m = (mesh.vertices[va] + mesh.vertices[vb]) * 0.5;
+        const geom::Vec3d along = edge.tangent * geom::dot(c0 - m, edge.tangent);
+        geom::Vec3d inward = (c0 - m) - along;
+        const double inward_len = inward.length();
+        if (!(inward_len > 1e-15 * edge.length))
+            throw std::invalid_argument("degenerate edge-adjacent face");
+        edge.face0_dir = inward * (1.0 / inward_len);
         edge.n0 = n0;
         edge.n1 = n1;
         edge.tri0 = t0;
