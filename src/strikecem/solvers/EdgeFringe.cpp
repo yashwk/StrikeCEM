@@ -1,9 +1,11 @@
-// 3D straight-edge fringe geometry (ADR-0003 slice C).
+// 3D straight-edge fringe geometry (ADR-0003 slices C/D1).
 #include "strikecem/solvers/EdgeFringe.hpp"
 
 #include <cmath>
 #include <numbers>
 #include <stdexcept>
+
+#include "strikecem/solvers/UtdWedge.hpp"
 
 namespace strikecem {
 namespace {
@@ -22,6 +24,25 @@ double norm_2pi(double a) {
     return a;
 }
 
+// Unit transverse basis (e1, e2 = e1 x t) from a face direction, or false.
+bool transverse_basis(const geom::Vec3d& face_dir, const geom::Vec3d& t, geom::Vec3d& e1,
+                      geom::Vec3d& e2) {
+    e1 = face_dir - t * geom::dot(face_dir, t);
+    const double n = e1.length();
+    if (!(n > 1e-12)) return false;
+    e1 = e1 * (1.0 / n);
+    e2 = geom::cross(e1, t);
+    return true;
+}
+
+void project_angles(const geom::Vec3d& e1, const geom::Vec3d& e2,
+                    const geom::Vec3d& s_hat, const geom::Vec3d& r_hat, double& phi,
+                    double& phi_prime) {
+    const geom::Vec3d arrival = s_hat * -1.0; // edge -> source
+    phi = norm_2pi(std::atan2(geom::dot(r_hat, e2), geom::dot(r_hat, e1)));
+    phi_prime = norm_2pi(std::atan2(geom::dot(arrival, e2), geom::dot(arrival, e1)));
+}
+
 } // namespace
 
 TransverseAngles edge_transverse_angles(const MeshEdge& edge,
@@ -34,22 +55,58 @@ TransverseAngles edge_transverse_angles(const MeshEdge& edge,
     const double t_len = edge.tangent.length();
     if (!(t_len > 0.0)) throw std::invalid_argument("edge tangent must be non-zero");
     const geom::Vec3d t = edge.tangent * (1.0 / t_len);
-    geom::Vec3d e1 = edge.face0_dir - t * geom::dot(edge.face0_dir, t);
-    const double e1_len = e1.length();
-    if (!(e1_len > 1e-12)) return out;
-    e1 = e1 * (1.0 / e1_len);
-    const geom::Vec3d e2 = geom::cross(e1, t); // unit: e1 ⊥ t, both unit
+    geom::Vec3d e1, e2;
+    if (!transverse_basis(edge.face0_dir, t, e1, e2)) return out;
     const geom::Vec3d st = s_hat - t * geom::dot(s_hat, t);
     const double sin_beta0 = st.length();
     if (!(sin_beta0 > 1e-12)) return out; // end-on: no transverse plane
-    const geom::Vec3d arrival = s_hat * -1.0; // edge -> source
-    const double au = geom::dot(arrival, e1), av = geom::dot(arrival, e2);
-    const double ou = geom::dot(r_hat, e1), ov = geom::dot(r_hat, e2);
-    out.phi = norm_2pi(std::atan2(ov, ou));
-    out.phi_prime = norm_2pi(std::atan2(av, au));
+    project_angles(e1, e2, s_hat, r_hat, out.phi, out.phi_prime);
     out.sin_beta0 = sin_beta0;
     out.valid = true;
     return out;
+}
+
+TransverseAngles wedge_transverse_angles(const MeshEdge& edge,
+                                         const geom::Vec3d& s_hat,
+                                         const geom::Vec3d& r_hat) {
+    if (!is_unit(s_hat) || !is_unit(r_hat))
+        throw std::invalid_argument("edge fringe directions must be unit vectors");
+    TransverseAngles out;
+    if (edge.boundary || edge.wedge_n < 1.0 || edge.wedge_n > 2.0) return out;
+    const double t_len = edge.tangent.length();
+    if (!(t_len > 0.0)) throw std::invalid_argument("edge tangent must be non-zero");
+    const geom::Vec3d t = edge.tangent * (1.0 / t_len);
+    geom::Vec3d e1, e2;
+    if (!transverse_basis(edge.face0_dir, t, e1, e2)) return out;
+    geom::Vec3d f1, dummy;
+    if (!transverse_basis(edge.face1_dir, t, f1, dummy)) return out;
+    if (geom::dot(f1, e2) > 0.0) e2 = e2 * -1.0; // face-tri1 ray lands at wedge_n * pi
+    const geom::Vec3d st = s_hat - t * geom::dot(s_hat, t);
+    const double sin_beta0 = st.length();
+    if (!(sin_beta0 > 1e-12)) return out; // end-on: no transverse plane
+    project_angles(e1, e2, s_hat, r_hat, out.phi, out.phi_prime);
+    out.sin_beta0 = sin_beta0;
+    out.valid = true;
+    return out;
+}
+
+std::optional<std::complex<double>> fringe_amplitude(const MeshEdge& edge, double k,
+                                                     const geom::Vec3d& s_hat,
+                                                     const geom::Vec3d& r_hat, char pol) {
+    if (pol != 's' && pol != 'h') throw std::invalid_argument("fringe pol must be 's' or 'h'");
+    if (!(k > 0.0) || !std::isfinite(k))
+        throw std::invalid_argument("wavenumber must be positive and finite");
+    if (!is_unit(s_hat) || !is_unit(r_hat))
+        throw std::invalid_argument("edge fringe directions must be unit vectors");
+    const TransverseAngles ang =
+        edge.boundary ? edge_transverse_angles(edge, s_hat, r_hat)
+                      : wedge_transverse_angles(edge, s_hat, r_hat);
+    if (!ang.valid) return std::nullopt;
+    const double n = edge.boundary ? 2.0 : edge.wedge_n;
+    const double kt = k * ang.sin_beta0;
+    const auto integral = along_edge_integral(edge, k, s_hat, r_hat); // throws on zero length
+    const auto d = utd_coefficient(kt, edge.length, n, ang.phi, ang.phi_prime);
+    return (pol == 's' ? d.soft : d.hard) * integral;
 }
 
 std::complex<double> along_edge_integral(const MeshEdge& edge, double k,

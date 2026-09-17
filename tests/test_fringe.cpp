@@ -185,6 +185,168 @@ TEST(Fringe, EdgeOnPlateAssembly) {
     EXPECT_TRUE(saw_zero && saw_pi); // leading/trailing rim pair
 }
 
+TEST(Fringe, Face1DirIntoFace1) {
+    const auto mesh = load_mesh("valid_dihedral.json");
+    const auto model = strikecem::extract_edges(mesh);
+    int interior = 0, rims = 0;
+    for (const auto& e : model.edges) {
+        if (e.boundary) {
+            ++rims;
+            EXPECT_EQ(e.face1_dir.x, e.face0_dir.x);
+            EXPECT_EQ(e.face1_dir.y, e.face0_dir.y);
+            EXPECT_EQ(e.face1_dir.z, e.face0_dir.z);
+            continue;
+        }
+        ++interior;
+        EXPECT_NEAR(e.face1_dir.length(), 1.0, 1e-12);
+        EXPECT_NEAR(geom::dot(e.face1_dir, e.tangent), 0.0, 1e-12);
+        const auto& ft = mesh.triangles[static_cast<uint32_t>(e.tri1)];
+        const geom::Vec3d c =
+            (mesh.vertices[ft[0]] + mesh.vertices[ft[1]] + mesh.vertices[ft[2]]) * (1.0 / 3.0);
+        const geom::Vec3d m = (e.p0 + e.p1) * 0.5;
+        EXPECT_GT(geom::dot(e.face1_dir, c - m), 0.0);
+    }
+    EXPECT_EQ(interior, 1);
+    EXPECT_EQ(rims, 6);
+}
+
+const strikecem::MeshEdge& dihedral_valley(const strikecem::EdgeModel& model) {
+    for (const auto& e : model.edges)
+        if (!e.boundary) return e;
+    throw std::logic_error("no valley edge");
+}
+
+TEST(Fringe, ValleyFrameExterior) {
+    // Dihedral valley (n = 1.5), look from -x: arrival/observation at
+    // frame angle pi, inside the exterior cone (0, 1.5*pi).
+    const auto mesh = load_mesh("valid_dihedral.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const auto& v = dihedral_valley(model);
+    EXPECT_NEAR(v.wedge_n, 1.5, 1e-9);
+    const geom::Vec3d s(1, 0, 0), r(-1, 0, 0);
+    const auto ang = strikecem::wedge_transverse_angles(v, s, r);
+    ASSERT_TRUE(ang.valid);
+    EXPECT_NEAR(ang.sin_beta0, 1.0, 1e-12);
+    EXPECT_NEAR(ang.phi, kPi, 1e-9);
+    EXPECT_NEAR(ang.phi_prime, kPi, 1e-9);
+    EXPECT_GT(ang.phi, 0.0);
+    EXPECT_LT(ang.phi, 1.5 * kPi);
+    // Rims reject the wedge frame and vice versa.
+    for (const auto& e : model.edges) {
+        if (!e.boundary) continue;
+        EXPECT_FALSE(strikecem::wedge_transverse_angles(e, s, r).valid);
+        break;
+    }
+    EXPECT_FALSE(strikecem::edge_transverse_angles(v, s, r).valid);
+}
+
+TEST(Fringe, LabelingSymmetry) {
+    // D is invariant under simultaneous face-label flip
+    // (phi, phi') -> (2n pi - phi, 2n pi - phi'): the fringe does not
+    // depend on which adjacent face the mesh lists first.
+    const double k = 2.0 * kPi, n = 1.5;
+    for (const auto [phi, phip] :
+         {std::make_pair(1.0, 2.0), {0.5, 4.0}, {2.5, 1.2}, {0.3, 4.4}}) {
+        const auto a = strikecem::utd_coefficient(k, 1.0, n, phi, phip);
+        const auto b = strikecem::utd_coefficient(k, 1.0, n, 2 * n * kPi - phi, 2 * n * kPi - phip);
+        EXPECT_NEAR(std::abs(a.soft - b.soft), 0.0, 1e-12 * std::abs(a.soft));
+        EXPECT_NEAR(std::abs(a.hard - b.hard), 0.0, 1e-12 * std::abs(a.hard));
+    }
+}
+
+TEST(Fringe, FringeBroadsideIdentity) {
+    // F = D x I exactly: recompute both factors independently.
+    const auto mesh = load_mesh("valid_minimal.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const double k = 2.0 * kPi;
+    const geom::Vec3d s(0, 0, -1), r(0, 0, 1);
+    for (const auto& e : model.edges) {
+        const auto ang = strikecem::edge_transverse_angles(e, s, r);
+        ASSERT_TRUE(ang.valid);
+        const auto integ = strikecem::along_edge_integral(e, k, s, r);
+        const auto d = strikecem::utd_coefficient(k, e.length, 2.0, ang.phi, ang.phi_prime);
+        const auto fs = strikecem::fringe_amplitude(e, k, s, r, 's');
+        const auto fh = strikecem::fringe_amplitude(e, k, s, r, 'h');
+        ASSERT_TRUE(fs.has_value() && fh.has_value());
+        EXPECT_NEAR(std::abs(*fs - d.soft * integ), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs(*fh - d.hard * integ), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs(*fs), std::abs(d.soft) * e.length, 1e-12);
+    }
+}
+
+TEST(Fringe, ValleyFringeFiniteAndSplit) {
+    const auto mesh = load_mesh("valid_dihedral.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const auto& v = dihedral_valley(model);
+    const double k = 2.0 * kPi;
+    const geom::Vec3d s(1, 0, 0), r(-1, 0, 0);
+    const auto fs = strikecem::fringe_amplitude(v, k, s, r, 's');
+    const auto fh = strikecem::fringe_amplitude(v, k, s, r, 'h');
+    ASSERT_TRUE(fs.has_value() && fh.has_value());
+    EXPECT_TRUE(std::isfinite(fs->real() + fs->imag()));
+    EXPECT_TRUE(std::isfinite(fh->real() + fh->imag()));
+    EXPECT_GT(std::abs(*fs - *fh), 1e-3 * std::max(std::abs(*fs), std::abs(*fh)));
+    const auto integ = strikecem::along_edge_integral(v, k, s, r);
+    EXPECT_NEAR(integ.real(), v.length, 1e-12);
+    EXPECT_NEAR(integ.imag(), 0.0, 1e-12);
+    const auto d = strikecem::utd_coefficient(k, v.length, 1.5, kPi, kPi);
+    EXPECT_NEAR(std::abs(*fs - d.soft * integ), 0.0, 1e-12);
+}
+
+TEST(Fringe, ValleyArcSweep) {
+    // Monostatic arc in the transverse plane, frame angles 0.2..4.2 rad
+    // (exterior cone): frame tracks the look direction, fringe is finite
+    // and continuous by refinement.
+    const auto mesh = load_mesh("valid_dihedral.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const auto& v = dihedral_valley(model);
+    EXPECT_NEAR(v.length, 1.0, 1e-12);
+    const double k = 2.0 * kPi;
+    auto fringe_at = [&](double alpha) {
+        const geom::Vec3d r(std::cos(alpha), 0.0, -std::sin(alpha));
+        const geom::Vec3d s = r * -1.0;
+        const auto ang = strikecem::wedge_transverse_angles(v, s, r);
+        EXPECT_TRUE(ang.valid) << "alpha=" << alpha;
+        EXPECT_NEAR(ang.sin_beta0, 1.0, 1e-12);
+        EXPECT_NEAR(ang.phi, alpha, 1e-9) << "alpha=" << alpha;
+        EXPECT_NEAR(ang.phi_prime, alpha, 1e-9) << "alpha=" << alpha;
+        const auto f = strikecem::fringe_amplitude(v, k, s, r, 's');
+        EXPECT_TRUE(f.has_value());
+        EXPECT_TRUE(std::isfinite(f->real() + f->imag()));
+        return *f;
+    };
+    auto max_jump = [&](int steps) {
+        double worst = 0.0;
+        std::complex<double> prev{0.0, 0.0};
+        for (int i = 0; i <= steps; ++i) {
+            const auto cur = fringe_at(0.2 + (4.2 - 0.2) * i / steps);
+            if (i > 0) worst = std::max(worst, std::abs(cur - prev));
+            prev = cur;
+        }
+        return worst;
+    };
+    // Spot-check the frame at three predicted angles.
+    fringe_at(1.0);
+    fringe_at(2.0);
+    fringe_at(4.0);
+    EXPECT_LT(max_jump(64), 2.0 * max_jump(8) + 1e-12);
+}
+
+TEST(Fringe, FringeNulloptEndOn) {
+    const auto mesh = load_mesh("valid_minimal.json");
+    const auto model = strikecem::extract_edges(mesh);
+    const geom::Vec3d s(1, 0, 0), r(-1, 0, 0);
+    bool found = false;
+    for (const auto& e : model.edges) {
+        if (std::abs(e.tangent.x) < 0.9) continue;
+        EXPECT_FALSE(strikecem::fringe_amplitude(e, 2.0 * kPi, s, r, 's').has_value());
+        found = true;
+    }
+    EXPECT_TRUE(found);
+    const auto& e = model.edges[0];
+    EXPECT_THROW(strikecem::fringe_amplitude(e, 2.0 * kPi, s, r, 'x'), std::invalid_argument);
+    EXPECT_THROW(strikecem::fringe_amplitude(e, 0.0, s, r, 's'), std::invalid_argument);
+}
 TEST(Fringe, BadInputsThrow) {
     const auto e = synthetic_edge(1.0);
     const geom::Vec3d s(0, 0, -1), r(0, 0, 1), bad(0, 0, 2);

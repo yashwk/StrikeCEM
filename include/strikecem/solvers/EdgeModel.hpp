@@ -18,6 +18,7 @@ struct MeshEdge {
     double length = 0.0;
     geom::Vec3d n0, n1;   // adjacent outward face normals (n1 == n0 on rims)
     geom::Vec3d face0_dir; // unit, perpendicular to tangent, into face tri0
+    geom::Vec3d face1_dir; // unit, perpendicular to tangent, into face tri1 (= face0 on rims)
     int32_t tri0 = -1;    // adjacent triangle (lower index)
     int32_t tri1 = -1;    // second triangle, -1 on boundary rims
     bool boundary = false;

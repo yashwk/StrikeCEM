@@ -49,3 +49,15 @@
 - Deferred to slice D: coupling validated-2D-pattern × integral,
   absolute spreading calibration, `n != 2` wedge-frame mapping, end-on
   cones. Schema stays locked (`edge_correction: const none`).
+- Slice D1 (fringe amplitude, done): `MeshEdge.face1_dir` plus
+  `fringe_amplitude` = D_pol(k_t, rho = L; phi, phi_prime) × I with
+  k_t = k·sin_beta0. Interior creases use the wedge frame (phi = 0 on
+  face0_dir, phi = wedge_n·pi on the face-tri1 ray; labeling-flip
+  symmetry tested on the coefficient). Dihedral valley benchmark:
+  frame lands at the predicted angle inside the exterior cone, fringe
+  is finite with soft/hard split, and an exterior arc sweep tracks the
+  look direction continuously. rho_ref = L stays provisional; no solver
+  wiring, schema still locked.
+- Remaining (slice D2): polarization-to-channel mapping, solver
+  integration behind the flag, plate/dihedral RCS benchmarks, then the
+  backward-compatible schema extension.

@@ -8,6 +8,7 @@
 // Directions are unit travel/observer vectors: s_hat = incident direction
 // of travel, r_hat = direction from origin to the far observer.
 #include <complex>
+#include <optional>
 
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/solvers/EdgeModel.hpp"
@@ -32,6 +33,35 @@ struct TransverseAngles {
 TransverseAngles edge_transverse_angles(const MeshEdge& edge,
                                         const geom::Vec3d& s_hat,
                                         const geom::Vec3d& r_hat);
+
+// Transverse (phi, phi_prime) for an interior wedge crease (1 <= wedge_n
+// <= 2), measured from the face-tri0 ray through the exterior: phi = 0 on
+// face0_dir and phi = wedge_n * pi on the face-tri1 ray, so the exterior
+// cone is (0, wedge_n * pi). e2 = face0_dir x tangent, negated when
+// face1_dir.e2 > 0, which makes the frame tangent-sign invariant.
+// Observers in the interior cone are unphysical (inside PEC);
+// evaluation there is the caller's responsibility. valid=false for rims
+// (use the screen frame above), wedge_n outside [1, 2], degenerate face
+// directions, and end-on incidence. Throws on non-unit/non-finite
+// directions like the screen frame.
+TransverseAngles wedge_transverse_angles(const MeshEdge& edge,
+                                         const geom::Vec3d& s_hat,
+                                         const geom::Vec3d& r_hat);
+
+// Fringe amplitude F = D_pol(k_t, rho = L; phi, phi_prime) x I, with
+// transverse wavenumber k_t = k * sin_beta0, edge length L, and I the
+// along-edge integral above. pol 's' = E parallel to edge (Dirichlet),
+// 'h' = H parallel to edge (Neumann). Rims use the screen frame,
+// interior creases the wedge frame; nullopt when the frame is invalid
+// (end-on incidence). Throws std::invalid_argument on bad k, pol, or
+// directions.
+// ponytail: rho_ref = L is the provisional calibration (the only
+// intrinsic length; k_t * L >> 1 recovers Keller away from boundaries).
+// Absolute spreading and any residual obliquity amplitude ride with the
+// solver-integration benchmark (slice D2), which is the upgrade path.
+std::optional<std::complex<double>> fringe_amplitude(const MeshEdge& edge, double k,
+                                                     const geom::Vec3d& s_hat,
+                                                     const geom::Vec3d& r_hat, char pol);
 
 // Along-edge line integral I = int_edge e^{jk(r_hat - s_hat).r'} dl'
 // = e^{jk(r_hat - s_hat).c} L sinc(k L a / 2), a = (r_hat - s_hat).t_hat,
