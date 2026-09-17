@@ -7,6 +7,7 @@
 //
 // Directions are unit travel/observer vectors: s_hat = incident direction
 // of travel, r_hat = direction from origin to the far observer.
+#include <array>
 #include <complex>
 #include <optional>
 
