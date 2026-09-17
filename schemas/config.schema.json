@@ -126,7 +126,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "edge_correction": {"const": "none", "default": "none"},
+            "edge_correction": {"type": "string", "enum": ["none", "fringe"], "default": "none"},
             "illumination_model": {"const": "hard", "default": "hard"},
             "curvature_correction": {"const": false, "default": false},
             "shadowing": {"const": false, "default": false}

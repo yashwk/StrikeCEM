@@ -61,3 +61,13 @@
 - Remaining (slice D2): polarization-to-channel mapping, solver
   integration behind the flag, plate/dihedral RCS benchmarks, then the
   backward-compatible schema extension.
+- Slice D2d (schema + wiring, done): `edge_correction` extends to
+  `{"none", "fringe"}` (default `none`; GPU phase-3 pattern for
+  backward-compatible 1.0 extensions). CLI builds the edge model and
+  threads `FringeOptions` through solve, resume, and both writers;
+  CUDA + fringe fails closed (exit 4). Provenance records
+  `edge_correction` + `fringe_edges` in the CSV sidecar and HDF5 attrs.
+  `config_hash` covers `edge_correction`, so fringe/none resume mixing
+  is rejected by the existing identity check. All three ADR benchmarks
+  pass (Sommerfeld exact, plate rim, dihedral valley): PTD/UTD track
+  complete, schema unlocked.

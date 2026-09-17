@@ -17,6 +17,7 @@ namespace strikecem {
 // the provenance sidecar. started_utc/runs timestamps handled internally.
 void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                            const NormalizedMesh& mesh, const PoResult& result,
-                           const DesignerIdentity& designer = {});
+                           const DesignerIdentity& designer = {},
+                           const FringeOptions& fringe = {});
 
 } // namespace strikecem

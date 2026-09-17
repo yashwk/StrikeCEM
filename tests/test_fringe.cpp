@@ -4,9 +4,17 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 
+#include <H5Cpp.h>
+#include <nlohmann/json.hpp>
+
+#include "strikecem/app/CLI.hpp"
 #include "strikecem/core/Config.hpp"
+#include "strikecem/io/Hdf5Reader.hpp"
+#include "strikecem/io/Hdf5Writer.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/solvers/EdgeFringe.hpp"
 #include "strikecem/solvers/EdgeModel.hpp"
@@ -15,6 +23,8 @@
 #include "strikecem/solvers/UtdWedge.hpp"
 
 namespace {
+
+namespace fs = std::filesystem;
 
 constexpr double kPi = 3.141592653589793;
 
@@ -548,6 +558,149 @@ TEST(Fringe, SolverFloat32Smoke) {
     ASSERT_EQ(total.samples.size(), 2u);
     for (const auto& row : total.samples)
         EXPECT_TRUE(std::isfinite(row.scattering.real() + row.rcs_sqm));
+}
+
+// End-to-end CLI wiring (slice D2d): schema value, provenance, CUDA
+// refusal, and fringe-aware resume.
+std::string write_fringe_config(const fs::path& dir, const std::string& name,
+                                const std::string& edge_correction, const std::string& format,
+                                bool cuda = false) {
+    nlohmann::json cfg;
+    cfg["scem_schema_version"] = "1.0";
+    cfg["model"] = {{"path", std::string(SCEM_FIXTURE_DIR) + "/../../examples/plate.stl"}};
+    cfg["frequency"] = {{"frequency_hz", 10e9}};
+    cfg["angles"]["azimuth"] = {{"start", 0}, {"stop", 0}, {"step", 1}};
+    cfg["angles"]["elevation"] = {{"start", -90}, {"stop", -90}, {"step", 1}};
+    cfg["solver"] = {{"type", "PO"},
+                     {"po_options", {{"edge_correction", edge_correction}}}};
+    cfg["output"] = {{"path", (dir / name).string()}, {"format", format}};
+    if (cuda) cfg["execution"] = {{"accelerator", "cuda"}};
+    const fs::path config = dir / (name + ".json");
+    {
+        std::ofstream out(config);
+        out << cfg.dump(2);
+    }
+    return config.string();
+}
+
+int cli_run(const std::string& verb, const std::string& config) {
+    const std::string argv0 = "strikecem";
+    char* argv[] = {const_cast<char*>(argv0.c_str()), const_cast<char*>(verb.c_str()),
+                    const_cast<char*>(config.c_str())};
+    return strikecem::cli::run(3, argv);
+}
+
+TEST(Fringe, CliCsvProvenance) {
+    const fs::path dir = fs::temp_directory_path() / "scem_fringe_csv";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string config = write_fringe_config(dir, "out.csv", "fringe", "csv");
+    EXPECT_EQ(cli_run("run", config), 0);
+    std::ifstream sidecar_in(dir / "out.csv.json");
+    ASSERT_TRUE(sidecar_in.good());
+    const auto sidecar = nlohmann::json::parse(sidecar_in);
+    EXPECT_EQ(sidecar["solver"]["edge_correction"], "fringe");
+    EXPECT_EQ(sidecar["solver"]["fringe_edges"], 4u); // plate.stl: 4 rims
+    std::ifstream csv_in(dir / "out.csv");
+    std::string header;
+    ASSERT_TRUE(static_cast<bool>(std::getline(csv_in, header)));
+    size_t rows = 0;
+    std::string line;
+    while (std::getline(csv_in, line))
+        if (!line.empty()) ++rows;
+    EXPECT_EQ(rows, 2u); // 1 freq x 1 dir x default [HH, VV]
+    fs::remove_all(dir, ec);
+}
+
+TEST(Fringe, CliInvalidValueRejected) {
+    const fs::path dir = fs::temp_directory_path() / "scem_fringe_bad";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string config = write_fringe_config(dir, "out.csv", "eec", "csv");
+    EXPECT_EQ(cli_run("validate", config), 2);
+    fs::remove_all(dir, ec);
+}
+
+TEST(Fringe, CliCudaRefused) {
+    const fs::path dir = fs::temp_directory_path() / "scem_fringe_cuda";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string config = write_fringe_config(dir, "out.h5", "fringe", "hdf5", true);
+    EXPECT_EQ(cli_run("run", config), 4);
+    fs::remove_all(dir, ec);
+}
+
+TEST(Fringe, Hdf5Provenance) {
+    const fs::path dir = fs::temp_directory_path() / "scem_fringe_h5";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string config = write_fringe_config(dir, "out.h5", "fringe", "hdf5");
+    EXPECT_EQ(cli_run("run", config), 0);
+    H5::Exception::dontPrint();
+    H5::H5File file((dir / "out.h5").string(), H5F_ACC_RDONLY);
+    H5::Attribute corr = file.openAttribute("edge_correction");
+    std::string value;
+    corr.read(corr.getStrType(), value);
+    EXPECT_EQ(value, "fringe");
+    H5::Attribute count = file.openAttribute("fringe_edges");
+    uint64_t edges = 0;
+    count.read(H5::PredType::NATIVE_UINT64, &edges);
+    EXPECT_EQ(edges, 4u);
+    file.close();
+    fs::remove_all(dir, ec);
+}
+
+TEST(Fringe, ResumeSolvesMissingWithFringe) {
+    // Complete fringe DB -> fake chunk 0 missing -> resume with fringe
+    // reproduces the fresh solve; resume with a no-fringe config is
+    // rejected (config_hash covers edge_correction).
+    const fs::path dir = fs::temp_directory_path() / "scem_fringe_resume";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string fringe_cfg = write_fringe_config(dir, "out.h5", "fringe", "hdf5");
+    auto rc = strikecem::load_config(fringe_cfg, SCEM_SCHEMA_PATH);
+    const auto plan = make_fringe_plan({10e9}, {{0.0, -90.0}, {90.0, -90.0}}, {"HH"});
+    const auto mesh =
+        strikecem::load_normalized_mesh(rc.value, dir, rc.schema_version);
+    const auto model = strikecem::extract_edges(mesh);
+    const strikecem::FringeOptions on{true, &model};
+    const auto fresh = strikecem::solve_po(mesh, plan, rc.value, on);
+    rc.value["output"]["path"] = (dir / "out.h5").string();
+    rc.value["output"]["format"] = "hdf5";
+    strikecem::write_hdf5_output(rc, plan, mesh, fresh, {}, on);
+    {
+        H5::H5File file((dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group progress = file.openGroup("/progress");
+        H5::DataSet flags = progress.openDataSet("completed_chunks");
+        const uint8_t zero[1] = {0};
+        const hsize_t count[1] = {1}, start[1] = {0};
+        const H5::DataSpace mem(1, count);
+        H5::DataSpace space = flags.getSpace();
+        space.selectHyperslab(H5S_SELECT_SET, count, start);
+        flags.write(zero, H5::PredType::NATIVE_UINT8, mem, space);
+        file.flush(H5F_SCOPE_GLOBAL);
+        file.close();
+    }
+    EXPECT_GT(strikecem::resume_hdf5_output(rc, plan, mesh, (dir / "out.h5").string(), on), 0u);
+    const auto db = strikecem::read_hdf5_database((dir / "out.h5").string());
+    EXPECT_NO_THROW(strikecem::validate_hdf5_complete(db));
+    ASSERT_EQ(db.rows.size(), fresh.samples.size());
+    for (size_t i = 0; i < db.rows.size(); ++i) {
+        EXPECT_DOUBLE_EQ(db.rows[i].scattering_real, fresh.samples[i].scattering.real());
+        EXPECT_DOUBLE_EQ(db.rows[i].scattering_imag, fresh.samples[i].scattering.imag());
+    }
+    const std::string plain_cfg = write_fringe_config(dir, "plain.h5", "none", "hdf5");
+    auto rc_plain = strikecem::load_config(plain_cfg, SCEM_SCHEMA_PATH);
+    rc_plain.value["output"]["path"] = (dir / "out.h5").string();
+    EXPECT_THROW(
+        strikecem::resume_hdf5_output(rc_plain, plan, mesh, (dir / "out.h5").string()),
+        strikecem::OutputError);
+    fs::remove_all(dir, ec);
 }
 
 } // namespace

@@ -40,7 +40,7 @@ std::string hostname() {
 
 void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                            const NormalizedMesh& mesh, const PoResult& result,
-                           const DesignerIdentity& designer) {
+                           const DesignerIdentity& designer, const FringeOptions& fringe) {
     const auto& output = rc.value["output"];
     const fs::path csv_path(output["path"].get<std::string>());
     const int precision = output["precision"].get<int>();
@@ -85,6 +85,11 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                               {"hash", plan.hash}};
     sidecar["solver"] = {{"type", rc.value["solver"]["type"]},
                          {"precision", rc.value["solver"]["precision"]},
+                         {"edge_correction",
+                          rc.value["solver"]["po_options"].value("edge_correction", "none")},
+                         {"fringe_edges", fringe.enabled && fringe.edges != nullptr
+                                              ? fringe.edges->edges.size()
+                                              : 0},
                          {"deterministic", rc.value["execution"]["deterministic"]},
                          {"backend", rc.value["execution"].value("accelerator", "cpu")},
                          {"device", cuda::active_device_name(rc.value)}};

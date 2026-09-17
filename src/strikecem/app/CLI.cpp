@@ -173,6 +173,16 @@ int run(int argc, char** argv) {
         for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         NormalizedMesh mesh =
             load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+        // Fringe correction is off unless the schema exposes edge_correction
+        // "fringe" (slice D2d). The loader rejects non-manifold input, so
+        // extraction cannot throw here.
+        EdgeModel edge_model;
+        FringeOptions fringe;
+        if (rc.value["solver"]["po_options"].value("edge_correction", "none") == "fringe") {
+            edge_model = extract_edges(mesh);
+            fringe = FringeOptions{true, &edge_model};
+            std::cout << "fringe_edges: " << edge_model.edges.size() << "\n";
+        }
         const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
         for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (!est.fits) {
@@ -192,7 +202,7 @@ int run(int argc, char** argv) {
                 fs::absolute(out_path).lexically_normal())
                 throw ConfigError("run.resume_from_checkpoint must equal output.path");
             const auto solve_start = std::chrono::steady_clock::now();
-            const size_t solved = resume_hdf5_output(rc, plan, mesh, checkpoint);
+            const size_t solved = resume_hdf5_output(rc, plan, mesh, checkpoint, fringe);
             const double solve_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start)
                     .count();
@@ -216,14 +226,14 @@ int run(int argc, char** argv) {
             }
         }
         const auto solve_start = std::chrono::steady_clock::now();
-        PoResult result = solve_po(mesh, plan, rc.value);
+        PoResult result = solve_po(mesh, plan, rc.value, fringe);
         const double solve_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (format == "csv")
-            write_csv_and_sidecar(rc, plan, mesh, result, designer);
+            write_csv_and_sidecar(rc, plan, mesh, result, designer, fringe);
         else
-            write_hdf5_output(rc, plan, mesh, result, designer);
+            write_hdf5_output(rc, plan, mesh, result, designer, fringe);
         if (!bench_profile.empty())
             write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count,
                                     plan.sample_count(), solve_seconds,
