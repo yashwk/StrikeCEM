@@ -2,6 +2,7 @@
 // plan counts; run validates then refuses until the Phase 1 solver lands.
 #include "strikecem/app/CLI.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -11,6 +12,7 @@
 #include "strikecem/io/CsvWriter.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
 #include "strikecem/io/MeshLoader.hpp"
+#include "strikecem/runtime/Estimate.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
 namespace strikecem::cli {
@@ -19,10 +21,11 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr const char* kUsage =
-    "usage: strikecem [--schema PATH] <validate|estimate|run> config.json\n"
+    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run> config.json\n"
     "  validate  resolve config, inspect mesh, print hashes\n"
-    "  estimate  validate plus frequency/direction/sample counts\n"
-    "  run       full pipeline (PO solver: Phase 1)\n";
+    "  estimate  validate plus plan counts and resource estimates\n"
+    "  run       full pipeline (PO solver, CSV/HDF5 output)\n"
+    "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
     std::cerr << "strikecem: error: " << e.what() << "\n";
@@ -74,7 +77,8 @@ int cmd_validate(const ResolvedConfig& rc, const std::string& config_path) {
     return 0;
 }
 
-int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path) {
+int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path,
+                 const std::vector<BenchmarkProfile>& profiles) {
     SamplePlan plan = build_sample_plan(rc.value);
     print_warnings(plan);
     const int rc_code = cmd_validate(rc, config_path);
@@ -83,6 +87,22 @@ int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path) {
     std::cout << "directions: " << plan.directions.size() << "\n";
     std::cout << "polarizations: " << plan.polarizations.size() << "\n";
     std::cout << "samples: " << plan.sample_count() << "\n";
+    NormalizedMesh mesh =
+        load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+    const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
+    for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
+    std::cout << "electrical_size_wavelengths: " << est.electrical_size_wavelengths << "\n";
+    std::cout << "estimated_mesh_mb: " << est.mesh_bytes / 1048576.0 << "\n";
+    std::cout << "estimated_output_mb: " << est.output_bytes / 1048576.0 << "\n";
+    std::cout << "estimated_total_mb: " << est.total_bytes / 1048576.0 << "\n";
+    std::cout << "memory_limit_mb: " << est.limit_bytes / 1048576.0 << "\n";
+    std::cout << "operations: " << est.operation_count << "\n";
+    if (est.calibrated)
+        std::cout << "estimated_runtime_s: [" << est.runtime_lo_s << ", " << est.runtime_hi_s
+                  << "] (profile " << est.profile_id << ")\n";
+    else
+        std::cout << "estimated_runtime_s: uncalibrated (" << est.operation_count
+                  << " operations, no matching benchmark profile)\n";
     return 0;
 }
 
@@ -91,10 +111,13 @@ int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path) {
 int run(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
     std::string schema_path = "schemas/config.schema.json";
+    std::string bench_profile;
     std::string command, config_path;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "--schema" && i + 1 < args.size()) {
             schema_path = args[++i];
+        } else if (args[i] == "--bench-profile" && i + 1 < args.size()) {
+            bench_profile = args[++i];
         } else if (args[i] == "--help" || args[i] == "-h") {
             std::cout << kUsage;
             return 0;
@@ -114,20 +137,71 @@ int run(int argc, char** argv) {
     }
     try {
         ResolvedConfig rc = load_config(config_path, schema_path);
+        if (!bench_profile.empty() && command != "run") {
+            std::cerr << kUsage;
+            return static_cast<int>(ExitCode::Config);
+        }
+        const std::vector<BenchmarkProfile> profiles = load_benchmark_profiles();
         if (command == "validate") return cmd_validate(rc, config_path);
-        if (command == "estimate") return cmd_estimate(rc, config_path);
+        if (command == "estimate") return cmd_estimate(rc, config_path, profiles);
         std::cout << "scem_schema_version: " << rc.schema_version << "\n";
         std::cout << "resolved_config_hash: " << rc.hash << "\n";
         SamplePlan plan = build_sample_plan(rc.value);
         print_warnings(plan);
         NormalizedMesh mesh =
             load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+        const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
+        for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
+        if (!est.fits) {
+            std::cerr << "strikecem: error: estimated resource use exceeds limit; refusing run\n";
+            return static_cast<int>(ExitCode::Resource);
+        }
+        const std::string format = rc.value["output"]["format"].get<std::string>();
+        const fs::path out_path(rc.value["output"]["path"].get<std::string>());
+        const bool resume = !rc.resume_from_checkpoint.empty();
+        if (resume) {
+            if (format != "hdf5")
+                throw ConfigError("run.resume_from_checkpoint requires HDF5 output");
+            const std::string& checkpoint = rc.resume_from_checkpoint;
+            if (!fs::exists(checkpoint))
+                throw OutputError("checkpoint file not found: " + checkpoint);
+            if (fs::absolute(checkpoint).lexically_normal() !=
+                fs::absolute(out_path).lexically_normal())
+                throw ConfigError("run.resume_from_checkpoint must equal output.path");
+            const auto solve_start = std::chrono::steady_clock::now();
+            const size_t solved = resume_hdf5_output(rc, plan, mesh, checkpoint);
+            const double solve_seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start)
+                    .count();
+            if (!bench_profile.empty())
+                write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count, solved,
+                                        solve_seconds);
+            if (solved == 0) std::cout << "status: already complete\n";
+            std::cout << "samples_resumed: " << solved << " / " << plan.sample_count() << "\n";
+            std::cout << "status: ok\n";
+            return 0;
+        }
+        if (fs::exists(out_path)) {
+            if (format != "hdf5")
+                throw OutputError("output file exists; remove it to regenerate: " +
+                                  out_path.string());
+            if (check_existing_hdf5(rc, plan, mesh, out_path.string())) {
+                std::cout << "status: already complete\n";
+                return 0;
+            }
+        }
+        const auto solve_start = std::chrono::steady_clock::now();
         PoResult result = solve_po(mesh, plan, rc.value);
+        const double solve_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";
-        if (rc.value["output"]["format"].get<std::string>() == "csv")
+        if (format == "csv")
             write_csv_and_sidecar(rc, plan, mesh, result);
         else
             write_hdf5_output(rc, plan, mesh, result);
+        if (!bench_profile.empty())
+            write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count,
+                                    plan.sample_count(), solve_seconds);
         std::cout << "samples: " << result.samples.size() << "\n";
         std::cout << "status: ok\n";
         return 0;

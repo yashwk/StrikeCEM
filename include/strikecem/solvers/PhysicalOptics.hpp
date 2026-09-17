@@ -1,7 +1,8 @@
 #pragma once
 // Deterministic CPU Physical Optics reference solver (SPEC FR-6).
 // Implements ADR-0001: F_m = (jkη/4π)·A·[r̂×(r̂×J_m)]·e^{+jkr̂·rc},
-// monostatic (r̂ = −k̂), hard illumination, PEC, single-threaded.
+// monostatic (r̂ = −k̂), hard illumination, PEC. Units are independent
+// rows, so results are thread-count invariant by construction.
 #include <complex>
 #include <cstdint>
 #include <string>
@@ -13,11 +14,6 @@
 #include "strikecem/io/MeshLoader.hpp"
 
 namespace strikecem {
-
-struct PoChannelSample {
-    std::complex<double> scattering{0.0, 0.0}; // normalized F/E0
-    double rcs_sqm = 0.0;
-};
 
 struct PoSampleResult {
     // One row per (frequency, direction, polarization) of the output table.
@@ -35,10 +31,13 @@ struct PoResult {
     std::vector<std::string> warnings;
 };
 
-constexpr double kSpeedOfLight = 299792458.0;
-constexpr double kEta0 = 376.73031346177066; // μ0·c, ohms
-
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,
                   const nlohmann::json& resolved);
+
+// Solve only the given (frequency_id, direction_id) units with correct
+// global sample_ids (resume path for missing chunks).
+PoResult solve_po_units(const NormalizedMesh& mesh, const SamplePlan& plan,
+                        const nlohmann::json& resolved,
+                        const std::vector<std::pair<uint32_t, uint32_t>>& units);
 
 } // namespace strikecem

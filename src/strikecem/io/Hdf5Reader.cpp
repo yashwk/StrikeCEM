@@ -1,7 +1,11 @@
 // Reference HDF5 reader (SPEC section 10).
 #include "strikecem/io/Hdf5Reader.hpp"
 
+#include <algorithm>
+
 #include <H5Cpp.h>
+
+#include "strikecem/io/Checksum.hpp"
 
 namespace strikecem {
 namespace {
@@ -127,6 +131,13 @@ Hdf5Database read_hdf5_database(const std::string& path) {
         const auto valid = read_vector<uint8_t>(samples, "valid");
         const auto status = read_strings(samples, "status");
         db.completed_chunks = read_vector<uint8_t>(progress, "completed_chunks");
+        db.chunk_checksums = read_vector<uint64_t>(progress, "chunk_checksum");
+        try {
+            const H5::Attribute chunk_rows = progress.openAttribute("chunk_rows");
+            chunk_rows.read(H5::PredType::NATIVE_UINT64, &db.chunk_rows);
+        } catch (const H5::Exception& e) {
+            throw ReaderError(std::string("missing chunk_rows bookkeeping: ") + e.getDetailMsg());
+        }
         const size_t k = ids.size();
         db.rows.reserve(k);
         for (size_t i = 0; i < k; ++i) {
@@ -176,6 +187,34 @@ void validate_hdf5_complete(const Hdf5Database& db) {
         if (flag == 0) throw ReaderError("incomplete progress: uncommitted chunk");
     if (db.completed_chunks.empty() && !db.rows.empty())
         throw ReaderError("incomplete progress: no committed chunks");
+    if (db.chunk_rows == 0 && !db.rows.empty())
+        throw ReaderError("incomplete progress: missing chunk geometry");
+    if (db.chunk_checksums.size() != db.completed_chunks.size())
+        throw ReaderError("corrupt progress bookkeeping");
+    // Checksum over exactly the stored bytes, chunk by chunk.
+    for (size_t c = 0; c < db.completed_chunks.size(); ++c) {
+        const size_t begin = c * db.chunk_rows;
+        const size_t end = std::min(begin + db.chunk_rows, db.rows.size());
+        std::vector<ChecksumRow> rows;
+        rows.reserve(end - begin);
+        for (size_t i = begin; i < end; ++i) {
+            const Hdf5SampleRow& r = db.rows[i];
+            ChecksumRow cr;
+            cr.sample_id = r.sample_id;
+            cr.direction_index = r.direction_index;
+            cr.frequency_index = r.frequency_index;
+            cr.polarization_index = r.polarization_index;
+            cr.scattering_real = r.scattering_real;
+            cr.scattering_imag = r.scattering_imag;
+            cr.rcs_sqm = r.rcs_sqm;
+            cr.rcs_dbsm = r.rcs_dbsm;
+            cr.valid = r.valid ? 1 : 0;
+            cr.status = r.status;
+            rows.push_back(std::move(cr));
+        }
+        if (chunk_checksum(rows.data(), rows.size()) != db.chunk_checksums[c])
+            throw ReaderError("chunk checksum mismatch: data corruption");
+    }
 }
 
 } // namespace strikecem

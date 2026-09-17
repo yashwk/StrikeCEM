@@ -15,6 +15,9 @@
 
 namespace strikecem {
 
+constexpr double kSpeedOfLight = 299792458.0;
+constexpr double kEta0 = 376.73031346177066; // μ0·c, ohms
+
 inline double deg_to_rad(double deg) { return deg * std::numbers::pi / 180.0; }
 inline double rad_to_deg(double rad) { return rad * 180.0 / std::numbers::pi; }
 

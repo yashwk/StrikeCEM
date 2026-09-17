@@ -1,0 +1,11 @@
+{
+  "backend": "cpu",
+  "cpu": "AMD Ryzen 7 8845HS w/ Radeon 780M Graphics",
+  "git_revision": "3f3a4f3",
+  "precision": "float64",
+  "profile_format": "scem-bench-1",
+  "samples": 2,
+  "tool_version": "0.1",
+  "triangles": 20448,
+  "wall_seconds": 0.000884127
+}

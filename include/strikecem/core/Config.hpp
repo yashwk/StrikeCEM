@@ -39,6 +39,7 @@ struct SamplePlan {
     std::vector<Direction> directions;
     std::vector<std::string> polarizations;
     std::vector<std::string> warnings;
+    std::string hash; // SHA-256 over the canonical plan encoding
     uint64_t sample_count() const {
         return static_cast<uint64_t>(frequencies_hz.size()) * directions.size() *
                polarizations.size();
@@ -49,6 +50,9 @@ struct ResolvedConfig {
     nlohmann::json value; // defaults materialized; the execution contract
     std::string hash;     // SHA-256 hex of the canonical serialization
     std::string schema_version = "1.0";
+    // Run-control path, validated by the schema but stripped from value so
+    // resuming the same database does not change its identity hash.
+    std::string resume_from_checkpoint;
 };
 
 // Parse, schema-validate, resolve, and hash. Relative model paths resolve

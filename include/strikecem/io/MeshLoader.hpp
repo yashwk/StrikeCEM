@@ -37,6 +37,7 @@ struct MeshReport {
     double aspect_max = 0.0;
     double aspect_mean = 0.0;
     size_t aspect_over_limit_count = 0;
+    double max_edge_length_m = 0.0;
 };
 
 struct NormalizedMesh {

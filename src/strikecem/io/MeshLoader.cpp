@@ -108,9 +108,12 @@ BuiltMesh build_mesh(const std::vector<RawTriangle>& raw, double max_aspect_rati
     std::map<EdgeKey, std::vector<EdgeUse>> edges;
     double aspect_sum = 0.0;
     size_t aspect_n = 0;
+    double max_edge2 = 0.0;
     m.report.aspect_min = std::numeric_limits<double>::infinity();
     for (const auto& t : raw) {
         const double area = geom::triangleArea(t.a, t.b, t.c);
+        max_edge2 = std::max({max_edge2, (t.b - t.a).lengthSquared(),
+                              (t.c - t.b).lengthSquared(), (t.a - t.c).lengthSquared()});
         const uint32_t tri = static_cast<uint32_t>(m.triangles.size());
         m.triangles.push_back({vertex_id(t.a), vertex_id(t.b), vertex_id(t.c)});
         m.normals.push_back(geom::triangleNormal(t.a, t.b, t.c));
@@ -144,6 +147,7 @@ BuiltMesh build_mesh(const std::vector<RawTriangle>& raw, double max_aspect_rati
     }
     m.report.vertex_count = m.vertices.size();
     m.report.triangle_count = m.triangles.size();
+    m.report.max_edge_length_m = std::sqrt(max_edge2);
     if (aspect_n == 0) m.report.aspect_min = 0.0;
     m.report.aspect_mean = aspect_n > 0 ? aspect_sum / aspect_n : 0.0;
     if (!m.vertices.empty()) {
@@ -172,9 +176,9 @@ std::string hash_normalized(const BuiltMesh& m) {
     return sha256_hex(bytes);
 }
 
-// Cache layout v2: magic + key-input echo + counts + mesh hash +
+// Cache layout v3: magic + key-input echo + counts + mesh hash +
 // repair metadata + payload.
-constexpr char kMagic[] = "SCEMMESH02";
+constexpr char kMagic[] = "SCEMMESH03";
 
 void append_u64(std::string& out, uint64_t v) {
     out.append(reinterpret_cast<const char*>(&v), sizeof(v));
@@ -202,9 +206,10 @@ void append_report(std::string& out, const MeshReport& r) {
     append_f64(out, r.aspect_max);
     append_f64(out, r.aspect_mean);
     append_u64(out, r.aspect_over_limit_count);
+    append_f64(out, r.max_edge_length_m);
 }
 
-constexpr size_t kReportBytes = 8 + 8 + 6 * 8 + 8 + 5 * 8 + 3 * 8 + 8;
+constexpr size_t kReportBytes = 8 + 8 + 6 * 8 + 8 + 5 * 8 + 3 * 8 + 8 + 8;
 
 uint64_t take_u64(const char*& p, const char* end, const char* what) {
     if (p + sizeof(uint64_t) > end) throw MeshLoadError(std::string("corrupt mesh cache: ") + what);
@@ -241,6 +246,7 @@ MeshReport take_report(const char*& p, const char* end) {
     r.aspect_max = take_f64(p, end, "report");
     r.aspect_mean = take_f64(p, end, "report");
     r.aspect_over_limit_count = static_cast<size_t>(take_u64(p, end, "report"));
+    r.max_edge_length_m = take_f64(p, end, "report");
     return r;
 }
 

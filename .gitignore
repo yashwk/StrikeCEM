@@ -6,7 +6,6 @@ cmake_install.cmake
 Makefile
 build/
 *.o
-*.obj
 *.exe
 *.dll
 *.so

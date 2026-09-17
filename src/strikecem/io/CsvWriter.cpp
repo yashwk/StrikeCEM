@@ -78,7 +78,8 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
     sidecar["sample_plan"] = {{"frequencies", plan.frequencies_hz.size()},
                               {"directions", plan.directions.size()},
                               {"polarizations", plan.polarizations},
-                              {"samples", plan.sample_count()}};
+                              {"samples", plan.sample_count()},
+                              {"hash", plan.hash}};
     sidecar["solver"] = {{"type", rc.value["solver"]["type"]},
                          {"precision", rc.value["solver"]["precision"]},
                          {"deterministic", rc.value["execution"]["deterministic"]}};

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <openssl/sha.h>
 #include <sstream>
 
@@ -204,9 +205,14 @@ ResolvedConfig load_config(const std::string& config_path, const std::string& sc
         throw ConfigError(std::string("schema validation failed: ") + e.what());
     }
     json resolved = resolve_defaults(raw);
+    ResolvedConfig rc;
+    if (resolved["run"].contains("resume_from_checkpoint")) {
+        rc.resume_from_checkpoint =
+            resolved["run"]["resume_from_checkpoint"].get<std::string>();
+        resolved["run"].erase("resume_from_checkpoint");
+    }
     const fs::path config_dir = fs::path(config_path).parent_path();
     validate_semantics(resolved, config_dir.empty() ? fs::current_path() : config_dir);
-    ResolvedConfig rc;
     rc.value = std::move(resolved);
     rc.hash = sha256_hex(canonical_json(rc.value));
     return rc;
@@ -258,6 +264,15 @@ SamplePlan build_sample_plan(const json& resolved) {
         plan.directions.push_back({id++, az, el, direction_from_az_el(az, el)});
 
     for (const auto& p : resolved["polarization"]) plan.polarizations.push_back(p.get<std::string>());
+
+    // Canonical plan encoding for resume identity (full round-trip precision).
+    std::ostringstream plan_bytes;
+    plan_bytes << std::setprecision(std::numeric_limits<double>::max_digits10);
+    for (double f : plan.frequencies_hz) plan_bytes << "f" << f << ";";
+    for (const auto& d : plan.directions)
+        plan_bytes << "d" << d.azimuth_deg << "," << d.elevation_deg << ";";
+    for (const auto& p : plan.polarizations) plan_bytes << "p" << p << ";";
+    plan.hash = sha256_hex(plan_bytes.str());
     return plan;
 }
 

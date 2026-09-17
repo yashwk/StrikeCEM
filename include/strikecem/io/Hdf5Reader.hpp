@@ -33,6 +33,8 @@ struct Hdf5Database {
     std::vector<std::string> polarizations;
     std::vector<Hdf5SampleRow> rows; // sample_id order
     std::vector<uint8_t> completed_chunks;
+    std::vector<uint64_t> chunk_checksums;
+    uint64_t chunk_rows = 0;
     std::string output_format_version;
     std::string scem_schema_version;
     std::string config_hash;

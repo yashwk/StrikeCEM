@@ -47,10 +47,11 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Core library: config loader, conventions, sample plans, mesh pipeline,
-# PO solver, CSV/HDF5 writers, HDF5 reader.
+# PO solver, CSV/HDF5 writers, HDF5 reader, resource estimator.
 add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/MeshLoader.cpp
         src/strikecem/solvers/PhysicalOptics.cpp src/strikecem/io/CsvWriter.cpp
-        src/strikecem/io/Hdf5Writer.cpp src/strikecem/io/Hdf5Reader.cpp)
+        src/strikecem/io/Hdf5Writer.cpp src/strikecem/io/Hdf5Reader.cpp
+        src/strikecem/runtime/Estimate.cpp)
 target_link_libraries(scem_core PUBLIC
         nlohmann_json::nlohmann_json
         nlohmann_json_schema_validator
@@ -98,7 +99,8 @@ FetchContent_MakeAvailable(googletest)
 include(GoogleTest)
 enable_testing()
 add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests/test_mesh.cpp
-        tests/test_po.cpp tests/test_output.cpp tests/test_goldens.cpp tests/test_hdf5.cpp)
+        tests/test_po.cpp tests/test_output.cpp tests/test_goldens.cpp tests/test_hdf5.cpp
+        tests/test_estimate.cpp tests/test_resume.cpp src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE
         SCEM_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schemas/config.schema.json"
