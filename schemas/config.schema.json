@@ -151,7 +151,10 @@
         "cpu_threads": {"type": "integer", "minimum": 1, "default": 1},
         "batch_samples": {"type": "integer", "minimum": 1, "default": 4096},
         "max_memory_mb": {"type": "number", "exclusiveMinimum": 0, "default": 16384},
-        "deterministic": {"type": "boolean", "default": true}
+        "deterministic": {"type": "boolean", "default": true},
+        "accelerator": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu"},
+        "cuda_device_id": {"type": "integer", "minimum": 0, "default": 0},
+        "cuda_batch_units": {"type": "integer", "minimum": 0, "default": 0}
       }
     },
     "output": {

@@ -12,6 +12,10 @@
 #include <numbers>
 #include <thread>
 
+#include "strikecem/solvers/Projection.hpp"
+
+#include "strikecem/solvers/GpuPO.hpp"
+
 namespace strikecem {
 namespace {
 
@@ -115,40 +119,25 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         }
         // Linear scattering matrix S[rx][tx], rows/cols (H, V).
         const Vec3<Real> rx_e[2] = {eh, ev};
-        std::complex<double> s_lin[2][2];
-        for (int rx = 0; rx < 2; ++rx)
-            for (int tx = 0; tx < 2; ++tx) {
-                const C s = (f_tx[tx][0] * rx_e[rx].x + f_tx[tx][1] * rx_e[rx].y +
-                             f_tx[tx][2] * rx_e[rx].z) /
-                            e0_r;
-                s_lin[rx][tx] = {static_cast<double>(s.real()),
-                                 static_cast<double>(s.imag())};
-            }
-        const Complex2x2 circ = linear_to_circular(
-            {std::array<std::complex<double>, 2>{s_lin[0][0], s_lin[0][1]},
-             std::array<std::complex<double>, 2>{s_lin[1][0], s_lin[1][1]}});
+        std::complex<double> f_tx_d[2][3];
+        for (int tx = 0; tx < 2; ++tx)
+            for (int i = 0; i < 3; ++i)
+                f_tx_d[tx][i] = {static_cast<double>(f_tx[tx][i].real()),
+                                 static_cast<double>(f_tx[tx][i].imag())};
+        const double eh_d[3] = {static_cast<double>(eh.x), static_cast<double>(eh.y),
+                                static_cast<double>(eh.z)};
+        const double ev_d[3] = {static_cast<double>(ev.x), static_cast<double>(ev.y),
+                                static_cast<double>(ev.z)};
+        const auto channels = project_unit_channels(
+            f_tx_d, eh_d, ev_d, static_cast<double>(e0_r), plan.polarizations);
         for (size_t pi = 0; pi < npol; ++pi) {
-            const std::string& pol = plan.polarizations[pi];
-            std::complex<double> s{0, 0};
-            if (pol == "HH")
-                s = s_lin[0][0];
-            else if (pol == "VV")
-                s = s_lin[1][1];
-            else if (pol == "HV")
-                s = s_lin[1][0];
-            else if (pol == "VH")
-                s = s_lin[0][1];
-            else if (pol == "RHCP")
-                s = circ[0][0];
-            else if (pol == "LHCP")
-                s = circ[1][1];
             PoSampleResult& sample = out.samples[pos * npol + pi];
             sample.sample_id = (static_cast<uint64_t>(fi) * ndir + di) * npol + pi;
             sample.frequency_id = static_cast<uint32_t>(fi);
             sample.direction_id = static_cast<uint32_t>(di);
             sample.pol_id = static_cast<uint32_t>(pi);
-            sample.scattering = s;
-            sample.rcs_sqm = 4.0 * std::numbers::pi * std::norm(s);
+            sample.scattering = channels[pi].first;
+            sample.rcs_sqm = channels[pi].second;
             sample.lit_facets = lit;
         }
     };
@@ -191,24 +180,33 @@ std::vector<std::pair<uint32_t, uint32_t>> all_units(const SamplePlan& plan) {
             units.emplace_back(fi, di);
     return units;
 }
+
+PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
+                       const nlohmann::json& resolved,
+                       const std::vector<std::pair<uint32_t, uint32_t>>& units) {
+    const std::string precision = resolved["solver"].value("precision", "float64");
+    const unsigned threads = resolved["execution"].value("cpu_threads", 1u);
+    if (resolved["execution"].value("accelerator", "cpu") == "cuda") {
+        const int device = resolved["execution"].value("cuda_device_id", 0);
+        return cuda::solve_po_cuda_units(mesh, plan, resolved, device, units);
+    }
+    if (precision == "float32") return solve_typed<float>(mesh, plan, resolved, threads, units);
+    return solve_typed<double>(mesh, plan, resolved, threads, units);
+}
 } // namespace
 
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,
                   const nlohmann::json& resolved) {
-    const std::string precision = resolved["solver"].value("precision", "float64");
-    const unsigned threads = resolved["execution"].value("cpu_threads", 1u);
-    const auto units = all_units(plan);
-    if (precision == "float32") return solve_typed<float>(mesh, plan, resolved, threads, units);
-    return solve_typed<double>(mesh, plan, resolved, threads, units);
+    std::vector<std::pair<uint32_t, uint32_t>> units;
+    for (uint32_t fi = 0; fi < plan.frequencies_hz.size(); ++fi)
+        for (uint32_t di = 0; di < plan.directions.size(); ++di) units.emplace_back(fi, di);
+    return solve_backend(mesh, plan, resolved, units);
 }
 
 PoResult solve_po_units(const NormalizedMesh& mesh, const SamplePlan& plan,
                         const nlohmann::json& resolved,
                         const std::vector<std::pair<uint32_t, uint32_t>>& units) {
-    const std::string precision = resolved["solver"].value("precision", "float64");
-    const unsigned threads = resolved["execution"].value("cpu_threads", 1u);
-    if (precision == "float32") return solve_typed<float>(mesh, plan, resolved, threads, units);
-    return solve_typed<double>(mesh, plan, resolved, threads, units);
+    return solve_backend(mesh, plan, resolved, units);
 }
 
 } // namespace strikecem

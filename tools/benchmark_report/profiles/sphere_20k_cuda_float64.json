@@ -1,0 +1,12 @@
+{
+  "backend": "cuda",
+  "cpu": "AMD Ryzen 7 8845HS w/ Radeon 780M Graphics",
+  "device": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "git_revision": "047a95e",
+  "precision": "float64",
+  "profile_format": "scem-bench-1",
+  "samples": 2,
+  "tool_version": "0.1",
+  "triangles": 20448,
+  "wall_seconds": 0.23872789
+}

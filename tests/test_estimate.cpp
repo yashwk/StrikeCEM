@@ -92,7 +92,7 @@ TEST(Estimate, BenchmarkProfileRoundTrip) {
     const Case c = load_case("valid_minimal.json");
     const fs::path path = fs::temp_directory_path() / "scem_bench_test.json";
     strikecem::write_benchmark_profile(path.string(), c.rc, c.mesh.report.triangle_count,
-                                       c.plan.sample_count(), 1.25);
+                                       c.plan.sample_count(), 1.25, "cpu", "");
     std::ifstream in(path);
     const auto j = nlohmann::json::parse(in);
     EXPECT_EQ(j["profile_format"], "scem-bench-1");

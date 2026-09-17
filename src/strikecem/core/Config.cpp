@@ -85,6 +85,9 @@ json resolve_defaults(const json& raw) {
     if (!exec.contains("batch_samples")) exec["batch_samples"] = 4096;
     if (!exec.contains("max_memory_mb")) exec["max_memory_mb"] = 16384;
     if (!exec.contains("deterministic")) exec["deterministic"] = true;
+    if (!exec.contains("accelerator")) exec["accelerator"] = "cpu";
+    if (!exec.contains("cuda_device_id")) exec["cuda_device_id"] = 0;
+    if (!exec.contains("cuda_batch_units")) exec["cuda_batch_units"] = 0;
 
     auto& output = r["output"];
     if (!output.contains("format")) output["format"] = "hdf5";

@@ -2,6 +2,8 @@
 #include "strikecem/io/CsvWriter.hpp"
 
 #include <chrono>
+
+#include "strikecem/solvers/GpuPO.hpp"
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -82,7 +84,9 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                               {"hash", plan.hash}};
     sidecar["solver"] = {{"type", rc.value["solver"]["type"]},
                          {"precision", rc.value["solver"]["precision"]},
-                         {"deterministic", rc.value["execution"]["deterministic"]}};
+                         {"deterministic", rc.value["execution"]["deterministic"]},
+                         {"backend", rc.value["execution"].value("accelerator", "cpu")},
+                         {"device", cuda::active_device_name(rc.value)}};
     sidecar["mesh"] = {{"path", rc.value["model"]["path"]},
                        {"units", rc.value["model"]["units"]},
                        {"vertices", mesh.report.vertex_count},

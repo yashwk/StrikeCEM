@@ -15,6 +15,7 @@
 #include <H5Cpp.h>
 
 #include "strikecem/io/Checksum.hpp"
+#include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
 namespace strikecem {
@@ -433,6 +434,9 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
                        std::string(SCEM_COMPILER_ID) + " " + SCEM_COMPILER_VERSION);
         write_str_attr(file, "solver_precision",
                        rc.value["solver"]["precision"].get<std::string>());
+        write_str_attr(file, "solver_backend",
+                       rc.value["execution"].value("accelerator", "cpu"));
+        write_str_attr(file, "cuda_device", cuda::active_device_name(rc.value));
         write_str_attr(file, "completed_utc", utc_now());
         std::string warnings;
         for (const auto& w : plan.warnings) warnings += w + "\n";

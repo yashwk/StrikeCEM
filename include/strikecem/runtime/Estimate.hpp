@@ -29,7 +29,8 @@ std::vector<BenchmarkProfile> load_benchmark_profiles();
 
 // Records a profile for a completed run (see `run --bench-profile`).
 void write_benchmark_profile(const std::string& path, const ResolvedConfig& rc,
-                             uint64_t triangles, uint64_t samples, double wall_seconds);
+                             uint64_t triangles, uint64_t samples, double wall_seconds,
+                             const std::string& backend, const std::string& device);
 
 struct ResourceEstimate {
     uint64_t mesh_bytes = 0;
@@ -40,6 +41,8 @@ struct ResourceEstimate {
     bool fits = true;
     uint64_t operation_count = 0;
     double electrical_size_wavelengths = 0.0; // bbox diagonal / min wavelength
+    std::string backend = "cpu";
+    uint64_t device_bytes = 0; // CUDA resident footprint (0 for CPU runs)
     bool calibrated = false;
     double runtime_lo_s = 0.0;
     double runtime_hi_s = 0.0;

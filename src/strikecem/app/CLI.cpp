@@ -13,6 +13,7 @@
 #include "strikecem/io/Hdf5Writer.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/runtime/Estimate.hpp"
+#include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
 namespace strikecem::cli {
@@ -97,6 +98,16 @@ int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path,
     std::cout << "estimated_total_mb: " << est.total_bytes / 1048576.0 << "\n";
     std::cout << "memory_limit_mb: " << est.limit_bytes / 1048576.0 << "\n";
     std::cout << "operations: " << est.operation_count << "\n";
+    std::cout << "backend: " << est.backend << "\n";
+    if (est.backend == "cuda") {
+        std::cout << "estimated_device_mb: " << est.device_bytes / 1048576.0 << "\n";
+        const uint64_t override_units =
+            rc.value["execution"].value("cuda_batch_units", 0u);
+        if (override_units > 0)
+            std::cout << "cuda_batch_units: " << override_units << " (configured)\n";
+        else
+            std::cout << "cuda_batch_units: auto (selected at run from device memory)\n";
+    }
     if (est.calibrated)
         std::cout << "estimated_runtime_s: [" << est.runtime_lo_s << ", " << est.runtime_hi_s
                   << "] (profile " << est.profile_id << ")\n";
@@ -175,7 +186,9 @@ int run(int argc, char** argv) {
                     .count();
             if (!bench_profile.empty())
                 write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count, solved,
-                                        solve_seconds);
+                                        solve_seconds,
+                                        rc.value["execution"].value("accelerator", "cpu"),
+                                        cuda::active_device_name(rc.value));
             if (solved == 0) std::cout << "status: already complete\n";
             std::cout << "samples_resumed: " << solved << " / " << plan.sample_count() << "\n";
             std::cout << "status: ok\n";
@@ -201,7 +214,9 @@ int run(int argc, char** argv) {
             write_hdf5_output(rc, plan, mesh, result);
         if (!bench_profile.empty())
             write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count,
-                                    plan.sample_count(), solve_seconds);
+                                    plan.sample_count(), solve_seconds,
+                                    rc.value["execution"].value("accelerator", "cpu"),
+                                    cuda::active_device_name(rc.value));
         std::cout << "samples: " << result.samples.size() << "\n";
         std::cout << "status: ok\n";
         return 0;
@@ -213,6 +228,8 @@ int run(int argc, char** argv) {
         return fail(e, ExitCode::Mesh);
     } catch (const OutputError& e) {
         return fail(e, ExitCode::Output);
+    } catch (const cuda::CudaError& e) {
+        return fail(e, ExitCode::Resource);
     } catch (const std::exception& e) {
         return fail(e, ExitCode::Solver);
     }

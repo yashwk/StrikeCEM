@@ -17,7 +17,9 @@ CPU brand, and tool identity (`scem-bench-1` format).
 Record profiles from representative lit runs: a fully shadowed run
 measures loop overhead, not solver throughput, and miscalibrates anything
 it matches. Prefer electrically large cases with several thousand lit
-facets and at least tens of milliseconds of solve time.
+facets and at least tens of milliseconds of solve time. GPU profiles work
+the same way (`accelerator: cuda`); the estimator only matches profiles of
+the requested backend, and each profile records its device.
 
 ## Lookup order
 

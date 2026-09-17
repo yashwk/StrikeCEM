@@ -27,6 +27,9 @@ TEST(Config, ValidMinimalResolvesDefaults) {
     EXPECT_EQ(v["solver"]["po_options"]["illumination_model"], "hard");
     EXPECT_EQ(v["execution"]["cpu_threads"], 1);
     EXPECT_TRUE(v["execution"]["deterministic"].get<bool>());
+    EXPECT_EQ(v["execution"]["accelerator"], "cpu");
+    EXPECT_EQ(v["execution"]["cuda_device_id"], 0);
+    EXPECT_EQ(v["execution"]["cuda_batch_units"], 0);
     EXPECT_EQ(v["model"]["units"], "m");
 }
 

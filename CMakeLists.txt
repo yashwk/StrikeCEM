@@ -6,6 +6,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+option(SCEM_ENABLE_CUDA "Build the CUDA PO backend when a toolkit is found" ON)
+include(CheckLanguage)
+if(SCEM_ENABLE_CUDA)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        set(CMAKE_CUDA_STANDARD 20)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+            set(CMAKE_CUDA_ARCHITECTURES native)
+        endif()
+        set(SCEM_HAVE_CUDA ON)
+        message(STATUS "StrikeCEM: CUDA backend enabled (${CMAKE_CUDA_COMPILER_ID})")
+    else()
+        message(STATUS "StrikeCEM: no CUDA compiler found; CPU-only build")
+    endif()
+endif()
+
 include(FetchContent)
 
 # Pinned dependencies (IMPLEMENTATION.md keeps this surface small on purpose).
@@ -52,6 +70,12 @@ add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/Mesh
         src/strikecem/solvers/PhysicalOptics.cpp src/strikecem/io/CsvWriter.cpp
         src/strikecem/io/Hdf5Writer.cpp src/strikecem/io/Hdf5Reader.cpp
         src/strikecem/runtime/Estimate.cpp)
+if(SCEM_HAVE_CUDA)
+    target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO.cu)
+    target_compile_definitions(scem_core PUBLIC SCEM_ENABLE_CUDA)
+else()
+    target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO_stub.cpp)
+endif()
 target_link_libraries(scem_core PUBLIC
         nlohmann_json::nlohmann_json
         nlohmann_json_schema_validator
@@ -100,7 +124,7 @@ include(GoogleTest)
 enable_testing()
 add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests/test_mesh.cpp
         tests/test_po.cpp tests/test_output.cpp tests/test_goldens.cpp tests/test_hdf5.cpp
-        tests/test_estimate.cpp tests/test_resume.cpp src/strikecem/app/CLI.cpp)
+        tests/test_estimate.cpp tests/test_resume.cpp tests/test_gpu.cpp src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE
         SCEM_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schemas/config.schema.json"

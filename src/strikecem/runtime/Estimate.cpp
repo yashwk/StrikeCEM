@@ -9,6 +9,7 @@
 #include <fstream>
 
 #include "strikecem/core/Conventions.hpp"
+#include "strikecem/solvers/GpuPO.hpp"
 
 namespace strikecem {
 namespace {
@@ -75,11 +76,13 @@ std::vector<BenchmarkProfile> load_benchmark_profiles() {
 }
 
 void write_benchmark_profile(const std::string& path, const ResolvedConfig& rc,
-                             uint64_t triangles, uint64_t samples, double wall_seconds) {
+                             uint64_t triangles, uint64_t samples, double wall_seconds,
+                             const std::string& backend, const std::string& device) {
     nlohmann::json j;
     j["profile_format"] = "scem-bench-1";
     j["precision"] = rc.value["solver"]["precision"];
-    j["backend"] = "cpu";
+    j["backend"] = backend;
+    j["device"] = device;
     j["triangles"] = triangles;
     j["samples"] = samples;
     j["wall_seconds"] = wall_seconds;
@@ -113,6 +116,8 @@ ResourceEstimate estimate_resources(const nlohmann::json& resolved, const Sample
     est.limit_bytes = resolved["execution"]["max_memory_mb"].get<double>() * 1048576.0;
     est.fits = static_cast<double>(est.total_bytes) <= est.limit_bytes;
     est.operation_count = tris * rows * kOpsPerTriSample;
+    est.backend = resolved["execution"].value("accelerator", "cpu");
+    if (est.backend == "cuda") est.device_bytes = cuda::cuda_footprint_bytes(resolved, tris);
 
     double max_freq = 0.0;
     for (double f : plan.frequencies_hz) max_freq = std::max(max_freq, f);
@@ -146,7 +151,7 @@ ResourceEstimate estimate_resources(const nlohmann::json& resolved, const Sample
     double best_score = 0.0;
     for (const auto& p : profiles) {
         if (p.precision != resolved["solver"]["precision"].get<std::string>()) continue;
-        if (p.backend != "cpu") continue;
+        if (p.backend != est.backend) continue;
         const double rt = static_cast<double>(tris) / p.triangles;
         const double rs = static_cast<double>(rows) / p.samples;
         if (rt < 0.25 || rt > 4.0 || rs < 0.25 || rs > 4.0) continue;
