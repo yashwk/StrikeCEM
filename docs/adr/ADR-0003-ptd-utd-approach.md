@@ -74,7 +74,7 @@
 - Roadmap placement (2026-09-18 reconciliation): the SPEC roadmap puts
   PTD/UTD in v2.0, after v1.2 Materials + GO/SBR. This track shipped
   first as a SPEC §12 backward-compatible 1.0 extension (monostatic
-  only, so no bistatic leak), not as a v2.0 capability. Materials is
+  only), not as a v2.0 capability. Materials is
   still untouched.
 - Naming map: schema value `fringe` is the FULL §10.2 fringe-field
   concept evaluated with FULL §10.3 UTD coefficients (KP, soft/hard).

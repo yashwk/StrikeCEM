@@ -17,7 +17,7 @@ StrikeEngine.
 The machine-readable contract is
 [config.schema.json](schemas/config.schema.json) – the v1 configuration
 schema. Unsupported features (other solvers, GPU execution, materials,
-bistatic output, CAD input) are rejected, never silently substituted.
+CAD input) are rejected, never silently substituted.
 
 ---
 
