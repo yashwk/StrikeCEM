@@ -8,7 +8,7 @@ StrikeEngine.
 
 * Geometry: STL/OBJ triangle meshes (m, mm, in) with rigid transforms
 * Physics: PEC, plane-wave illumination, monostatic RCS
-* Solver: Physical Optics (PO) on CPU, float32/float64
+* Solver: Physical Optics (PO) on CPU or CUDA GPU, float32/float64
 * Sampling: regular azimuth/elevation grid or explicit direction list
 * Polarization: HH, VV, HV, VH, RHCP, LHCP (default HH + VV)
 * Output: CSV with JSON sidecar, or flat-row HDF5
@@ -16,7 +16,7 @@ StrikeEngine.
 
 The machine-readable contract is
 [config.schema.json](schemas/config.schema.json) – the v1 configuration
-schema. Unsupported features (other solvers, GPU execution, materials,
+schema. Unsupported features (other solvers, materials,
 CAD input) are rejected, never silently substituted.
 
 ---
