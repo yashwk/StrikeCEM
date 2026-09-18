@@ -33,7 +33,12 @@
 
 ## Consequences
 
-- Slice 1 (this): convention helpers + Fresnel core + tests only.
+- Slice 1 (done): convention helpers + Fresnel core + tests only.
+- Slice 2 (done): `MaterialModel` tables + validation policy + linear
+  frequency interpolation + conductivity folding. Single-entry tables
+  are constant; multi-entry tables interpolate inside and throw
+  outside; PEC is bare (empty table/layers) and unevaluatable;
+  dielectric needs a table and no layers; coated needs layers.
 - TE means E perpendicular to the local plane of incidence (s-pol);
   TM means E in the plane (p-pol), with Hecht's reflected-basis sign
   ($R_{\mathrm{TM}} = -R_{\mathrm{TE}}$ at normal incidence; PEC limit
