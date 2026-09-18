@@ -21,4 +21,7 @@ struct FresnelResult {
 
 FresnelResult fresnel(const ComplexMedium& medium, const ComplexMedium& wall, double cos_theta_i);
 
+FresnelResult fresnel(const ComplexMedium& medium, const ComplexMedium& wall,
+                      std::complex<double> cos_theta_i);
+
 }

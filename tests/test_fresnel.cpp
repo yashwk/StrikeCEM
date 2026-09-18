@@ -1,5 +1,6 @@
 #include <cmath>
 #include <complex>
+#include <limits>
 #include <gtest/gtest.h>
 
 #include "strikecem/solvers/Fresnel.hpp"
@@ -81,6 +82,27 @@ TEST(Fresnel, PassiveWallsOnly) {
     const auto f = strikecem::fresnel({}, {{2.0, -0.5}, {1.0, 0.0}}, std::cos(0.6));
     EXPECT_LE(std::abs(f.r_te), 1.0 + 1e-12);
     EXPECT_LE(std::abs(f.r_tm), 1.0 + 1e-12);
+}
+
+TEST(Fresnel, ComplexPathMatchesReal) {
+    const strikecem::ComplexMedium air;
+    const strikecem::ComplexMedium glass{{2.25, 0.0}, {1.0, 0.0}};
+    for (double cos_i : {1.0, 0.8, 0.2}) {
+        const auto a = strikecem::fresnel(air, glass, cos_i);
+        const auto b = strikecem::fresnel(air, glass, std::complex<double>{cos_i, 0.0});
+        EXPECT_NEAR(std::abs(a.r_te - b.r_te), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs(a.r_tm - b.r_tm), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs(a.t_te - b.t_te), 0.0, 1e-12);
+        EXPECT_NEAR(std::abs(a.cos_theta_t - b.cos_theta_t), 0.0, 1e-12);
+    }
+    const auto tir_a = strikecem::fresnel(glass, air, std::cos(1.0));
+    const auto tir_b =
+        strikecem::fresnel(glass, air, std::complex<double>{std::cos(1.0), 0.0});
+    EXPECT_NEAR(std::abs(tir_a.r_te - tir_b.r_te), 0.0, 1e-12);
+    EXPECT_THROW(strikecem::fresnel(air, glass,
+                                      std::complex<double>{
+                                          1.0, std::numeric_limits<double>::infinity()}),
+                 std::invalid_argument);
 }
 
 }

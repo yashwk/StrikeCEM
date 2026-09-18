@@ -88,4 +88,46 @@ ComplexMedium evaluate_material(const MaterialModel& model, double frequency_hz)
     return effective_medium(mix, frequency_hz);
 }
 
+CoatedResult coated_pec_reflection(const ComplexMedium& incident,
+                                   const std::vector<CoatingLayer>& outer_to_pec,
+                                   double cos_theta_i, double wavelength_m) {
+    if (!(wavelength_m > 0.0) || !std::isfinite(wavelength_m))
+        throw std::invalid_argument("wavelength must be positive and finite");
+    if (!(cos_theta_i >= 0.0) || !(cos_theta_i <= 1.0) || !std::isfinite(cos_theta_i))
+        throw std::invalid_argument("cos_theta_i must be in [0, 1]");
+    if (!finite_c(incident.eps_r) || !finite_c(incident.mu_r))
+        throw std::invalid_argument("incident medium must be finite");
+    for (const auto& layer : outer_to_pec) {
+        if (!(layer.thickness_m > 0.0) || !std::isfinite(layer.thickness_m))
+            throw std::invalid_argument("coating thickness must be positive and finite");
+        check_passive(layer.medium);
+    }
+    const double k0 = 2.0 * std::numbers::pi / wavelength_m;
+    std::vector<std::complex<double>> rs_te;
+    std::vector<std::complex<double>> rs_tm;
+    std::vector<std::complex<double>> phis;
+    rs_te.reserve(outer_to_pec.size());
+    rs_tm.reserve(outer_to_pec.size());
+    phis.reserve(outer_to_pec.size());
+    ComplexMedium above = incident;
+    std::complex<double> cos_above{cos_theta_i, 0.0};
+    for (const auto& layer : outer_to_pec) {
+        const FresnelResult f = fresnel(above, layer.medium, cos_above);
+        const std::complex<double> n = refractive_index(layer.medium);
+        const std::complex<double> beta = k0 * n * layer.thickness_m * f.cos_theta_t;
+        rs_te.push_back(f.r_te);
+        rs_tm.push_back(f.r_tm);
+        phis.push_back(std::exp(std::complex<double>(0.0, -2.0) * beta));
+        above = layer.medium;
+        cos_above = f.cos_theta_t;
+    }
+    std::complex<double> r_te{-1.0, 0.0};
+    std::complex<double> r_tm{1.0, 0.0};
+    for (size_t j = outer_to_pec.size(); j-- > 0;) {
+        r_te = (rs_te[j] + r_te * phis[j]) / (1.0 + rs_te[j] * r_te * phis[j]);
+        r_tm = (rs_tm[j] + r_tm * phis[j]) / (1.0 + rs_tm[j] * r_tm * phis[j]);
+    }
+    return {r_te, r_tm};
+}
+
 } // namespace strikecem

@@ -33,4 +33,13 @@ ComplexMedium effective_medium(const MaterialEntry& entry, double frequency_hz);
 
 ComplexMedium evaluate_material(const MaterialModel& model, double frequency_hz);
 
+struct CoatedResult {
+    std::complex<double> r_te;
+    std::complex<double> r_tm;
+};
+
+CoatedResult coated_pec_reflection(const ComplexMedium& incident,
+                                   const std::vector<CoatingLayer>& outer_to_pec,
+                                   double cos_theta_i, double wavelength_m);
+
 } // namespace strikecem

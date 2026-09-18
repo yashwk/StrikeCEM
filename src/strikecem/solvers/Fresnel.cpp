@@ -32,21 +32,29 @@ std::complex<double> wave_impedance(const ComplexMedium& m) {
 
 FresnelResult fresnel(const ComplexMedium& medium, const ComplexMedium& wall,
                       double cos_theta_i) {
+    if (!(cos_theta_i >= 0.0) || !(cos_theta_i <= 1.0) || !std::isfinite(cos_theta_i))
+        throw std::invalid_argument("cos_theta_i must be in [0, 1]");
+    return fresnel(medium, wall, std::complex<double>{cos_theta_i, 0.0});
+}
+
+FresnelResult fresnel(const ComplexMedium& medium, const ComplexMedium& wall,
+                      std::complex<double> cos_theta_i) {
     for (const auto z : {medium.eps_r, medium.mu_r, wall.eps_r, wall.mu_r})
         if (!finite_c(z)) throw std::invalid_argument("medium constants must be finite");
     if (wall.eps_r.imag() > kPassiveTol || wall.mu_r.imag() > kPassiveTol)
         throw std::invalid_argument("wall must be passive (Im(eps), Im(mu) <= 0)");
-    if (!(cos_theta_i >= 0.0) || !(cos_theta_i <= 1.0) || !std::isfinite(cos_theta_i))
-        throw std::invalid_argument("cos_theta_i must be in [0, 1]");
+    if (!finite_c(cos_theta_i))
+        throw std::invalid_argument("cos_theta_i must be finite");
     const std::complex<double> n1 = refractive_index(medium);
     const std::complex<double> n2 = refractive_index(wall);
     const std::complex<double> e1 = wave_impedance(medium);
     const std::complex<double> e2 = wave_impedance(wall);
-    const double sin_theta_i = std::sqrt(std::max(0.0, 1.0 - cos_theta_i * cos_theta_i));
+    const std::complex<double> ci = cos_theta_i;
+    const std::complex<double> sin_theta_i =
+        std::sqrt(std::complex<double>{1.0, 0.0} - ci * ci);
     const std::complex<double> s = n1 * sin_theta_i / n2;
     std::complex<double> ct = std::sqrt(std::complex<double>{1.0, 0.0} - s * s);
     if ((n2 * ct).imag() > 0.0) ct = -ct;
-    const std::complex<double> ci{cos_theta_i, 0.0};
     FresnelResult out;
     out.cos_theta_t = ct;
     const std::complex<double> d_te = e2 * ci + e1 * ct;

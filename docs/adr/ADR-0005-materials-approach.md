@@ -39,6 +39,12 @@
   are constant; multi-entry tables interpolate inside and throw
   outside; PEC is bare (empty table/layers) and unevaluatable;
   dielectric needs a table and no layers; coated needs layers.
+- Slice 3 (done): coated-PEC recursion reusing `fresnel()` stage by
+  stage (top-down Snell chain, bottom-up combination). Pinned by
+  half-wave absentee, thin-degenerate PEC recovery, an exact asymmetric
+  two-layer case (which caught a top-down combination bug: the
+  single-layer tests cannot see recursion order), lossless unit
+  magnitude, and empty-stack PEC return. Layer order is outer-to-PEC.
 - TE means E perpendicular to the local plane of incidence (s-pol);
   TM means E in the plane (p-pol), with Hecht's reflected-basis sign
   ($R_{\mathrm{TM}} = -R_{\mathrm{TE}}$ at normal incidence; PEC limit

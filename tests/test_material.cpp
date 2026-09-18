@@ -92,4 +92,63 @@ TEST(Material, ConductivityFoldsWithSign) {
     EXPECT_DOUBLE_EQ(m.eps_r.imag(), -1.0 / (2.0 * std::numbers::pi * 1e9 * eps0));
 }
 
+TEST(Material, BarePecEmptyStack) {
+    const auto r = strikecem::coated_pec_reflection({}, {}, 1.0, 1.0);
+    EXPECT_DOUBLE_EQ(r.r_te.real(), -1.0);
+    EXPECT_DOUBLE_EQ(r.r_te.imag(), 0.0);
+    EXPECT_DOUBLE_EQ(r.r_tm.real(), 1.0);
+    EXPECT_DOUBLE_EQ(r.r_tm.imag(), 0.0);
+}
+
+TEST(Material, HalfWaveAbsentee) {
+    const strikecem::CoatingLayer layer{0.25, {{4.0, 0.0}, {1.0, 0.0}}};
+    const auto r = strikecem::coated_pec_reflection({}, {layer}, 1.0, 1.0);
+    EXPECT_NEAR(std::abs(r.r_te + 1.0), 0.0, 1e-12);
+    EXPECT_NEAR(std::abs(r.r_tm - 1.0), 0.0, 1e-12);
+}
+
+TEST(Material, ThinDegenerate) {
+    const strikecem::CoatingLayer layer{1e-6, {{6.25, -0.09}, {1.0, 0.0}}};
+    const auto r = strikecem::coated_pec_reflection({}, {layer}, std::cos(0.3), 1.0);
+    EXPECT_LT(std::abs(r.r_te + 1.0), 1e-3);
+    EXPECT_LT(std::abs(r.r_tm - 1.0), 1e-3);
+}
+
+TEST(Material, AsymmetricTwoLayer) {
+    const strikecem::CoatingLayer outer{1.0 / 8.0, {{4.0, 0.0}, {1.0, 0.0}}};
+    const strikecem::CoatingLayer inner{1.0 / 24.0, {{9.0, 0.0}, {1.0, 0.0}}};
+    const auto r = strikecem::coated_pec_reflection({}, {outer, inner}, 1.0, 1.0);
+    EXPECT_NEAR(r.r_te.real(), -0.28, 1e-9);
+    EXPECT_NEAR(r.r_te.imag(), -0.96, 1e-9);
+    EXPECT_NEAR(r.r_tm.real(), 0.28, 1e-9);
+    EXPECT_NEAR(r.r_tm.imag(), 0.96, 1e-9);
+    const auto swapped = strikecem::coated_pec_reflection({}, {inner, outer}, 1.0, 1.0);
+    EXPECT_GT(std::abs(swapped.r_te - r.r_te), 0.1);
+}
+
+TEST(Material, LosslessUnitMagnitude) {
+    const strikecem::CoatingLayer a{0.13, {{4.0, 0.0}, {1.0, 0.0}}};
+    const strikecem::CoatingLayer b{0.07, {{2.25, 0.0}, {1.0, 0.0}}};
+    for (double cos_i : {1.0, 0.8, 0.4}) {
+        const auto r = strikecem::coated_pec_reflection({}, {a, b}, cos_i, 1.0);
+        EXPECT_NEAR(std::abs(r.r_te), 1.0, 1e-9);
+        EXPECT_NEAR(std::abs(r.r_tm), 1.0, 1e-9);
+    }
+    const strikecem::CoatingLayer lossy{0.13, {{4.0, -1.0}, {1.0, 0.0}}};
+    const auto rl = strikecem::coated_pec_reflection({}, {lossy}, 0.9, 1.0);
+    EXPECT_LE(std::abs(rl.r_te), 1.0 + 1e-12);
+    EXPECT_LE(std::abs(rl.r_tm), 1.0 + 1e-12);
+    EXPECT_TRUE(std::isfinite(rl.r_te.real() + rl.r_tm.imag()));
+}
+
+TEST(Material, CoatingBadInputsThrow) {
+    const strikecem::CoatingLayer good{0.1, {{4.0, 0.0}, {1.0, 0.0}}};
+    EXPECT_THROW(strikecem::coated_pec_reflection({}, {good}, 1.0, 0.0), std::invalid_argument);
+    EXPECT_THROW(strikecem::coated_pec_reflection({}, {good}, 2.0, 1.0), std::invalid_argument);
+    const strikecem::CoatingLayer flat{0.0, {{4.0, 0.0}, {1.0, 0.0}}};
+    EXPECT_THROW(strikecem::coated_pec_reflection({}, {flat}, 1.0, 1.0), std::invalid_argument);
+    const strikecem::CoatingLayer gain{0.1, {{4.0, 0.5}, {1.0, 0.0}}};
+    EXPECT_THROW(strikecem::coated_pec_reflection({}, {gain}, 1.0, 1.0), std::invalid_argument);
+}
+
 } // namespace
