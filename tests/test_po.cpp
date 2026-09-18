@@ -229,7 +229,7 @@ TEST(PoSolver, TwoBounceSinglePairHandComputed) {
     const Case rc = load_case("valid_minimal.json");
     const auto plan = make_plan({299792458.0}, {{180.0, -45.0}}, {"HH"});
     const auto po = strikecem::solve_po(mesh, plan, rc.rc.value);
-    const strikecem::GoOptions go{false, true};
+    const strikecem::GoOptions go{false, 2};
     const auto total = strikecem::solve_po(mesh, plan, rc.rc.value, {}, go);
     const std::complex<double> pair(0.0, std::sqrt(2.0) / 4.0);
     EXPECT_NEAR(std::abs(total.samples[0].scattering - po.samples[0].scattering - 2.0 * pair),
@@ -241,7 +241,7 @@ TEST(PoSolver, TwoBounceNonRetroSkipped) {
     const auto mesh = stacked_plates();
     const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
     const auto po = strikecem::solve_po(mesh, plan, c.rc.value);
-    const strikecem::GoOptions go{false, true};
+    const strikecem::GoOptions go{false, 2};
     const auto total = strikecem::solve_po(mesh, plan, c.rc.value, {}, go);
     ASSERT_EQ(po.samples.size(), total.samples.size());
     for (size_t i = 0; i < po.samples.size(); ++i)
@@ -258,7 +258,7 @@ TEST(PoSolver, TwoBounceBlockedExitSkipped) {
     corner.report.bbox_max = {1, 1, 1};
     const Case c = load_case("valid_minimal.json");
     const auto plan = make_plan({10e9}, {{180.0, -45.0}}, {"HH"});
-    const strikecem::GoOptions go{false, true};
+    const strikecem::GoOptions go{false, 2};
     const auto open = strikecem::solve_po(corner, plan, c.rc.value, {}, go);
     const auto open_po = strikecem::solve_po(corner, plan, c.rc.value);
     EXPECT_NE(open.samples[0].scattering, open_po.samples[0].scattering);
@@ -298,12 +298,24 @@ TEST(PoSolver, TwoBounceCudaRefused) {
     auto cuda_cfg = c.rc.value;
     cuda_cfg["execution"]["accelerator"] = "cuda";
     const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
-    const strikecem::GoOptions bounce{false, true};
+    const strikecem::GoOptions bounce{false, 2};
     EXPECT_THROW(strikecem::solve_po(c.mesh, plan, cuda_cfg, {}, bounce),
                  strikecem::cuda::CudaError);
-    const strikecem::GoOptions shade{true, false};
+    const strikecem::GoOptions shade{true, 1};
     EXPECT_THROW(strikecem::solve_po(c.mesh, plan, cuda_cfg, {}, shade),
                  strikecem::cuda::CudaError);
+}
+
+TEST(PoSolver, MaxBouncesValidated) {
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
+    for (int bounces : {0, 4, 99}) {
+        const strikecem::GoOptions go{false, bounces};
+        EXPECT_THROW(strikecem::solve_po(c.mesh, plan, c.rc.value, {}, go),
+                     std::invalid_argument);
+    }
+    const strikecem::GoOptions three{false, 3};
+    EXPECT_NO_THROW(strikecem::solve_po(c.mesh, plan, c.rc.value, {}, three));
 }
 
 } // namespace

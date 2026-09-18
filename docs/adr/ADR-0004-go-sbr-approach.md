@@ -53,6 +53,14 @@
   refinement. dihedral.obj's vertical normal faces away from the pocket,
   so it cannot double-bounce single-sided; benchmarks use a
   pocket-facing mesh instead.
+- Slice 4 (done): `GoOptions.max_bounces` in {1, 2, 3} (validated, else
+  throw). Triples share the pair transport/radiate code with one more
+  hop. max_bounces=2 on the trihedral is bit-identical to PO (no
+  2-bounce retroreflection exists when the look has an along-edge
+  component for every valley). Trihedral benchmark at boresight lands
+  within ±20% of 12πa⁴/λ² both channels. Triple hand values are not
+  pinned individually; the evidence stack is pair-exact transport plus
+  max2-exact plus analytic agreement.
 - The `t_min` floor is absolute (1e-9 of the mesh bbox diagonal, computed
   by the caller from the mesh report); wavelength-relative flooring is
   the documented upgrade path if electrically tiny features ever arrive.

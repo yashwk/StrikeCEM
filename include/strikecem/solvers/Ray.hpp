@@ -15,7 +15,7 @@ struct RayHit {
 
 struct GoOptions {
     bool shadowing = false;
-    bool two_bounce = false;
+    int max_bounces = 1; // 1 = single-bounce PO; 2 adds pairs; 3 adds triples
 };
 
 std::optional<RayHit> ray_triangle(const geom::Vec3d& origin, const geom::Vec3d& dir,

@@ -166,7 +166,7 @@ TEST(Benchmark, TwoBounceDihedralAnalytic) {
     const auto mesh = dihedral_grids(10);
     const auto plan = single_sample(1e9, 180.0, -45.0, {"HH", "VV"});
     const auto po = strikecem::solve_po(mesh, plan, rc.value);
-    const strikecem::GoOptions go{false, true};
+    const strikecem::GoOptions go{false, 2};
     const auto total = strikecem::solve_po(mesh, plan, rc.value, {}, go);
     ASSERT_EQ(total.samples.size(), 2u);
     const double lambda = strikecem::kSpeedOfLight / 1e9;
@@ -179,6 +179,68 @@ TEST(Benchmark, TwoBounceDihedralAnalytic) {
     }
     const double mean = 0.5 * (total.samples[0].rcs_sqm + total.samples[1].rcs_sqm);
     EXPECT_LT(std::abs(total.samples[0].rcs_sqm - total.samples[1].rcs_sqm), 0.3 * mean);
+}
+
+strikecem::NormalizedMesh trihedral_grids(int n) {
+    strikecem::NormalizedMesh m;
+    auto grid = [&](double ox, double oy, double oz, double ax, double ay, double az, double bx,
+                    double by, double bz) {
+        const uint32_t base = uint32_t(m.vertices.size());
+        for (int j = 0; j <= n; ++j)
+            for (int i = 0; i <= n; ++i)
+                m.vertices.push_back({ox + (ax * i + bx * j) / n, oy + (ay * i + by * j) / n,
+                                      oz + (az * i + bz * j) / n});
+        return base;
+    };
+    auto quad = [&](uint32_t a, uint32_t b, uint32_t c, uint32_t d, geom::Vec3d nrm) {
+        m.triangles.push_back({a, b, c});
+        m.triangles.push_back({a, c, d});
+        m.normals.push_back(nrm);
+        m.normals.push_back(nrm);
+        m.areas.push_back(0.5 / (n * n));
+        m.areas.push_back(0.5 / (n * n));
+    };
+    const uint32_t h = grid(0, 0, 0, 1, 0, 0, 0, 1, 0);
+    const uint32_t x = grid(0, 0, 0, 0, 1, 0, 0, 0, 1);
+    const uint32_t y = grid(0, 0, 0, 1, 0, 0, 0, 0, 1);
+    auto id = [&](uint32_t base, int i, int j) { return base + uint32_t(j * (n + 1) + i); };
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            quad(id(h, i, j), id(h, i + 1, j), id(h, i + 1, j + 1), id(h, i, j + 1), {0, 0, 1});
+            quad(id(x, i, j), id(x, i + 1, j), id(x, i + 1, j + 1), id(x, i, j + 1), {1, 0, 0});
+            quad(id(y, i, j), id(y, i + 1, j), id(y, i + 1, j + 1), id(y, i, j + 1), {0, 1, 0});
+        }
+    m.report.bbox_min = {0, 0, 0};
+    m.report.bbox_max = {1, 1, 1};
+    return m;
+}
+
+TEST(Benchmark, TwoBounceTrihedralAnalytic) {
+    const auto rc = load_rc("valid_dihedral.json");
+    const auto mesh = trihedral_grids(6);
+    const double q = 1.0 / std::sqrt(3.0);
+    const geom::Vec3d k_hat(-q, -q, -q);
+    strikecem::SamplePlan plan;
+    plan.frequencies_hz = {1e9};
+    plan.directions.push_back({0, 225.0, -35.264389682754654, k_hat});
+    plan.polarizations = {"HH", "VV"};
+    const auto po = strikecem::solve_po(mesh, plan, rc.value);
+    const strikecem::GoOptions two{false, 2};
+    const auto pairs = strikecem::solve_po(mesh, plan, rc.value, {}, two);
+    ASSERT_EQ(pairs.samples.size(), po.samples.size());
+    for (size_t i = 0; i < po.samples.size(); ++i)
+        EXPECT_EQ(pairs.samples[i].scattering, po.samples[i].scattering);
+    const strikecem::GoOptions three{false, 3};
+    const auto total = strikecem::solve_po(mesh, plan, rc.value, {}, three);
+    ASSERT_EQ(total.samples.size(), 2u);
+    const double lambda = strikecem::kSpeedOfLight / 1e9;
+    const double analytic = 12.0 * kPi / (lambda * lambda);
+    for (size_t i = 0; i < 2; ++i) {
+        const double ratio = total.samples[i].rcs_sqm / analytic;
+        EXPECT_GT(ratio, 0.8);
+        EXPECT_LT(ratio, 1.2);
+        EXPECT_LT(std::abs(po.samples[i].scattering), 0.01 * std::abs(total.samples[i].scattering));
+    }
 }
 
 }

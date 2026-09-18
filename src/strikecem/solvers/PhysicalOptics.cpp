@@ -164,7 +164,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                 }
             }
         }
-        if (go.two_bounce) {
+        if (go.max_bounces >= 2) {
             using D = std::complex<double>;
             using D3 = std::array<D, 3>;
             const geom::Vec3d s{static_cast<double>(k_hat.x), static_cast<double>(k_hat.y),
@@ -233,6 +233,67 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                         for (int i = 0; i < 3; ++i)
                             f_tx[tx][i] += C(static_cast<Real>((amp * t2[i]).real() * e0_d),
                                              static_cast<Real>((amp * t2[i]).imag() * e0_d));
+                    }
+                }
+            }
+            if (go.max_bounces >= 3) {
+                for (size_t ia = 0; ia < ntri; ++ia) {
+                    const geom::Vec3d na = mesh.normals[ia];
+                    if (!(geom::dot(na, r) > 0.0)) continue;
+                    const auto& ta = mesh.triangles[ia];
+                    const geom::Vec3d ca =
+                        (mesh.vertices[ta[0]] + mesh.vertices[ta[1]] + mesh.vertices[ta[2]]) *
+                        (1.0 / 3.0);
+                    const geom::Vec3d d1 = reflect_d(s, na);
+                    for (size_t ib = 0; ib < ntri; ++ib) {
+                        if (ib == ia) continue;
+                        const geom::Vec3d nb = mesh.normals[ib];
+                        if (!(geom::dot(nb, d1) < 0.0)) continue;
+                        const auto hit1 = ray_mesh(mesh, ca, d1, tmin, uint32_t(ia));
+                        if (!hit1 || hit1->tri != ib) continue;
+                        const auto& tb = mesh.triangles[ib];
+                        const geom::Vec3d cb =
+                            (mesh.vertices[tb[0]] + mesh.vertices[tb[1]] + mesh.vertices[tb[2]]) *
+                            (1.0 / 3.0);
+                        const geom::Vec3d d2 = reflect_d(d1, nb);
+                        for (size_t ic = 0; ic < ntri; ++ic) {
+                            if (ic == ib) continue;
+                            const geom::Vec3d nc = mesh.normals[ic];
+                            if (!(geom::dot(nc, d2) < 0.0)) continue;
+                            const auto hit2 = ray_mesh(mesh, cb, d2, tmin, uint32_t(ib));
+                            if (!hit2 || hit2->tri != ic) continue;
+                            const auto& tc = mesh.triangles[ic];
+                            const geom::Vec3d cc =
+                                (mesh.vertices[tc[0]] + mesh.vertices[tc[1]] +
+                                 mesh.vertices[tc[2]]) *
+                                (1.0 / 3.0);
+                            if (!(geom::dot(reflect_d(d2, nc), r) > 1.0 - 1e-9)) continue;
+                            const auto exit = ray_mesh(mesh, cc, r, tmin, uint32_t(ic));
+                            if (exit && exit->t < scene) continue;
+                            const D epath =
+                                std::exp(D(0.0, -kd * (geom::dot(s, ca) +
+                                                       geom::dot(d1, cb - ca) +
+                                                       geom::dot(d2, cc - cb))));
+                            const D amp =
+                                D(0.0, 1.0) * kd * eta_d / (4.0 * std::numbers::pi) *
+                                static_cast<double>(mesh.areas[ic]) *
+                                std::exp(D(0.0, kd * geom::dot(r, cc)));
+                            for (int tx = 0; tx < 2; ++tx) {
+                                const D3 ein = {tx_e[tx].x / e0_d, tx_e[tx].y / e0_d,
+                                                tx_e[tx].z / e0_d};
+                                const D3 e2 = reflect_e(reflect_e(ein, na), nb);
+                                D3 hc = cross3(d2, e2);
+                                for (auto& c : hc) c *= epath / eta_d;
+                                const D3 jc0 = cross3(nc, hc);
+                                const D3 jc{2.0 * jc0[0], 2.0 * jc0[1], 2.0 * jc0[2]};
+                                const D3 t1 = cross3(r, jc);
+                                const D3 t2 = cross3(r, t1);
+                                for (int i = 0; i < 3; ++i)
+                                    f_tx[tx][i] +=
+                                        C(static_cast<Real>((amp * t2[i]).real() * e0_d),
+                                          static_cast<Real>((amp * t2[i]).imag() * e0_d));
+                            }
+                        }
                     }
                 }
             }
@@ -317,9 +378,11 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
         if (resolved["execution"].value("accelerator", "cpu") == "cuda")
             throw cuda::CudaError("fringe correction is CPU-only in v1");
     }
-    if ((go.shadowing || go.two_bounce) &&
+    if ((go.shadowing || go.max_bounces > 1) &&
         resolved["execution"].value("accelerator", "cpu") == "cuda")
         throw cuda::CudaError("GO corrections are CPU-only in v1");
+    if (go.max_bounces < 1 || go.max_bounces > 3)
+        throw std::invalid_argument("max_bounces must be 1, 2, or 3");
     if (resolved["execution"].value("accelerator", "cpu") == "cuda") {
         const int device = resolved["execution"].value("cuda_device_id", 0);
         return cuda::solve_po_cuda_units(mesh, plan, resolved, device, units);
