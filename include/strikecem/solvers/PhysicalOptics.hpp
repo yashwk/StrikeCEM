@@ -31,6 +31,7 @@ struct PoSampleResult {
 struct PoResult {
     std::vector<PoSampleResult> samples; // plan order
     std::vector<std::string> warnings;
+    size_t chains_fired = 0; // multi-bounce chains that contributed
 };
 
 struct FringeOptions {

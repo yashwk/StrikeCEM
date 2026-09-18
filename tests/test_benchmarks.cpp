@@ -169,6 +169,7 @@ TEST(Benchmark, TwoBounceDihedralAnalytic) {
     const strikecem::GoOptions go{false, 2};
     const auto total = strikecem::solve_po(mesh, plan, rc.value, {}, go);
     ASSERT_EQ(total.samples.size(), 2u);
+    EXPECT_GT(total.chains_fired, 0u);
     const double lambda = strikecem::kSpeedOfLight / 1e9;
     const double analytic = 8.0 * kPi / (lambda * lambda);
     for (size_t i = 0; i < 2; ++i) {
@@ -233,6 +234,7 @@ TEST(Benchmark, TwoBounceTrihedralAnalytic) {
     const strikecem::GoOptions three{false, 3};
     const auto total = strikecem::solve_po(mesh, plan, rc.value, {}, three);
     ASSERT_EQ(total.samples.size(), 2u);
+    EXPECT_GT(total.chains_fired, 0u);
     const double lambda = strikecem::kSpeedOfLight / 1e9;
     const double analytic = 12.0 * kPi / (lambda * lambda);
     for (size_t i = 0; i < 2; ++i) {

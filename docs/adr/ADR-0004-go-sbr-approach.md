@@ -67,6 +67,16 @@
   results are unchanged by construction. Measured 383x per-ray speedup
   on the 20k-triangle sphere (109us to 0.3us). The O(n²) ceiling is
   retired.
+- Slice 6 (done, track complete, schema unlocked): `shadowing` boolean
+  and `max_bounces` in {1, 2, 3} (both default off/1, single-bounce PO
+  unchanged). Two-axis flags, not the FULL §6.2 exclusive
+  illumination-model enum: shadowing gates singles while max_bounces
+  adds chains, and the implementation supports both at once. Provenance
+  records shadowing/max_bounces/`bounce_chains` (fired-chain count) in
+  the sidecar and HDF5 attrs; estimator warns GO work is uncalibrated;
+  CUDA + any GO flag fails closed; resume mixing rejected by
+  config_hash. All unlock criteria pass (BVH, dihedral + trihedral
+  analytic, GO warning, ray metadata).
 - The `t_min` floor is absolute (1e-9 of the mesh bbox diagonal, computed
   by the caller from the mesh report); wavelength-relative flooring is
   the documented upgrade path if electrically tiny features ever arrive.

@@ -246,6 +246,7 @@ TEST(PoSolver, TwoBounceNonRetroSkipped) {
     ASSERT_EQ(po.samples.size(), total.samples.size());
     for (size_t i = 0; i < po.samples.size(); ++i)
         EXPECT_EQ(total.samples[i].scattering, po.samples[i].scattering);
+    EXPECT_EQ(total.chains_fired, 0u);
 }
 
 TEST(PoSolver, TwoBounceBlockedExitSkipped) {
@@ -262,6 +263,7 @@ TEST(PoSolver, TwoBounceBlockedExitSkipped) {
     const auto open = strikecem::solve_po(corner, plan, c.rc.value, {}, go);
     const auto open_po = strikecem::solve_po(corner, plan, c.rc.value);
     EXPECT_NE(open.samples[0].scattering, open_po.samples[0].scattering);
+    EXPECT_EQ(open.chains_fired, 2u);
     strikecem::NormalizedMesh blocked = corner;
     const geom::Vec3d r(0.7071067811865476, 0.0, 0.7071067811865476);
     const geom::Vec3d ctr = r * 2.0 + geom::Vec3d(0.0, 1.0 / 3.0, 0.0);

@@ -424,6 +424,11 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         write_u64_attr(file, "fringe_edges",
                        fringe.enabled && fringe.edges != nullptr ? fringe.edges->edges.size()
                                                                 : 0);
+        write_u64_attr(file, "shadowing",
+                       rc.value["solver"]["po_options"].value("shadowing", false) ? 1 : 0);
+        write_u64_attr(file, "max_bounces",
+                       rc.value["solver"]["po_options"].value("max_bounces", 1));
+        write_u64_attr(file, "bounce_chains", result.chains_fired);
         write_str_attr(file, "design_id", designer.design_id);
         write_str_attr(file, "design_revision", designer.revision);
         write_str_attr(file, "export_id", designer.export_id);
@@ -501,7 +506,7 @@ void open_resume_db(OpenDb& db, const std::string& path, const SamplePlan& plan)
 
 size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
                           const NormalizedMesh& mesh, const std::string& path,
-                          const FringeOptions& fringe) {
+                          const FringeOptions& fringe, const GoOptions& go) {
     H5::Exception::dontPrint();
     try {
         OpenDb db;
@@ -530,7 +535,7 @@ size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
             db.file.close();
             return 0;
         }
-        PoResult subset = solve_po_units(mesh, plan, rc.value, units, fringe);
+        PoResult subset = solve_po_units(mesh, plan, rc.value, units, fringe, go);
         commit_units(db, plan, subset, units);
         db.file.flush(H5F_SCOPE_GLOBAL);
         db.file.close();

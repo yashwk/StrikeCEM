@@ -72,6 +72,7 @@ json resolve_defaults(const json& raw) {
     if (!po.contains("illumination_model")) po["illumination_model"] = "hard";
     if (!po.contains("curvature_correction")) po["curvature_correction"] = false;
     if (!po.contains("shadowing")) po["shadowing"] = false;
+    if (!po.contains("max_bounces")) po["max_bounces"] = 1;
 
     if (!r.contains("mesh")) r["mesh"] = json::object();
     auto& mesh = r["mesh"];

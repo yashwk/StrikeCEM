@@ -150,4 +150,19 @@ TEST(Cli, RunRefusesOverLimit) {
     fs::remove_all(dir, ec);
 }
 
+TEST(Estimate, GoCorrectionsWarnUncalibrated) {
+    const Case c = load_case("valid_minimal.json");
+    bool plain_warns = false;
+    for (const auto& w : strikecem::estimate_resources(c.rc.value, c.plan, c.mesh, {}).warnings)
+        if (w.find("GO corrections") != std::string::npos) plain_warns = true;
+    EXPECT_FALSE(plain_warns);
+    nlohmann::json go = c.rc.value;
+    go["solver"]["po_options"]["shadowing"] = true;
+    go["solver"]["po_options"]["max_bounces"] = 3;
+    bool found = false;
+    for (const auto& w : strikecem::estimate_resources(go, c.plan, c.mesh, {}).warnings)
+        if (w.find("GO corrections") != std::string::npos) found = true;
+    EXPECT_TRUE(found);
+}
+
 } // namespace

@@ -66,6 +66,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const size_t nunits = units.size();
     out.samples.resize(nunits * npol);
     std::atomic<size_t> fringe_skipped{0};
+    std::atomic<size_t> chains_fired{0};
     const Bvh bvh = build_bvh(mesh);
 
     auto run_unit = [&](size_t pos) {
@@ -216,6 +217,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                     if (!(geom::dot(reflect_d(d1, nb), r) > 1.0 - 1e-9)) continue;
                     const auto exit = ray_bvh(bvh, mesh, cb, r, tmin, uint32_t(ib));
                     if (exit && exit->t < scene) continue;
+                    ++chains_fired;
                     const D path = std::exp(D(0.0, -kd * (geom::dot(s, ca) +
                                                            geom::dot(d1, cb - ca))));
                     const D amp = D(0.0, 1.0) * kd * eta_d / (4.0 * std::numbers::pi) *
@@ -271,6 +273,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                             if (!(geom::dot(reflect_d(d2, nc), r) > 1.0 - 1e-9)) continue;
                             const auto exit = ray_bvh(bvh, mesh, cc, r, tmin, uint32_t(ic));
                             if (exit && exit->t < scene) continue;
+                            ++chains_fired;
                             const D epath =
                                 std::exp(D(0.0, -kd * (geom::dot(s, ca) +
                                                        geom::dot(d1, cb - ca) +
@@ -353,6 +356,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         out.warnings.push_back("fringe correction skipped " +
                                std::to_string(fringe_skipped.load()) +
                                " edge-sample(s): no transverse frame (end-on incidence)");
+    out.chains_fired = chains_fired.load();
     return out;
 }
 

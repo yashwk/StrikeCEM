@@ -116,6 +116,10 @@ ResourceEstimate estimate_resources(const nlohmann::json& resolved, const Sample
     est.limit_bytes = resolved["execution"]["max_memory_mb"].get<double>() * 1048576.0;
     est.fits = static_cast<double>(est.total_bytes) <= est.limit_bytes;
     est.operation_count = tris * rows * kOpsPerTriSample;
+    if (resolved["solver"]["po_options"].value("shadowing", false) ||
+        resolved["solver"]["po_options"].value("max_bounces", 1) > 1)
+        est.warnings.emplace_back("GO corrections are excluded from the operation count; "
+                                  "treat calibrated runtime ranges as lower bounds");
     est.backend = resolved["execution"].value("accelerator", "cpu");
     if (est.backend == "cuda") est.device_bytes = cuda::cuda_footprint_bytes(resolved, tris);
 

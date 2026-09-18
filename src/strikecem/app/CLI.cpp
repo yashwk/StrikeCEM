@@ -180,6 +180,8 @@ int run(int argc, char** argv) {
             fringe = FringeOptions{true, &edge_model};
             std::cout << "fringe_edges: " << edge_model.edges.size() << "\n";
         }
+        GoOptions go{rc.value["solver"]["po_options"].value("shadowing", false),
+                     rc.value["solver"]["po_options"].value("max_bounces", 1)};
         const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
         for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (!est.fits) {
@@ -199,7 +201,7 @@ int run(int argc, char** argv) {
                 fs::absolute(out_path).lexically_normal())
                 throw ConfigError("run.resume_from_checkpoint must equal output.path");
             const auto solve_start = std::chrono::steady_clock::now();
-            const size_t solved = resume_hdf5_output(rc, plan, mesh, checkpoint, fringe);
+            const size_t solved = resume_hdf5_output(rc, plan, mesh, checkpoint, fringe, go);
             const double solve_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start)
                     .count();
@@ -223,7 +225,7 @@ int run(int argc, char** argv) {
             }
         }
         const auto solve_start = std::chrono::steady_clock::now();
-        PoResult result = solve_po(mesh, plan, rc.value, fringe);
+        PoResult result = solve_po(mesh, plan, rc.value, fringe, go);
         const double solve_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";

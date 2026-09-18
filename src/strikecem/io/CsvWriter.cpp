@@ -90,6 +90,9 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                          {"fringe_edges", fringe.enabled && fringe.edges != nullptr
                                               ? fringe.edges->edges.size()
                                               : 0},
+                         {"shadowing", rc.value["solver"]["po_options"].value("shadowing", false)},
+                         {"max_bounces", rc.value["solver"]["po_options"].value("max_bounces", 1)},
+                         {"bounce_chains", result.chains_fired},
                          {"deterministic", rc.value["execution"]["deterministic"]},
                          {"backend", rc.value["execution"].value("accelerator", "cpu")},
                          {"device", cuda::active_device_name(rc.value)}};

@@ -129,7 +129,8 @@
             "edge_correction": {"type": "string", "enum": ["none", "fringe"], "default": "none"},
             "illumination_model": {"const": "hard", "default": "hard"},
             "curvature_correction": {"const": false, "default": false},
-            "shadowing": {"const": false, "default": false}
+            "shadowing": {"type": "boolean", "default": false},
+            "max_bounces": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1}
           }
         }
       }

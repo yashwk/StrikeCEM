@@ -674,4 +674,132 @@ TEST(Fringe, ResumeSolvesMissingWithFringe) {
     fs::remove_all(dir, ec);
 }
 
+std::string write_go_config(const fs::path& dir, const std::string& name,
+                            const std::string& format, bool shadowing, int max_bounces,
+                            bool cuda = false) {
+    nlohmann::json cfg;
+    cfg["scem_schema_version"] = "1.0";
+    cfg["model"] = {{"path", std::string(SCEM_FIXTURE_DIR) + "/../../examples/plate.stl"}};
+    cfg["frequency"] = {{"frequency_hz", 10e9}};
+    cfg["angles"]["azimuth"] = {{"start", 0}, {"stop", 0}, {"step", 1}};
+    cfg["angles"]["elevation"] = {{"start", -90}, {"stop", -90}, {"step", 1}};
+    cfg["solver"] = {{"type", "PO"},
+                     {"po_options", {{"shadowing", shadowing}, {"max_bounces", max_bounces}}}};
+    cfg["output"] = {{"path", (dir / name).string()}, {"format", format}};
+    if (cuda) cfg["execution"] = {{"accelerator", "cuda"}};
+    const fs::path config = dir / (name + ".json");
+    {
+        std::ofstream out(config);
+        out << cfg.dump(2);
+    }
+    return config.string();
+}
+
+TEST(Go, CliCsvProvenance) {
+    const fs::path dir = fs::temp_directory_path() / "scem_go_csv";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string config = write_go_config(dir, "out.csv", "csv", true, 2);
+    EXPECT_EQ(cli_run("run", config), 0);
+    std::ifstream sidecar_in(dir / "out.csv.json");
+    ASSERT_TRUE(sidecar_in.good());
+    const auto sidecar = nlohmann::json::parse(sidecar_in);
+    EXPECT_EQ(sidecar["solver"]["shadowing"], true);
+    EXPECT_EQ(sidecar["solver"]["max_bounces"], 2);
+    EXPECT_EQ(sidecar["solver"]["bounce_chains"], 0u);
+    fs::remove_all(dir, ec);
+}
+
+TEST(Go, CliDefaults) {
+    const fs::path dir = fs::temp_directory_path() / "scem_go_defaults";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string config = write_fringe_config(dir, "out.csv", "none", "csv");
+    EXPECT_EQ(cli_run("run", config), 0);
+    std::ifstream sidecar_in(dir / "out.csv.json");
+    ASSERT_TRUE(sidecar_in.good());
+    const auto sidecar = nlohmann::json::parse(sidecar_in);
+    EXPECT_EQ(sidecar["solver"]["shadowing"], false);
+    EXPECT_EQ(sidecar["solver"]["max_bounces"], 1);
+    fs::remove_all(dir, ec);
+}
+
+TEST(Go, CliInvalidRejected) {
+    const fs::path dir = fs::temp_directory_path() / "scem_go_bad";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    EXPECT_EQ(cli_run("validate", write_go_config(dir, "a.csv", "csv", false, 4)), 2);
+    EXPECT_EQ(cli_run("validate", write_go_config(dir, "b.csv", "csv", false, 0)), 2);
+    nlohmann::json bad = nlohmann::json::parse(std::ifstream(dir / "a.csv.json"));
+    bad["solver"]["po_options"]["shadowing"] = "yes";
+    {
+        std::ofstream out(dir / "c.csv.json");
+        out << bad.dump(2);
+    }
+    EXPECT_EQ(cli_run("validate", (dir / "c.csv.json").string()), 2);
+    fs::remove_all(dir, ec);
+}
+
+TEST(Go, CliCudaRefused) {
+    const fs::path dir = fs::temp_directory_path() / "scem_go_cuda";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const std::string config = write_go_config(dir, "out.h5", "hdf5", true, 3, true);
+    EXPECT_EQ(cli_run("run", config), 4);
+    fs::remove_all(dir, ec);
+}
+
+TEST(Go, ResumeWithOptions) {
+    const fs::path dir = fs::temp_directory_path() / "scem_go_resume";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    auto rc = strikecem::load_config(fixture("valid_dihedral.json"), SCEM_SCHEMA_PATH);
+    rc.value["output"]["path"] = (dir / "out.h5").string();
+    rc.value["output"]["format"] = "hdf5";
+    rc.value["solver"]["po_options"]["shadowing"] = true;
+    rc.value["solver"]["po_options"]["max_bounces"] = 2;
+    const auto plan = make_fringe_plan({10e9}, {{0.0, -60.0}}, {"HH"});
+    const auto mesh =
+        strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+    const strikecem::GoOptions go{true, 2};
+    const auto fresh = strikecem::solve_po(mesh, plan, rc.value, {}, go);
+    const auto plain = strikecem::solve_po(mesh, plan, rc.value);
+    EXPECT_NE(fresh.samples[0].scattering, plain.samples[0].scattering);
+    strikecem::write_hdf5_output(rc, plan, mesh, fresh);
+    {
+        H5::H5File file((dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group progress = file.openGroup("/progress");
+        H5::DataSet flags = progress.openDataSet("completed_chunks");
+        const uint8_t zero[1] = {0};
+        const hsize_t count[1] = {1}, start[1] = {0};
+        const H5::DataSpace mem(1, count);
+        H5::DataSpace space = flags.getSpace();
+        space.selectHyperslab(H5S_SELECT_SET, count, start);
+        flags.write(zero, H5::PredType::NATIVE_UINT8, mem, space);
+        file.flush(H5F_SCOPE_GLOBAL);
+        file.close();
+    }
+    EXPECT_GT(strikecem::resume_hdf5_output(rc, plan, mesh, (dir / "out.h5").string(), {}, go),
+              0u);
+    const auto db = strikecem::read_hdf5_database((dir / "out.h5").string());
+    EXPECT_NO_THROW(strikecem::validate_hdf5_complete(db));
+    ASSERT_EQ(db.rows.size(), fresh.samples.size());
+    for (size_t i = 0; i < db.rows.size(); ++i) {
+        EXPECT_DOUBLE_EQ(db.rows[i].scattering_real, fresh.samples[i].scattering.real());
+        EXPECT_DOUBLE_EQ(db.rows[i].scattering_imag, fresh.samples[i].scattering.imag());
+    }
+    H5::H5File file((dir / "out.h5").string(), H5F_ACC_RDONLY);
+    H5::Attribute bounces = file.openAttribute("max_bounces");
+    uint64_t nb = 0;
+    bounces.read(H5::PredType::NATIVE_UINT64, &nb);
+    EXPECT_EQ(nb, 2u);
+    file.close();
+    fs::remove_all(dir, ec);
+}
+
 }
