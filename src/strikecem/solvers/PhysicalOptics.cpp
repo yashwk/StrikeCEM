@@ -66,6 +66,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const size_t nunits = units.size();
     out.samples.resize(nunits * npol);
     std::atomic<size_t> fringe_skipped{0};
+    const Bvh bvh = build_bvh(mesh);
 
     auto run_unit = [&](size_t pos) {
         const size_t fi = units[pos].first;
@@ -115,8 +116,8 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                           static_cast<double>(r_hat.y),
                                           static_cast<double>(r_hat.z)};
                 const geom::Vec3d diag = mesh.report.bbox_max - mesh.report.bbox_min;
-                if (occluded(mesh, center_d, r_hat_d, 2.0 * diag.length(),
-                             static_cast<uint32_t>(t)))
+                if (occluded_bvh(bvh, mesh, center_d, r_hat_d, 2.0 * diag.length(),
+                                 static_cast<uint32_t>(t)))
                     continue;
             }
             ++lit;
@@ -206,14 +207,14 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                     if (ib == ia) continue;
                     const geom::Vec3d nb = mesh.normals[ib];
                     if (!(geom::dot(nb, d1) < 0.0)) continue;
-                    const auto hit = ray_mesh(mesh, ca, d1, tmin, uint32_t(ia));
+                    const auto hit = ray_bvh(bvh, mesh, ca, d1, tmin, uint32_t(ia));
                     if (!hit || hit->tri != ib) continue;
                     const auto& tb = mesh.triangles[ib];
                     const geom::Vec3d cb =
                         (mesh.vertices[tb[0]] + mesh.vertices[tb[1]] + mesh.vertices[tb[2]]) *
                         (1.0 / 3.0);
                     if (!(geom::dot(reflect_d(d1, nb), r) > 1.0 - 1e-9)) continue;
-                    const auto exit = ray_mesh(mesh, cb, r, tmin, uint32_t(ib));
+                    const auto exit = ray_bvh(bvh, mesh, cb, r, tmin, uint32_t(ib));
                     if (exit && exit->t < scene) continue;
                     const D path = std::exp(D(0.0, -kd * (geom::dot(s, ca) +
                                                            geom::dot(d1, cb - ca))));
@@ -249,7 +250,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                         if (ib == ia) continue;
                         const geom::Vec3d nb = mesh.normals[ib];
                         if (!(geom::dot(nb, d1) < 0.0)) continue;
-                        const auto hit1 = ray_mesh(mesh, ca, d1, tmin, uint32_t(ia));
+                        const auto hit1 = ray_bvh(bvh, mesh, ca, d1, tmin, uint32_t(ia));
                         if (!hit1 || hit1->tri != ib) continue;
                         const auto& tb = mesh.triangles[ib];
                         const geom::Vec3d cb =
@@ -260,7 +261,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                             if (ic == ib) continue;
                             const geom::Vec3d nc = mesh.normals[ic];
                             if (!(geom::dot(nc, d2) < 0.0)) continue;
-                            const auto hit2 = ray_mesh(mesh, cb, d2, tmin, uint32_t(ib));
+                            const auto hit2 = ray_bvh(bvh, mesh, cb, d2, tmin, uint32_t(ib));
                             if (!hit2 || hit2->tri != ic) continue;
                             const auto& tc = mesh.triangles[ic];
                             const geom::Vec3d cc =
@@ -268,7 +269,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                  mesh.vertices[tc[2]]) *
                                 (1.0 / 3.0);
                             if (!(geom::dot(reflect_d(d2, nc), r) > 1.0 - 1e-9)) continue;
-                            const auto exit = ray_mesh(mesh, cc, r, tmin, uint32_t(ic));
+                            const auto exit = ray_bvh(bvh, mesh, cc, r, tmin, uint32_t(ic));
                             if (exit && exit->t < scene) continue;
                             const D epath =
                                 std::exp(D(0.0, -kd * (geom::dot(s, ca) +

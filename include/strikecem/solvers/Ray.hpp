@@ -15,8 +15,31 @@ struct RayHit {
 
 struct GoOptions {
     bool shadowing = false;
-    int max_bounces = 1; // 1 = single-bounce PO; 2 adds pairs; 3 adds triples
+    int max_bounces = 1;
 };
+
+struct BvhNode {
+    geom::Vec3d bmin;
+    geom::Vec3d bmax;
+    int left = -1;
+    int right = -1;
+    uint32_t start = 0;
+    uint32_t count = 0;
+};
+
+struct Bvh {
+    std::vector<BvhNode> nodes;
+    std::vector<uint32_t> order;
+};
+
+Bvh build_bvh(const NormalizedMesh& mesh);
+
+std::optional<RayHit> ray_bvh(const Bvh& bvh, const NormalizedMesh& mesh,
+                               const geom::Vec3d& origin, const geom::Vec3d& dir, double t_min,
+                               uint32_t skip_tri);
+
+bool occluded_bvh(const Bvh& bvh, const NormalizedMesh& mesh, const geom::Vec3d& p,
+                  const geom::Vec3d& s, double max_t, uint32_t self_tri);
 
 std::optional<RayHit> ray_triangle(const geom::Vec3d& origin, const geom::Vec3d& dir,
                                    const geom::Vec3d& a, const geom::Vec3d& b,

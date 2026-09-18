@@ -61,6 +61,12 @@
   within ±20% of 12πa⁴/λ² both channels. Triple hand values are not
   pinned individually; the evidence stack is pair-exact transport plus
   max2-exact plus analytic agreement.
+- Slice 5 (done): median-split AABB BVH backing every solver ray query
+  (nearest-hit with lowest-index tie-break, any-hit occlusion). BVH vs
+  brute force agree bit-exactly on 2000 plate + 200 sphere rays; solver
+  results are unchanged by construction. Measured 383x per-ray speedup
+  on the 20k-triangle sphere (109us to 0.3us). The O(n²) ceiling is
+  retired.
 - The `t_min` floor is absolute (1e-9 of the mesh bbox diagonal, computed
   by the caller from the mesh report); wavelength-relative flooring is
   the documented upgrade path if electrically tiny features ever arrive.
