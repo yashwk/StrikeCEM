@@ -5,6 +5,8 @@
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/solvers/EdgeModel.hpp"
+#include "strikecem/solvers/GpuPO.hpp"
+#include "strikecem/solvers/Material.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
 namespace {
@@ -243,6 +245,216 @@ TEST(Benchmark, TwoBounceTrihedralAnalytic) {
         EXPECT_LT(ratio, 1.2);
         EXPECT_LT(std::abs(po.samples[i].scattering), 0.01 * std::abs(total.samples[i].scattering));
     }
+}
+
+strikecem::MaterialModel glass_model() {
+    strikecem::MaterialModel m;
+    m.tag = "glass";
+    m.type = strikecem::WallType::Dielectric;
+    m.table.push_back({1e9, {{4.0, 0.0}, {1.0, 0.0}}, 0.0});
+    return m;
+}
+
+TEST(MaterialSolver, PecWallBitIdentical) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    const strikecem::MaterialOptions pec{true, strikecem::WallType::Pec, {}};
+    for (const auto& [az, el] : {std::pair{0.0, -90.0}, std::pair{30.0, -60.0}}) {
+        const auto plan = single_sample(3e9, az, el, {"HH", "VV", "HV", "VH"});
+        const auto ref = strikecem::solve_po(mesh, plan, rc.value);
+        const auto got = strikecem::solve_po(mesh, plan, rc.value, {}, {}, pec);
+        ASSERT_EQ(got.samples.size(), ref.samples.size());
+        for (size_t i = 0; i < ref.samples.size(); ++i) {
+            EXPECT_EQ(got.samples[i].scattering, ref.samples[i].scattering);
+            EXPECT_EQ(got.samples[i].rcs_sqm, ref.samples[i].rcs_sqm);
+            EXPECT_EQ(got.samples[i].lit_facets, ref.samples[i].lit_facets);
+        }
+    }
+    const auto plan = single_sample(3e9, 0.0, -90.0, {"HH"});
+    EXPECT_TRUE(strikecem::solve_po(mesh, plan, rc.value, {}, {}, pec).warnings.empty());
+}
+
+TEST(MaterialSolver, DielectricNormalMatchesFresnelPower) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    const strikecem::MaterialOptions glass{true, strikecem::WallType::Dielectric, glass_model()};
+    const auto plan = single_sample(1e9, 0.0, -90.0, {"HH", "VV", "HV", "VH"});
+    const auto pec = strikecem::solve_po(mesh, plan, rc.value);
+    const auto got = strikecem::solve_po(mesh, plan, rc.value, {}, {}, glass);
+    ASSERT_EQ(got.samples.size(), 4u);
+    const double co = std::max(std::abs(pec.samples[0].scattering),
+                               std::abs(pec.samples[1].scattering));
+    EXPECT_NEAR(std::norm(got.samples[0].scattering) / std::norm(pec.samples[0].scattering),
+                1.0 / 9.0, 1e-9);
+    EXPECT_NEAR(std::norm(got.samples[1].scattering) / std::norm(pec.samples[1].scattering),
+                1.0 / 9.0, 1e-9);
+    EXPECT_LT(std::abs(got.samples[2].scattering), 1e-9 * co);
+    EXPECT_LT(std::abs(got.samples[3].scattering), 1e-9 * co);
+}
+
+TEST(MaterialSolver, DielectricObliqueSplitsTeTm) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    const strikecem::MaterialOptions glass{true, strikecem::WallType::Dielectric, glass_model()};
+    const auto plan = single_sample(1e9, 0.0, -60.0, {"HH", "VV", "HV", "VH"});
+    const auto pec = strikecem::solve_po(mesh, plan, rc.value);
+    const auto got = strikecem::solve_po(mesh, plan, rc.value, {}, {}, glass);
+    ASSERT_EQ(got.samples.size(), 4u);
+    const double c = std::sqrt(3.0) / 2.0;
+    const double ct = std::sqrt(15.0) / 4.0;
+    const double r_te = (0.5 * c - ct) / (0.5 * c + ct);
+    const double r_tm = (c - 0.5 * ct) / (c + 0.5 * ct);
+    const double hh_ratio =
+        std::abs(got.samples[0].scattering) / std::abs(pec.samples[0].scattering);
+    const double vv_ratio =
+        std::abs(got.samples[1].scattering) / std::abs(pec.samples[1].scattering);
+    EXPECT_NEAR(hh_ratio, std::abs(r_te), 1e-9);
+    EXPECT_NEAR(vv_ratio, std::abs(r_tm), 1e-9);
+    const strikecem::ComplexMedium air;
+    const strikecem::ComplexMedium wall{{4.0, 0.0}, {1.0, 0.0}};
+    const auto f = strikecem::fresnel(air, wall, c);
+    EXPECT_NEAR(hh_ratio, std::abs(f.r_te), 1e-12);
+    EXPECT_NEAR(vv_ratio, std::abs(f.r_tm), 1e-12);
+    const double co = std::max(std::abs(got.samples[0].scattering),
+                               std::abs(got.samples[1].scattering));
+    EXPECT_LT(std::abs(got.samples[2].scattering), 1e-6 * co);
+    EXPECT_LT(std::abs(got.samples[3].scattering), 1e-6 * co);
+}
+
+TEST(MaterialSolver, LossyWallMatchesFresnel) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    strikecem::MaterialModel lossy = glass_model();
+    lossy.table[0].medium.eps_r = {4.0, -1.0};
+    const strikecem::MaterialOptions lossy_wall{true, strikecem::WallType::Dielectric, lossy};
+    const auto plan = single_sample(1e9, 0.0, -90.0, {"HH"});
+    const auto pec = strikecem::solve_po(mesh, plan, rc.value);
+    const auto got = strikecem::solve_po(mesh, plan, rc.value, {}, {}, lossy_wall);
+    const strikecem::ComplexMedium air;
+    const auto f = strikecem::fresnel(air, lossy.table[0].medium, 1.0);
+    const double ratio =
+        std::norm(got.samples[0].scattering) / std::norm(pec.samples[0].scattering);
+    EXPECT_NEAR(ratio, std::norm(f.r_te), 1e-9);
+    EXPECT_GT(ratio, 0.0);
+    EXPECT_LT(ratio, 1.0);
+    strikecem::MaterialModel slight = glass_model();
+    slight.table[0].medium.eps_r = {4.0, -0.01};
+    const strikecem::MaterialOptions slight_wall{true, strikecem::WallType::Dielectric, slight};
+    const auto near = strikecem::solve_po(mesh, plan, rc.value, {}, {}, slight_wall);
+    const double near_ratio =
+        std::norm(near.samples[0].scattering) / std::norm(pec.samples[0].scattering);
+    EXPECT_NEAR(near_ratio, 1.0 / 9.0, 0.01 * (1.0 / 9.0));
+}
+
+TEST(MaterialSolver, CoatedThinRecoversPec) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    strikecem::MaterialModel paint;
+    paint.tag = "paint";
+    paint.type = strikecem::WallType::Coated;
+    paint.layers.push_back({1e-6, {{6.25, -0.09}, {1.0, 0.0}}});
+    const strikecem::MaterialOptions coated{true, strikecem::WallType::Coated, paint};
+    const auto plan = single_sample(1e9, 0.0, -90.0, {"HH", "VV"});
+    const auto pec = strikecem::solve_po(mesh, plan, rc.value);
+    const auto got = strikecem::solve_po(mesh, plan, rc.value, {}, {}, coated);
+    ASSERT_EQ(got.samples.size(), pec.samples.size());
+    for (size_t i = 0; i < pec.samples.size(); ++i)
+        EXPECT_LT(std::abs(got.samples[i].scattering - pec.samples[i].scattering),
+                  1e-3 * std::abs(pec.samples[i].scattering));
+}
+
+TEST(MaterialSolver, CoatedHalfWaveAbsentee) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    strikecem::MaterialModel paint;
+    paint.tag = "paint";
+    paint.type = strikecem::WallType::Coated;
+    paint.layers.push_back({0.25, {{4.0, 0.0}, {1.0, 0.0}}});
+    const strikecem::MaterialOptions coated{true, strikecem::WallType::Coated, paint};
+    const auto plan = single_sample(strikecem::kSpeedOfLight, 0.0, -90.0, {"HH", "VV"});
+    const auto pec = strikecem::solve_po(mesh, plan, rc.value);
+    const auto got = strikecem::solve_po(mesh, plan, rc.value, {}, {}, coated);
+    ASSERT_EQ(got.samples.size(), pec.samples.size());
+    for (size_t i = 0; i < pec.samples.size(); ++i)
+        EXPECT_NEAR(std::abs(got.samples[i].scattering) / std::abs(pec.samples[i].scattering),
+                    1.0, 1e-9);
+}
+
+TEST(MaterialSolver, MatchedWallGivesZero) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    strikecem::MaterialModel air_wall;
+    air_wall.tag = "air";
+    air_wall.type = strikecem::WallType::Dielectric;
+    air_wall.table.push_back({1e9, {{1.0, 0.0}, {1.0, 0.0}}, 0.0});
+    const strikecem::MaterialOptions matched{true, strikecem::WallType::Dielectric, air_wall};
+    const auto plan = single_sample(1e9, 0.0, -90.0, {"HH", "VV"});
+    const auto pec = strikecem::solve_po(mesh, plan, rc.value);
+    const auto got = strikecem::solve_po(mesh, plan, rc.value, {}, {}, matched);
+    ASSERT_EQ(got.samples.size(), pec.samples.size());
+    for (size_t i = 0; i < pec.samples.size(); ++i)
+        EXPECT_LT(std::abs(got.samples[i].scattering),
+                  1e-9 * std::abs(pec.samples[i].scattering));
+}
+
+TEST(MaterialSolver, Float32TracksFloat64) {
+    const auto rc = load_rc("valid_minimal.json");
+    const auto mesh = grid_plate(8);
+    const strikecem::MaterialOptions glass{true, strikecem::WallType::Dielectric, glass_model()};
+    const auto plan = single_sample(1e9, 30.0, -60.0, {"HH", "VV"});
+    const auto ref = strikecem::solve_po(mesh, plan, rc.value, {}, {}, glass);
+    auto single = rc.value;
+    single["solver"]["precision"] = "float32";
+    const auto got = strikecem::solve_po(mesh, plan, single, {}, {}, glass);
+    ASSERT_EQ(got.samples.size(), ref.samples.size());
+    for (size_t i = 0; i < ref.samples.size(); ++i) {
+        const double expected = std::abs(ref.samples[i].scattering);
+        EXPECT_LT(std::abs(got.samples[i].scattering - ref.samples[i].scattering),
+                  1e-5 * std::max(expected, 1e-300));
+    }
+}
+
+TEST(MaterialSolver, NonPecGuards) {
+    const auto rc = load_rc("valid_minimal.json");
+    auto mesh = grid_plate(4);
+    mesh.report.bbox_min = {0.0, 0.0, 0.0};
+    mesh.report.bbox_max = {1.0, 1.0, 0.0};
+    const strikecem::MaterialOptions glass{true, strikecem::WallType::Dielectric, glass_model()};
+    const auto plan = single_sample(1e9, 0.0, -90.0, {"HH"});
+    auto cuda_cfg = rc.value;
+    cuda_cfg["execution"]["accelerator"] = "cuda";
+    EXPECT_THROW(strikecem::solve_po(mesh, plan, cuda_cfg, {}, {}, glass),
+                 strikecem::cuda::CudaError);
+    const strikecem::GoOptions chains{false, 2};
+    EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, chains, glass),
+                 std::invalid_argument);
+    const strikecem::GoOptions shade{true, 1};
+    EXPECT_NO_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, shade, glass));
+    const auto edges = strikecem::extract_edges(mesh);
+    const strikecem::FringeOptions fringe{true, &edges};
+    const auto fringed = strikecem::solve_po(mesh, plan, rc.value, fringe, {}, glass);
+    bool warned = false;
+    for (const auto& w : fringed.warnings)
+        if (w.find("PEC-derived") != std::string::npos) warned = true;
+    EXPECT_TRUE(warned);
+    strikecem::MaterialModel narrow = glass_model();
+    narrow.table.push_back({2e9, {{4.0, 0.0}, {1.0, 0.0}}, 0.0});
+    const strikecem::MaterialOptions ranged{true, strikecem::WallType::Dielectric, narrow};
+    EXPECT_THROW(strikecem::solve_po(mesh, single_sample(3e9, 0.0, -90.0, {"HH"}), rc.value,
+                                     {}, {}, ranged),
+                 std::invalid_argument);
+    strikecem::MaterialModel mismatched = glass_model();
+    mismatched.type = strikecem::WallType::Pec;
+    const strikecem::MaterialOptions bad{true, strikecem::WallType::Dielectric, mismatched};
+    EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, {}, bad), std::invalid_argument);
+    strikecem::MaterialModel tabled_coat;
+    tabled_coat.tag = "tabled";
+    tabled_coat.type = strikecem::WallType::Coated;
+    tabled_coat.table.push_back({1e9, {{4.0, 0.0}, {1.0, 0.0}}, 0.0});
+    tabled_coat.layers.push_back({0.01, {{4.0, 0.0}, {1.0, 0.0}}});
+    const strikecem::MaterialOptions future{true, strikecem::WallType::Coated, tabled_coat};
+    EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, {}, future),
+                 std::invalid_argument);
 }
 
 }

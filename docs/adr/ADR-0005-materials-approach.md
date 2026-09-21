@@ -45,6 +45,30 @@
   two-layer case (which caught a top-down combination bug: the
   single-layer tests cannot see recursion order), lossless unit
   magnitude, and empty-stack PEC return. Layer order is outer-to-PEC.
+- Slice 4a (done): Fresnel-weighted facet currents behind
+  `MaterialOptions` (default off, uniform wall, no schema change).
+  Per lit facet the incident field is split into TE/TM on the local
+  plane of incidence (`e_te = n x k_hat`, `e_tm = k x e_te`, reflected
+  basis `k_ref x e_te` matching the Hecht `R_TM` sign in `fresnel()`);
+  equivalent currents `J = n x (H_inc + H_ref)` and
+  `M = -n x (E_inc + E_ref)` radiate as
+  `F = (jk/4pi) A [eta r x (r x J) + r x M]`. Coated walls reuse
+  `coated_pec_reflection()` per facet with the vacuum wavelength.
+  PEC walls (or disabled) keep the legacy path bit-identically.
+  Solver pins: PEC bit-identity; normal dielectric power exactly
+  |R|^2 = 1/9 with null cross-pol; oblique HH/VV track |R_TE|/|R_TM|
+  hand values with null cross-pol; lossy matches `fresnel()` with
+  passive |R| < 1 (loss can raise |R| vs lossless by moving the match,
+  so no reduction is asserted); coated thin/half-wave recover PEC;
+  background-matched wall returns ~0 (pins the M sign); float32 tracks
+  float64. Gates: non-PEC + CUDA throws, non-PEC + multi-bounce throws,
+  coated frequency tables throw, model/wall type mismatch throws,
+  out-of-range table frequency throws at solve time, fringe + non-PEC
+  warns (edge returns stay PEC-based). Shadowing composes (geometric
+  only). Remaining for unlock (4b/4c): per-face tag mapping in the mesh
+  loader (FR-12 forbids tag-driven behavior until it exists), then the
+  materials schema block with the tag-coverage policy, provenance, and
+  estimator treatment.
 - TE means E perpendicular to the local plane of incidence (s-pol);
   TM means E in the plane (p-pol), with Hecht's reflected-basis sign
   ($R_{\mathrm{TM}} = -R_{\mathrm{TE}}$ at normal incidence; PEC limit

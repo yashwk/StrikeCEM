@@ -41,11 +41,52 @@ template <typename Real> CVec3<Real> to_complex(const Vec3<Real>& v) {
     return {v.x, v.y, v.z};
 }
 
+using D3 = std::array<std::complex<double>, 3>;
+
+D3 cross_d(const geom::Vec3d& a, const D3& b) {
+    return {a.y * b[2] - a.z * b[1], a.z * b[0] - a.x * b[2], a.x * b[1] - a.y * b[0]};
+}
+
+D3 material_facet_field(const geom::Vec3d& n, const geom::Vec3d& k_hat,
+                        const geom::Vec3d& r_hat, const geom::Vec3d& e_te,
+                        const geom::Vec3d& tm_inc, const geom::Vec3d& k_ref,
+                        const geom::Vec3d& tm_ref, const D3& e_inc, double kd, double eta,
+                        double area, const geom::Vec3d& centroid,
+                        const std::complex<double>& r_te, const std::complex<double>& r_tm) {
+    const std::complex<double> a_te = e_inc[0] * e_te.x + e_inc[1] * e_te.y + e_inc[2] * e_te.z;
+    const std::complex<double> a_tm =
+        e_inc[0] * tm_inc.x + e_inc[1] * tm_inc.y + e_inc[2] * tm_inc.z;
+    const D3 e_ref = {r_te * a_te * e_te.x + r_tm * a_tm * tm_ref.x,
+                      r_te * a_te * e_te.y + r_tm * a_tm * tm_ref.y,
+                      r_te * a_te * e_te.z + r_tm * a_tm * tm_ref.z};
+    D3 h_inc = cross_d(k_hat, e_inc);
+    D3 h_ref = cross_d(k_ref, e_ref);
+    for (int i = 0; i < 3; ++i) {
+        h_inc[i] /= eta;
+        h_ref[i] /= eta;
+    }
+    const D3 h_tot = {h_inc[0] + h_ref[0], h_inc[1] + h_ref[1], h_inc[2] + h_ref[2]};
+    const D3 e_tot = {e_inc[0] + e_ref[0], e_inc[1] + e_ref[1], e_inc[2] + e_ref[2]};
+    const D3 j = cross_d(n, h_tot);
+    D3 m = cross_d(n, e_tot);
+    for (int i = 0; i < 3; ++i) m[i] = -m[i];
+    const D3 tj = cross_d(r_hat, cross_d(r_hat, j));
+    const D3 tm = cross_d(r_hat, m);
+    const std::complex<double> eout =
+        std::exp(std::complex<double>(0.0, kd * geom::dot(r_hat, centroid)));
+    const std::complex<double> amp =
+        std::complex<double>(0.0, 1.0) * kd * area * eout / (4.0 * std::numbers::pi);
+    D3 out;
+    for (int i = 0; i < 3; ++i) out[i] = amp * (eta * tj[i] + tm[i]);
+    return out;
+}
+
 template <typename Real>
 PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                      const nlohmann::json& resolved, unsigned num_threads,
                      const std::vector<std::pair<uint32_t, uint32_t>>& units,
-                     const FringeOptions& fringe, const GoOptions& go) {
+                     const FringeOptions& fringe, const GoOptions& go,
+                     const MaterialOptions& material) {
     using C = std::complex<Real>;
     PoResult out;
     const auto& medium = resolved["frequency"]["medium"];
@@ -57,6 +98,10 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         out.warnings.push_back(
             "GO shadowing enabled: hard shadow boundaries without edge diffraction; "
             "multi-bounce not included");
+    const bool use_material = material.enabled && material.wall != WallType::Pec;
+    if (use_material && fringe.enabled)
+        out.warnings.push_back("fringe correction is PEC-derived and unvalidated for "
+                               "material walls; edge returns stay PEC-based");
     const double eta = kEta0 * std::sqrt(mu_r / eps_r);
     const double e0 = resolved["physics"]["incident_amplitude"].get<double>();
 
@@ -68,6 +113,13 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     std::atomic<size_t> fringe_skipped{0};
     std::atomic<size_t> chains_fired{0};
     const Bvh bvh = build_bvh(mesh);
+    const ComplexMedium incident{{eps_r, 0.0}, {mu_r, 0.0}};
+    std::vector<ComplexMedium> wall_per_freq;
+    if (use_material && material.wall == WallType::Dielectric) {
+        wall_per_freq.reserve(nfreq);
+        for (double f : plan.frequencies_hz)
+            wall_per_freq.push_back(evaluate_material(material.model, f));
+    }
 
     auto run_unit = [&](size_t pos) {
         const size_t fi = units[pos].first;
@@ -127,16 +179,73 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
             const C eout_phase = std::exp(C(0, k * dot(r_hat, centroid)));
             const C coeff = coeff_jk * area * eout_phase;
             const CVec3<Real> n_c = to_complex<Real>(n);
-            for (int tx = 0; tx < 2; ++tx) {
-                const CVec3<Real> e_c = to_complex<Real>(tx_e[tx]);
-                CVec3<Real> h_inc = cross_c(k_hat_c, e_c);
-                for (auto& c : h_inc) c *= ein_phase / eta_r;
-                CVec3<Real> j_po = cross_c(n_c, h_inc);
-                for (auto& c : j_po) c *= Real(2);
-                // ADR-0001 transverse projector: r_hat x (r_hat x J).
-                const CVec3<Real> t1 = cross_c(r_hat_c, j_po);
-                const CVec3<Real> t2 = cross_c(r_hat_c, t1);
-                for (int i = 0; i < 3; ++i) f_tx[tx][i] += coeff * t2[i];
+            if (!use_material) {
+                for (int tx = 0; tx < 2; ++tx) {
+                    const CVec3<Real> e_c = to_complex<Real>(tx_e[tx]);
+                    CVec3<Real> h_inc = cross_c(k_hat_c, e_c);
+                    for (auto& c : h_inc) c *= ein_phase / eta_r;
+                    CVec3<Real> j_po = cross_c(n_c, h_inc);
+                    for (auto& c : j_po) c *= Real(2);
+                    // ADR-0001 transverse projector: r_hat x (r_hat x J).
+                    const CVec3<Real> t1 = cross_c(r_hat_c, j_po);
+                    const CVec3<Real> t2 = cross_c(r_hat_c, t1);
+                    for (int i = 0; i < 3; ++i) f_tx[tx][i] += coeff * t2[i];
+                }
+            } else {
+                const double cos_i = std::min(
+                    1.0, std::max(0.0, static_cast<double>(dot(n, r_hat))));
+                std::complex<double> r_te{-1.0, 0.0};
+                std::complex<double> r_tm{1.0, 0.0};
+                if (material.wall == WallType::Dielectric) {
+                    const FresnelResult fr = fresnel(incident, wall_per_freq[fi], cos_i);
+                    r_te = fr.r_te;
+                    r_tm = fr.r_tm;
+                } else {
+                    const double lambda_vac = kSpeedOfLight / freq;
+                    const CoatedResult cr =
+                        coated_pec_reflection(incident, material.model.layers, cos_i, lambda_vac);
+                    r_te = cr.r_te;
+                    r_tm = cr.r_tm;
+                }
+                const geom::Vec3d nd{static_cast<double>(n.x), static_cast<double>(n.y),
+                                     static_cast<double>(n.z)};
+                const geom::Vec3d kd{static_cast<double>(k_hat.x), static_cast<double>(k_hat.y),
+                                     static_cast<double>(k_hat.z)};
+                const geom::Vec3d rd{static_cast<double>(r_hat.x), static_cast<double>(r_hat.y),
+                                     static_cast<double>(r_hat.z)};
+                const geom::Vec3d cd{static_cast<double>(centroid.x),
+                                     static_cast<double>(centroid.y),
+                                     static_cast<double>(centroid.z)};
+                geom::Vec3d e_te = geom::cross(nd, kd);
+                if (e_te.lengthSquared() <= 1e-24) {
+                    const geom::Vec3d ax =
+                        (std::abs(nd.x) <= std::abs(nd.y) && std::abs(nd.x) <= std::abs(nd.z))
+                            ? geom::Vec3d{1.0, 0.0, 0.0}
+                        : (std::abs(nd.y) <= std::abs(nd.z) ? geom::Vec3d{0.0, 1.0, 0.0}
+                                                            : geom::Vec3d{0.0, 0.0, 1.0});
+                    e_te = geom::cross(nd, ax);
+                }
+                e_te.normalize();
+                const geom::Vec3d tm_inc = geom::cross(kd, e_te);
+                const double kn = geom::dot(kd, nd);
+                const geom::Vec3d k_ref{kd.x - 2.0 * kn * nd.x, kd.y - 2.0 * kn * nd.y,
+                                        kd.z - 2.0 * kn * nd.z};
+                const geom::Vec3d tm_ref = geom::cross(k_ref, e_te);
+                const double kd_d = static_cast<double>(k);
+                const double eta_d = static_cast<double>(eta_r);
+                const double area_d = mesh.areas[t];
+                const std::complex<double> ein_d =
+                    std::exp(std::complex<double>(0.0, -kd_d * geom::dot(kd, cd)));
+                for (int tx = 0; tx < 2; ++tx) {
+                    const D3 e_inc = {static_cast<double>(tx_e[tx].x) * ein_d,
+                                      static_cast<double>(tx_e[tx].y) * ein_d,
+                                      static_cast<double>(tx_e[tx].z) * ein_d};
+                    const D3 df = material_facet_field(nd, kd, rd, e_te, tm_inc, k_ref, tm_ref,
+                                                       e_inc, kd_d, eta_d, area_d, cd, r_te, r_tm);
+                    for (int i = 0; i < 3; ++i)
+                        f_tx[tx][i] += C(static_cast<Real>(df[i].real()),
+                                         static_cast<Real>(df[i].imag()));
+                }
             }
         }
         if (fringe.enabled) {
@@ -374,7 +483,8 @@ std::vector<std::pair<uint32_t, uint32_t>> all_units(const SamplePlan& plan) {
 PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
                        const nlohmann::json& resolved,
                        const std::vector<std::pair<uint32_t, uint32_t>>& units,
-                       const FringeOptions& fringe, const GoOptions& go) {
+                       const FringeOptions& fringe, const GoOptions& go,
+                       const MaterialOptions& material) {
     const std::string precision = resolved["solver"].value("precision", "float64");
     const unsigned threads = resolved["execution"].value("cpu_threads", 1u);
     if (fringe.enabled) {
@@ -388,30 +498,42 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
         throw cuda::CudaError("GO corrections are CPU-only in v1");
     if (go.max_bounces < 1 || go.max_bounces > 3)
         throw std::invalid_argument("max_bounces must be 1, 2, or 3");
+    if (material.enabled && material.wall != WallType::Pec) {
+        validate_material(material.model);
+        if (material.model.type != material.wall)
+            throw std::invalid_argument("material model type must match the active wall");
+        if (material.wall == WallType::Coated && !material.model.table.empty())
+            throw std::invalid_argument("coated frequency tables are future work");
+        if (resolved["execution"].value("accelerator", "cpu") == "cuda")
+            throw cuda::CudaError("material walls are CPU-only in v1");
+        if (go.max_bounces > 1)
+            throw std::invalid_argument("multi-bounce GO requires PEC walls in v1");
+    }
     if (resolved["execution"].value("accelerator", "cpu") == "cuda") {
         const int device = resolved["execution"].value("cuda_device_id", 0);
         return cuda::solve_po_cuda_units(mesh, plan, resolved, device, units);
     }
     if (precision == "float32")
-        return solve_typed<float>(mesh, plan, resolved, threads, units, fringe, go);
-    return solve_typed<double>(mesh, plan, resolved, threads, units, fringe, go);
+        return solve_typed<float>(mesh, plan, resolved, threads, units, fringe, go, material);
+    return solve_typed<double>(mesh, plan, resolved, threads, units, fringe, go, material);
 }
 } // namespace
 
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,
                   const nlohmann::json& resolved, const FringeOptions& fringe,
-                  const GoOptions& go) {
+                  const GoOptions& go, const MaterialOptions& material) {
     std::vector<std::pair<uint32_t, uint32_t>> units;
     for (uint32_t fi = 0; fi < plan.frequencies_hz.size(); ++fi)
         for (uint32_t di = 0; di < plan.directions.size(); ++di) units.emplace_back(fi, di);
-    return solve_backend(mesh, plan, resolved, units, fringe, go);
+    return solve_backend(mesh, plan, resolved, units, fringe, go, material);
 }
 
 PoResult solve_po_units(const NormalizedMesh& mesh, const SamplePlan& plan,
                         const nlohmann::json& resolved,
                         const std::vector<std::pair<uint32_t, uint32_t>>& units,
-                        const FringeOptions& fringe, const GoOptions& go) {
-    return solve_backend(mesh, plan, resolved, units, fringe, go);
+                        const FringeOptions& fringe, const GoOptions& go,
+                        const MaterialOptions& material) {
+    return solve_backend(mesh, plan, resolved, units, fringe, go, material);
 }
 
 } // namespace strikecem

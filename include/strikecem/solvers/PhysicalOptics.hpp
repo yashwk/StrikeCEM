@@ -13,6 +13,7 @@
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/solvers/EdgeFringe.hpp"
+#include "strikecem/solvers/Material.hpp"
 #include "strikecem/solvers/Ray.hpp"
 
 namespace strikecem {
@@ -39,10 +40,17 @@ struct FringeOptions {
     const EdgeModel* edges = nullptr;
 };
 
+struct MaterialOptions {
+    bool enabled = false;
+    WallType wall = WallType::Pec;
+    MaterialModel model;
+};
+
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,
                   const nlohmann::json& resolved,
                   const FringeOptions& fringe = FringeOptions{},
-                  const GoOptions& go = GoOptions{});
+                  const GoOptions& go = GoOptions{},
+                  const MaterialOptions& material = MaterialOptions{});
 
 // Solve only the given (frequency_id, direction_id) units with correct
 // global sample_ids (resume path for missing chunks).
@@ -50,6 +58,7 @@ PoResult solve_po_units(const NormalizedMesh& mesh, const SamplePlan& plan,
                         const nlohmann::json& resolved,
                         const std::vector<std::pair<uint32_t, uint32_t>>& units,
                         const FringeOptions& fringe = FringeOptions{},
-                        const GoOptions& go = GoOptions{});
+                        const GoOptions& go = GoOptions{},
+                        const MaterialOptions& material = MaterialOptions{});
 
 } // namespace strikecem
