@@ -3,13 +3,16 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <H5Cpp.h>
 #include <nlohmann/json.hpp>
 
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/CsvWriter.hpp"
+#include "strikecem/io/Checksum.hpp"
 #include "strikecem/io/Hdf5Reader.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
 #include "strikecem/io/MeshLoader.hpp"
@@ -20,7 +23,7 @@ namespace {
 namespace fs = std::filesystem;
 
 struct Workdir {
-    fs::path dir = fs::temp_directory_path() / "scem_hdf5_test";
+    fs::path dir = fs::temp_directory_path() / ("scem_hdf5_test_" + std::to_string(::getpid()));
     Workdir() {
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -170,6 +173,180 @@ TEST(Hdf5, RejectsInvalidRow) {
     }
     auto db = strikecem::read_hdf5_database((work.dir / "out.h5").string());
     EXPECT_THROW(strikecem::validate_hdf5_complete(db), strikecem::ReaderError);
+}
+
+TEST(Hdf5, RejectsRankTwoSampleDatasetBeforeRead) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.h5").string(), "hdf5"),
+                              work.dir / "scem.json");
+    strikecem::write_hdf5_output(p.rc, p.plan, p.mesh, p.result);
+    {
+        H5::H5File file((work.dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group samples = file.openGroup("/samples");
+        H5Ldelete(samples.getId(), "scattering_real", H5P_DEFAULT);
+        const hsize_t dims[2] = {2, 2};
+        const H5::DataSpace space(2, dims);
+        H5::DataSet ds = samples.createDataSet("scattering_real", H5::PredType::NATIVE_DOUBLE,
+                                               space);
+        const double values[4] = {};
+        ds.write(values, H5::PredType::NATIVE_DOUBLE);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    EXPECT_THROW(strikecem::read_hdf5_database((work.dir / "out.h5").string()),
+                 strikecem::ReaderError);
+}
+
+TEST(Hdf5, RejectsRankTwoStringDatasetBeforeRead) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.h5").string(), "hdf5"),
+                              work.dir / "scem.json");
+    strikecem::write_hdf5_output(p.rc, p.plan, p.mesh, p.result);
+    {
+        H5::H5File file((work.dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group samples = file.openGroup("/samples");
+        H5Ldelete(samples.getId(), "status", H5P_DEFAULT);
+        const hsize_t dims[2] = {2, 2};
+        const H5::DataSpace space(2, dims);
+        const H5::StrType type(H5::PredType::C_S1, H5T_VARIABLE);
+        H5::DataSet ds = samples.createDataSet("status", type, space);
+        const char* values[4] = {"ok", "ok", "ok", "ok"};
+        ds.write(values, type);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    EXPECT_THROW(strikecem::read_hdf5_database((work.dir / "out.h5").string()),
+                 strikecem::ReaderError);
+}
+
+TEST(Hdf5, RejectsMismatchedSampleColumnLength) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.h5").string(), "hdf5"),
+                              work.dir / "scem.json");
+    strikecem::write_hdf5_output(p.rc, p.plan, p.mesh, p.result);
+    {
+        H5::H5File file((work.dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group samples = file.openGroup("/samples");
+        H5Ldelete(samples.getId(), "direction_index", H5P_DEFAULT);
+        const hsize_t dims[1] = {3};
+        const H5::DataSpace space(1, dims);
+        H5::DataSet ds = samples.createDataSet("direction_index", H5::PredType::NATIVE_UINT32,
+                                               space);
+        const uint32_t values[3] = {};
+        ds.write(values, H5::PredType::NATIVE_UINT32);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    EXPECT_THROW(strikecem::read_hdf5_database((work.dir / "out.h5").string()),
+                 strikecem::ReaderError);
+}
+
+TEST(Hdf5, RejectsMixedSamplePrecision) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.h5").string(), "hdf5"),
+                              work.dir / "scem.json");
+    strikecem::write_hdf5_output(p.rc, p.plan, p.mesh, p.result);
+    {
+        H5::H5File file((work.dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group samples = file.openGroup("/samples");
+        H5Ldelete(samples.getId(), "rcs_sqm", H5P_DEFAULT);
+        const hsize_t dims[1] = {p.result.samples.size()};
+        const H5::DataSpace space(1, dims);
+        H5::DataSet ds = samples.createDataSet("rcs_sqm", H5::PredType::NATIVE_FLOAT, space);
+        std::vector<float> values(p.result.samples.size());
+        for (size_t i = 0; i < values.size(); ++i)
+            values[i] = static_cast<float>(p.result.samples[i].rcs_sqm);
+        ds.write(values.data(), H5::PredType::NATIVE_FLOAT);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    EXPECT_THROW(strikecem::read_hdf5_database((work.dir / "out.h5").string()),
+                 strikecem::ReaderError);
+}
+
+TEST(Hdf5, RejectsSampleIndexOutsideAxis) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.h5").string(), "hdf5"),
+                              work.dir / "scem.json");
+    strikecem::write_hdf5_output(p.rc, p.plan, p.mesh, p.result);
+    {
+        H5::H5File file((work.dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group samples = file.openGroup("/samples");
+        H5::DataSet ds = samples.openDataSet("direction_index");
+        const uint32_t bad = 10;
+        const hsize_t count[1] = {1}, start[1] = {0};
+        const H5::DataSpace mem(1, count);
+        H5::DataSpace space = ds.getSpace();
+        space.selectHyperslab(H5S_SELECT_SET, count, start);
+        ds.write(&bad, H5::PredType::NATIVE_UINT32, mem, space);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    EXPECT_THROW(strikecem::read_hdf5_database((work.dir / "out.h5").string()),
+                 strikecem::ReaderError);
+}
+
+TEST(Hdf5, RejectsNonfiniteScatteringValue) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.h5").string(), "hdf5"),
+                              work.dir / "scem.json");
+    strikecem::write_hdf5_output(p.rc, p.plan, p.mesh, p.result);
+    {
+        H5::H5File file((work.dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group samples = file.openGroup("/samples");
+        H5::DataSet ds = samples.openDataSet("scattering_real");
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const hsize_t count[1] = {1}, start[1] = {0};
+        const H5::DataSpace mem(1, count);
+        H5::DataSpace space = ds.getSpace();
+        space.selectHyperslab(H5S_SELECT_SET, count, start);
+        ds.write(&nan, H5::PredType::NATIVE_DOUBLE, mem, space);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    EXPECT_THROW(strikecem::read_hdf5_database((work.dir / "out.h5").string()),
+                 strikecem::ReaderError);
+}
+
+TEST(Hdf5, PreservesNegativeInfinityForZeroRcs) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.h5").string(), "hdf5"),
+                              work.dir / "scem.json");
+    strikecem::write_hdf5_output(p.rc, p.plan, p.mesh, p.result);
+    auto db = strikecem::read_hdf5_database((work.dir / "out.h5").string());
+    db.rows[0].rcs_sqm = 0.0;
+    db.rows[0].rcs_dbsm = -std::numeric_limits<double>::infinity();
+    std::vector<strikecem::ChecksumRow> checksum_rows;
+    for (const auto& row : db.rows) {
+        strikecem::ChecksumRow checksum;
+        checksum.sample_id = row.sample_id;
+        checksum.direction_index = row.direction_index;
+        checksum.frequency_index = row.frequency_index;
+        checksum.polarization_index = row.polarization_index;
+        checksum.scattering_real = row.scattering_real;
+        checksum.scattering_imag = row.scattering_imag;
+        checksum.rcs_sqm = row.rcs_sqm;
+        checksum.rcs_dbsm = row.rcs_dbsm;
+        checksum.valid = row.valid ? 1 : 0;
+        checksum.status = row.status;
+        checksum_rows.push_back(std::move(checksum));
+    }
+    const uint64_t checksum = strikecem::chunk_checksum(checksum_rows.data(), checksum_rows.size());
+    {
+        H5::H5File file((work.dir / "out.h5").string(), H5F_ACC_RDWR);
+        H5::Group samples = file.openGroup("/samples");
+        H5::DataSet sqm = samples.openDataSet("rcs_sqm");
+        H5::DataSet dbsm = samples.openDataSet("rcs_dBsm");
+        std::vector<double> sqm_values(db.rows.size()), dbsm_values(db.rows.size());
+        sqm.read(sqm_values.data(), H5::PredType::NATIVE_DOUBLE);
+        dbsm.read(dbsm_values.data(), H5::PredType::NATIVE_DOUBLE);
+        sqm_values[0] = 0.0;
+        dbsm_values[0] = -std::numeric_limits<double>::infinity();
+        sqm.write(sqm_values.data(), H5::PredType::NATIVE_DOUBLE);
+        dbsm.write(dbsm_values.data(), H5::PredType::NATIVE_DOUBLE);
+        H5::Group progress = file.openGroup("/progress");
+        H5::DataSet sums = progress.openDataSet("chunk_checksum");
+        sums.write(&checksum, H5::PredType::NATIVE_UINT64);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    const auto zero_rcs = strikecem::read_hdf5_database((work.dir / "out.h5").string());
+    EXPECT_EQ(zero_rcs.rows[0].rcs_sqm, 0.0);
+    EXPECT_EQ(zero_rcs.rows[0].rcs_dbsm, -std::numeric_limits<double>::infinity());
+    EXPECT_NO_THROW(strikecem::validate_hdf5_complete(zero_rcs));
 }
 
 TEST(Hdf5, RejectsUnknownMajorVersion) {

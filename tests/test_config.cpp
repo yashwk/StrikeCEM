@@ -1,7 +1,11 @@
 // Config loader tests: schema accept/reject, default resolution,
 // canonical hashing, sweep expansion, and direction-plan rules.
 #include <fstream>
+#include <filesystem>
+#include <functional>
 #include <gtest/gtest.h>
+
+#include <vector>
 
 #include "strikecem/core/Config.hpp"
 
@@ -105,6 +109,54 @@ TEST(Config, RejectsUnsupportedMeshExtension) {
 
 TEST(Config, RejectsMalformedJson) {
     EXPECT_THROW(load_fixture("invalid_malformed.json"), strikecem::ConfigError);
+}
+
+TEST(Config, RejectsUnsupportedNoOpOptions) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "scem_config_noop_options";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() {
+            std::error_code ec;
+            fs::remove_all(path, ec);
+        }
+    } cleanup{dir};
+
+    nlohmann::json base;
+    {
+        std::ifstream in(fixture("valid_minimal.json"));
+        in >> base;
+    }
+    base["model"]["path"] = fs::absolute(
+        fs::path(SCEM_FIXTURE_DIR) / "../../examples/plate.stl").string();
+    base["output"]["path"] = (dir / "out.h5").string();
+    const std::vector<std::function<void(nlohmann::json&)>> unsupported = {
+        [](auto& j) { j["model"]["cache_hash"] = "not-validated-in-v1"; },
+        [](auto& j) { j["angles"]["deduplicate_periodic_endpoints"] = false; },
+        [](auto& j) { j["output"]["compression"] = true; },
+        [](auto& j) { j["output"]["include_metadata"] = false; },
+        [](auto& j) { j["physics"]["polarization_basis"] = "circular"; },
+        [](auto& j) { j["solver"]["rcs_units"] = "sqm"; },
+        [](auto& j) { j["mesh"]["validate_orientation"] = false; },
+        [](auto& j) { j["execution"]["batch_samples"] = 2048; },
+        [](auto& j) { j["execution"]["deterministic"] = false; },
+        [](auto& j) { j["run"]["log_level"] = "debug"; },
+    };
+    size_t i = 0;
+    for (const auto& set_option : unsupported) {
+        auto config = base;
+        set_option(config);
+        const fs::path path = dir / (std::to_string(i++) + ".json");
+        {
+            std::ofstream out(path);
+            out << config.dump(2);
+        }
+        EXPECT_THROW(strikecem::load_config(path.string(), SCEM_SCHEMA_PATH),
+                     strikecem::ConfigError);
+    }
 }
 
 } // namespace

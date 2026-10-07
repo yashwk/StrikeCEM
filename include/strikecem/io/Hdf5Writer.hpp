@@ -1,5 +1,5 @@
 #pragma once
-// Flat-row HDF5 writer (OUTPUT_FORMAT.md): tables, sample datasets in the
+// Flat-row HDF5 writer: tables, sample datasets in the
 // solver precision, provenance attributes, checksummed chunk commits, and
 // crash-safe resume. Throws OutputError on failure.
 #include <cstddef>

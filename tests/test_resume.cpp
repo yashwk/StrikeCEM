@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <H5Cpp.h>
 #include <nlohmann/json.hpp>
@@ -17,7 +18,7 @@ namespace {
 namespace fs = std::filesystem;
 
 struct Workdir {
-    fs::path dir = fs::temp_directory_path() / "scem_resume_test";
+    fs::path dir = fs::temp_directory_path() / ("scem_resume_test_" + std::to_string(::getpid()));
     Workdir() {
         std::error_code ec;
         fs::remove_all(dir, ec);
@@ -158,6 +159,30 @@ TEST(Resume, CompleteRerunIsIdempotent) {
     const fs::path config = write_config(work.dir, base_config(out), "scem.json");
     ASSERT_EQ(cli_run(config), 0);
     EXPECT_EQ(cli_run(config), 0);
+}
+
+TEST(Resume, RejectsTruncatedProgressDataset) {
+    Workdir work;
+    const fs::path out = work.dir / "out.h5";
+    const fs::path config = write_config(work.dir, base_config(out), "scem.json");
+    ASSERT_EQ(cli_run(config), 0);
+    {
+        H5::H5File file(out.string(), H5F_ACC_RDWR);
+        H5::Group progress = file.openGroup("/progress");
+        H5Ldelete(progress.getId(), "chunk_checksum", H5P_DEFAULT);
+        const hsize_t dims[1] = {1};
+        const H5::DataSpace space(1, dims);
+        H5::DataSet ds = progress.createDataSet("chunk_checksum", H5::PredType::NATIVE_UINT64,
+                                                space);
+        const uint64_t checksum = 0;
+        ds.write(&checksum, H5::PredType::NATIVE_UINT64);
+        file.flush(H5F_SCOPE_GLOBAL);
+    }
+    EXPECT_EQ(cli_run(config), 6); // complete-output check validates actual extents
+
+    auto resume = base_config(out);
+    resume["run"]["resume_from_checkpoint"] = out.string();
+    EXPECT_EQ(cli_run(write_config(work.dir, resume, "resume.json")), 6);
 }
 
 TEST(Resume, CsvResumeIsRejected) {

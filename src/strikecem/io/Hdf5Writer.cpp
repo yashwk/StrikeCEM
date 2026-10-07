@@ -1,4 +1,4 @@
-// Flat-row HDF5 writer with checksummed chunk commits (OUTPUT_FORMAT.md).
+// Flat-row HDF5 writer with checksummed chunk commits.
 //
 // Fresh runs create tables, provenance, and zeroed progress, then commit
 // every chunk: data, flush, read-back checksum, flush, progress flag, flush.
@@ -10,6 +10,7 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <limits>
 #include <map>
 
 #include <H5Cpp.h>
@@ -49,6 +50,12 @@ void write_u64_attr(H5::H5Object& obj, const char* name, uint64_t value) {
 
 uint64_t read_u64_attr(H5::H5Object& obj, const char* name) {
     const H5::Attribute attr = obj.openAttribute(name);
+    if (attr.getSpace().getSimpleExtentType() != H5S_SCALAR)
+        throw OutputError(std::string("resume rejected: invalid ") + name + " attribute shape");
+    const H5::DataType type = attr.getDataType();
+    if (type.getClass() != H5T_INTEGER || type.getSize() != sizeof(uint64_t) ||
+        H5Tget_sign(type.getId()) != H5T_SGN_NONE)
+        throw OutputError(std::string("resume rejected: invalid ") + name + " attribute type");
     uint64_t value = 0;
     attr.read(H5::PredType::NATIVE_UINT64, &value);
     return value;
@@ -120,12 +127,89 @@ void open_datasets(OpenDb& db) {
     db.status_ds = samples.openDataSet("status");
     db.prog_ds = progress.openDataSet("completed_chunks");
     db.cksum_ds = progress.openDataSet("chunk_checksum");
-    db.chunk_rows = static_cast<size_t>(read_u64_attr(progress, "chunk_rows"));
+    const uint64_t chunk_rows = read_u64_attr(progress, "chunk_rows");
+    if (chunk_rows > std::numeric_limits<size_t>::max())
+        throw OutputError("resume rejected: chunk_rows is too large");
+    db.chunk_rows = static_cast<size_t>(chunk_rows);
+}
+
+size_t expected_chunk_count(size_t rows, size_t chunk_rows) {
+    if (chunk_rows == 0) throw OutputError("resume rejected: chunk_rows must be positive");
+    return rows / chunk_rows + (rows % chunk_rows != 0);
+}
+
+size_t checked_plan_rows(const SamplePlan& plan) {
+    size_t rows = plan.frequencies_hz.size();
+    if (plan.directions.size() != 0 && rows > std::numeric_limits<size_t>::max() /
+                                                plan.directions.size())
+        throw OutputError("sample plan row count overflows");
+    rows *= plan.directions.size();
+    if (plan.polarizations.size() != 0 && rows > std::numeric_limits<size_t>::max() /
+                                                  plan.polarizations.size())
+        throw OutputError("sample plan row count overflows");
+    rows *= plan.polarizations.size();
+    if (rows > std::numeric_limits<uint64_t>::max())
+        throw OutputError("sample plan row count exceeds sample_id range");
+    return rows;
+}
+
+void check_dataset(H5::DataSet& ds, const char* name, size_t expected_length,
+                   H5T_class_t expected_class, size_t expected_width,
+                   H5T_sign_t expected_sign = H5T_SGN_ERROR) {
+    const H5::DataSpace space = ds.getSpace();
+    if (space.getSimpleExtentNdims() != 1)
+        throw OutputError(std::string("resume rejected: dataset '") + name + "' is not rank 1");
+    hsize_t extent = 0;
+    space.getSimpleExtentDims(&extent);
+    if (extent != expected_length)
+        throw OutputError(std::string("resume rejected: dataset '") + name +
+                          "' has the wrong length");
+    const H5::DataType type = ds.getDataType();
+    if (type.getClass() != expected_class || type.getSize() != expected_width ||
+        (expected_class == H5T_INTEGER && H5Tget_sign(type.getId()) != expected_sign))
+        throw OutputError(std::string("resume rejected: dataset '") + name +
+                          "' has the wrong type");
+}
+
+void check_string_dataset(H5::DataSet& ds, const char* name, size_t expected_length) {
+    const H5::DataSpace space = ds.getSpace();
+    if (space.getSimpleExtentNdims() != 1)
+        throw OutputError(std::string("resume rejected: dataset '") + name + "' is not rank 1");
+    hsize_t extent = 0;
+    space.getSimpleExtentDims(&extent);
+    if (extent != expected_length || ds.getDataType().getClass() != H5T_STRING)
+        throw OutputError(std::string("resume rejected: dataset '") + name +
+                          "' has the wrong shape or type");
+}
+
+std::vector<double> read_double_dataset(H5::DataSet& ds, size_t count) {
+    std::vector<double> values(count);
+    if (count) ds.read(values.data(), H5::PredType::NATIVE_DOUBLE);
+    return values;
+}
+
+std::vector<std::string> read_strings_dataset(H5::DataSet& ds, size_t count) {
+    const H5::StrType type(H5::PredType::C_S1, H5T_VARIABLE);
+    const H5::DataSpace space = ds.getSpace();
+    std::vector<char*> raw(count, nullptr);
+    struct Reclaim {
+        hid_t type;
+        hid_t space;
+        std::vector<char*>& values;
+        ~Reclaim() { H5Dvlen_reclaim(type, space, H5P_DEFAULT, values.data()); }
+    } reclaim{type.getId(), space.getId(), raw};
+    if (count) ds.read(raw.data(), type);
+    std::vector<std::string> values;
+    values.reserve(count);
+    for (const char* value : raw) values.emplace_back(value ? value : "");
+    return values;
 }
 
 std::vector<uint8_t> read_flags(OpenDb& db) {
     std::vector<uint8_t> flags(db.n_chunks);
     if (!flags.empty()) db.prog_ds.read(flags.data(), H5::PredType::NATIVE_UINT8);
+    for (uint8_t flag : flags)
+        if (flag > 1) throw OutputError("resume rejected: invalid progress completion flag");
     return flags;
 }
 
@@ -302,6 +386,9 @@ void commit_units(OpenDb& db, const SamplePlan& plan, const PoResult& result,
 
 std::string read_version_major(const H5::H5File& file) {
     const H5::Attribute attr = file.openAttribute("output_format_version");
+    if (attr.getSpace().getSimpleExtentType() != H5S_SCALAR ||
+        attr.getDataType().getClass() != H5T_STRING)
+        throw OutputError("resume rejected: invalid output-format version attribute");
     const H5::StrType type(H5::PredType::C_S1, H5T_VARIABLE);
     std::string version;
     attr.read(type, version);
@@ -311,6 +398,9 @@ std::string read_version_major(const H5::H5File& file) {
 
 std::string read_attr_str(const H5::H5File& file, const char* name) {
     const H5::Attribute attr = file.openAttribute(name);
+    if (attr.getSpace().getSimpleExtentType() != H5S_SCALAR ||
+        attr.getDataType().getClass() != H5T_STRING)
+        throw OutputError(std::string("resume rejected: invalid ") + name + " attribute");
     const H5::StrType type(H5::PredType::C_S1, H5T_VARIABLE);
     std::string value;
     attr.read(type, value);
@@ -350,10 +440,14 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
     H5::Exception::dontPrint();
     const fs::path out_path(rc.value["output"]["path"].get<std::string>());
     const bool float32 = rc.value["solver"]["precision"].get<std::string>() == "float32";
-    const size_t chunk_rows = static_cast<size_t>(
-        rc.value["run"]["checkpoint_every_n_samples"].get<int>());
+    const int configured_chunk_rows =
+        rc.value["run"]["checkpoint_every_n_samples"].get<int>();
+    if (configured_chunk_rows <= 0) throw OutputError("checkpoint chunk size must be positive");
+    const size_t chunk_rows = static_cast<size_t>(configured_chunk_rows);
     const size_t n_rows = result.samples.size();
-    const size_t n_chunks = n_rows == 0 ? 0 : (n_rows + chunk_rows - 1) / chunk_rows;
+    if (n_rows != checked_plan_rows(plan))
+        throw OutputError("solver result row count does not match sample plan");
+    const size_t n_chunks = n_rows / chunk_rows + (n_rows % chunk_rows != 0);
 
     try {
         H5::H5File file(out_path.string(), H5F_ACC_TRUNC);
@@ -467,39 +561,65 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
 
 namespace {
 
-void open_resume_db(OpenDb& db, const std::string& path, const SamplePlan& plan) {
+void open_resume_db(OpenDb& db, const std::string& path, const ResolvedConfig& rc,
+                    const SamplePlan& plan) {
     db.file = H5::H5File(path, H5F_ACC_RDWR);
-    db.float32 = false; // reset below from stored datatype
     open_datasets(db);
-    db.n_rows = plan.sample_count();
+    db.n_rows = checked_plan_rows(plan);
     db.n_pols = plan.polarizations.size();
-    // Row count must match the plan; the config hash already pins content.
-    H5::DataSpace space = db.id_ds.getSpace();
-    hsize_t n = 0;
-    space.getSimpleExtentDims(&n);
-    if (n != db.n_rows)
-        throw OutputError("resume rejected: database row count does not match plan");
-    // Direction/frequency/polarization table sizes pin the axes.
-    auto extent = [&](H5::Group& group, const char* name) {
-        H5::DataSet ds = group.openDataSet(name);
-        H5::DataSpace sp = ds.getSpace();
-        hsize_t m = 0;
-        sp.getSimpleExtentDims(&m);
-        return static_cast<size_t>(m);
-    };
+    const int configured_chunk_rows = rc.value["run"]["checkpoint_every_n_samples"].get<int>();
+    if (configured_chunk_rows <= 0)
+        throw OutputError("resume rejected: configured checkpoint chunk size must be positive");
+    const size_t expected_chunk_rows = static_cast<size_t>(configured_chunk_rows);
+    const bool expected_float32 = rc.value["solver"]["precision"].get<std::string>() == "float32";
+    if (db.chunk_rows != expected_chunk_rows)
+        throw OutputError("resume rejected: chunk_rows does not match configuration");
+    if (db.n_pols != plan.polarizations.size())
+        throw OutputError("resume rejected: invalid polarization count");
+
+    const H5T_sign_t unsig = H5T_SGN_NONE;
+    check_dataset(db.id_ds, "sample_id", db.n_rows, H5T_INTEGER, sizeof(uint64_t), unsig);
+    check_dataset(db.di_ds, "direction_index", db.n_rows, H5T_INTEGER, sizeof(uint32_t), unsig);
+    check_dataset(db.fi_ds, "frequency_index", db.n_rows, H5T_INTEGER, sizeof(uint32_t), unsig);
+    check_dataset(db.pi_ds, "polarization_index", db.n_rows, H5T_INTEGER, sizeof(uint16_t), unsig);
+    check_dataset(db.sr_ds, "scattering_real", db.n_rows, H5T_FLOAT,
+                  expected_float32 ? sizeof(float) : sizeof(double));
+    check_dataset(db.si_ds, "scattering_imag", db.n_rows, H5T_FLOAT,
+                  expected_float32 ? sizeof(float) : sizeof(double));
+    check_dataset(db.sqm_ds, "rcs_sqm", db.n_rows, H5T_FLOAT,
+                  expected_float32 ? sizeof(float) : sizeof(double));
+    check_dataset(db.db_ds, "rcs_dBsm", db.n_rows, H5T_FLOAT,
+                  expected_float32 ? sizeof(float) : sizeof(double));
+    check_dataset(db.valid_ds, "valid", db.n_rows, H5T_INTEGER, sizeof(uint8_t), unsig);
+    check_string_dataset(db.status_ds, "status", db.n_rows);
+
     H5::Group directions = db.file.openGroup("/directions");
     H5::Group frequencies = db.file.openGroup("/frequencies");
-    if (extent(directions, "azimuth_deg") != plan.directions.size() ||
-        extent(frequencies, "hz") != plan.frequencies_hz.size())
-        throw OutputError("resume rejected: database layout does not match plan");
-    // Float width decides the checksum read-back path.
-    db.float32 = db.sr_ds.getFloatType().getSize() == 4;
-    H5::DataSpace prog_space = db.prog_ds.getSpace();
-    hsize_t nc = 0;
-    prog_space.getSimpleExtentDims(&nc);
-    db.n_chunks = static_cast<size_t>(nc);
-    if (read_checksums(db).size() != db.n_chunks || (db.n_chunks == 0 && db.n_rows > 0))
-        throw OutputError("resume rejected: progress bookkeeping is corrupt");
+    H5::DataSet az_ds = directions.openDataSet("azimuth_deg");
+    H5::DataSet el_ds = directions.openDataSet("elevation_deg");
+    H5::DataSet hz_ds = frequencies.openDataSet("hz");
+    H5::DataSet pol_ds = db.file.openDataSet("/polarization");
+    check_dataset(az_ds, "azimuth_deg", plan.directions.size(), H5T_FLOAT, sizeof(double));
+    check_dataset(el_ds, "elevation_deg", plan.directions.size(), H5T_FLOAT, sizeof(double));
+    check_dataset(hz_ds, "hz", plan.frequencies_hz.size(), H5T_FLOAT, sizeof(double));
+    check_string_dataset(pol_ds, "polarization", plan.polarizations.size());
+    std::vector<double> az = read_double_dataset(az_ds, plan.directions.size());
+    std::vector<double> el = read_double_dataset(el_ds, plan.directions.size());
+    std::vector<double> hz = read_double_dataset(hz_ds, plan.frequencies_hz.size());
+    std::vector<std::string> pol = read_strings_dataset(pol_ds, plan.polarizations.size());
+    for (size_t i = 0; i < plan.directions.size(); ++i) {
+        if (az[i] != plan.directions[i].azimuth_deg || el[i] != plan.directions[i].elevation_deg)
+            throw OutputError("resume rejected: direction axis data does not match plan");
+    }
+    if (hz != plan.frequencies_hz || pol != plan.polarizations)
+        throw OutputError("resume rejected: frequency or polarization data does not match plan");
+
+    db.float32 = expected_float32;
+    db.n_chunks = expected_chunk_count(db.n_rows, db.chunk_rows);
+    check_dataset(db.prog_ds, "completed_chunks", db.n_chunks, H5T_INTEGER, sizeof(uint8_t),
+                  unsig);
+    check_dataset(db.cksum_ds, "chunk_checksum", db.n_chunks, H5T_INTEGER, sizeof(uint64_t),
+                  unsig);
 }
 
 } // namespace
@@ -510,7 +630,7 @@ size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
     H5::Exception::dontPrint();
     try {
         OpenDb db;
-        open_resume_db(db, path, plan);
+        open_resume_db(db, path, rc, plan);
         check_resume_identity(db.file, rc, plan, mesh);
         auto flags = read_flags(db);
         const auto sums = read_checksums(db);
@@ -523,7 +643,7 @@ size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
             if (!missing && checksum_chunk(db, c) != sums[c]) missing = true;
             if (!missing) continue;
             const size_t begin = c * db.chunk_rows;
-            const size_t end = std::min(begin + db.chunk_rows, db.n_rows);
+            const size_t end = begin + std::min(db.chunk_rows, db.n_rows - begin);
             for (size_t r = begin; r < end; ++r) unit_missing[r / npol] = true;
         }
         std::vector<std::pair<uint32_t, uint32_t>> units;
@@ -550,7 +670,7 @@ bool check_existing_hdf5(const ResolvedConfig& rc, const SamplePlan& plan,
     H5::Exception::dontPrint();
     try {
         OpenDb db;
-        open_resume_db(db, path, plan);
+        open_resume_db(db, path, rc, plan);
         try {
             check_resume_identity(db.file, rc, plan, mesh);
         } catch (const OutputError& e) {

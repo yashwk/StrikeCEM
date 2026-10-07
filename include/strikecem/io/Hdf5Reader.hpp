@@ -1,5 +1,5 @@
 #pragma once
-// Reference HDF5 reader (StrikeEngine contract, SPEC section 10): loads the
+// Reference HDF5 reader (StrikeEngine contract): loads the
 // flat sample table and rejects anything that is not a complete, compatible
 // database. Throws ReaderError.
 #include <cstdint>

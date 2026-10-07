@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <nlohmann/json.hpp>
 
@@ -17,7 +18,7 @@ namespace {
 namespace fs = std::filesystem;
 
 struct Workdir {
-    fs::path dir = fs::temp_directory_path() / "scem_output_test";
+    fs::path dir = fs::temp_directory_path() / ("scem_output_test_" + std::to_string(::getpid()));
     Workdir() {
         std::error_code ec;
         fs::remove_all(dir, ec);

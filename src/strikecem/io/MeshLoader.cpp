@@ -212,7 +212,8 @@ void append_report(std::string& out, const MeshReport& r) {
 constexpr size_t kReportBytes = 8 + 8 + 6 * 8 + 8 + 5 * 8 + 3 * 8 + 8 + 8;
 
 uint64_t take_u64(const char*& p, const char* end, const char* what) {
-    if (p + sizeof(uint64_t) > end) throw MeshLoadError(std::string("corrupt mesh cache: ") + what);
+    if (p > end || static_cast<size_t>(end - p) < sizeof(uint64_t))
+        throw MeshLoadError(std::string("corrupt mesh cache: ") + what);
     uint64_t v;
     std::memcpy(&v, p, sizeof(v));
     p += sizeof(v);
@@ -220,17 +221,25 @@ uint64_t take_u64(const char*& p, const char* end, const char* what) {
 }
 
 double take_f64(const char*& p, const char* end, const char* what) {
-    if (p + sizeof(double) > end) throw MeshLoadError(std::string("corrupt mesh cache: ") + what);
+    if (p > end || static_cast<size_t>(end - p) < sizeof(double))
+        throw MeshLoadError(std::string("corrupt mesh cache: ") + what);
     double v;
     std::memcpy(&v, p, sizeof(v));
     p += sizeof(v);
     return v;
 }
 
+size_t take_size(const char*& p, const char* end, const char* what) {
+    const uint64_t value = take_u64(p, end, what);
+    if (value > std::numeric_limits<size_t>::max())
+        throw MeshLoadError(std::string("corrupt mesh cache: ") + what);
+    return static_cast<size_t>(value);
+}
+
 MeshReport take_report(const char*& p, const char* end) {
     MeshReport r;
-    r.vertex_count = static_cast<size_t>(take_u64(p, end, "report"));
-    r.triangle_count = static_cast<size_t>(take_u64(p, end, "report"));
+    r.vertex_count = take_size(p, end, "report");
+    r.triangle_count = take_size(p, end, "report");
     r.bbox_min.x = take_f64(p, end, "report");
     r.bbox_min.y = take_f64(p, end, "report");
     r.bbox_min.z = take_f64(p, end, "report");
@@ -238,14 +247,14 @@ MeshReport take_report(const char*& p, const char* end) {
     r.bbox_max.y = take_f64(p, end, "report");
     r.bbox_max.z = take_f64(p, end, "report");
     r.total_area_m2 = take_f64(p, end, "report");
-    r.degenerate_count = static_cast<size_t>(take_u64(p, end, "report"));
-    r.inconsistent_winding_count = static_cast<size_t>(take_u64(p, end, "report"));
-    r.open_edge_count = static_cast<size_t>(take_u64(p, end, "report"));
-    r.nonmanifold_edge_count = static_cast<size_t>(take_u64(p, end, "report"));
+    r.degenerate_count = take_size(p, end, "report");
+    r.inconsistent_winding_count = take_size(p, end, "report");
+    r.open_edge_count = take_size(p, end, "report");
+    r.nonmanifold_edge_count = take_size(p, end, "report");
     r.aspect_min = take_f64(p, end, "report");
     r.aspect_max = take_f64(p, end, "report");
     r.aspect_mean = take_f64(p, end, "report");
-    r.aspect_over_limit_count = static_cast<size_t>(take_u64(p, end, "report"));
+    r.aspect_over_limit_count = take_size(p, end, "report");
     r.max_edge_length_m = take_f64(p, end, "report");
     return r;
 }
@@ -272,58 +281,94 @@ bool try_load_cache(const std::string& key, const std::string& key_echo,
             return false;
         p += sizeof(kMagic);
         const uint64_t echo_len = take_u64(p, end, "echo length");
-        if (p + echo_len > end || std::string(p, echo_len) != key_echo) return false;
-        p += echo_len;
+        if (echo_len > static_cast<uint64_t>(end - p) ||
+            std::string(p, static_cast<size_t>(echo_len)) != key_echo)
+            return false;
+        p += static_cast<size_t>(echo_len);
         const uint64_t nverts = take_u64(p, end, "vertex count");
         const uint64_t ntris = take_u64(p, end, "triangle count");
         const uint64_t hash_len = take_u64(p, end, "hash length");
-        if (p + hash_len > end) return false;
-        const std::string stored_hash(p, hash_len);
-        p += hash_len;
+        if (hash_len != 64 || hash_len > static_cast<uint64_t>(end - p)) return false;
+        const std::string stored_hash(p, static_cast<size_t>(hash_len));
+        p += static_cast<size_t>(hash_len);
         const uint64_t repaired_flag = take_u64(p, end, "repair flag");
+        if (repaired_flag > 1) return false;
         const MeshReport stored_before = take_report(p, end);
         const uint64_t ngroups = take_u64(p, end, "group count");
         if (ngroups > 100'000) return false;
         std::vector<std::string> groups;
         for (uint64_t i = 0; i < ngroups; ++i) {
             const uint64_t len = take_u64(p, end, "group name");
-            if (len > 4096 || p + len > end) return false;
-            groups.emplace_back(p, len);
-            p += len;
+            if (len > 4096 || len > static_cast<uint64_t>(end - p)) return false;
+            groups.emplace_back(p, static_cast<size_t>(len));
+            p += static_cast<size_t>(len);
         }
-        if (nverts > 100'000'000 || ntris > 100'000'000) return false;
-        const size_t need = nverts * sizeof(geom::Vec3d) + ntris * 3 * sizeof(uint32_t) +
-                            ntris * sizeof(geom::Vec3d) + ntris * sizeof(double);
+        if (nverts == 0 || ntris == 0 || nverts > 100'000'000 || ntris > 100'000'000 ||
+            nverts > std::numeric_limits<size_t>::max() ||
+            ntris > std::numeric_limits<size_t>::max())
+            return false;
+        const size_t vertex_count = static_cast<size_t>(nverts);
+        const size_t triangle_count = static_cast<size_t>(ntris);
+        if (vertex_count > std::vector<geom::Vec3d>().max_size() ||
+            triangle_count > std::vector<std::array<uint32_t, 3>>().max_size() ||
+            triangle_count > std::vector<double>().max_size())
+            return false;
+        if (vertex_count > std::numeric_limits<size_t>::max() / sizeof(geom::Vec3d) ||
+            triangle_count > std::numeric_limits<size_t>::max() / (3 * sizeof(uint32_t)) ||
+            triangle_count > std::numeric_limits<size_t>::max() / sizeof(geom::Vec3d) ||
+            triangle_count > std::numeric_limits<size_t>::max() / sizeof(double))
+            return false;
+        const size_t vertex_bytes = vertex_count * sizeof(geom::Vec3d);
+        const size_t index_bytes = triangle_count * 3 * sizeof(uint32_t);
+        const size_t normal_bytes = triangle_count * sizeof(geom::Vec3d);
+        const size_t area_bytes = triangle_count * sizeof(double);
+        if (vertex_bytes > std::numeric_limits<size_t>::max() - index_bytes ||
+            vertex_bytes + index_bytes > std::numeric_limits<size_t>::max() - normal_bytes ||
+            vertex_bytes + index_bytes + normal_bytes >
+                std::numeric_limits<size_t>::max() - area_bytes)
+            return false;
+        const size_t need = vertex_bytes + index_bytes + normal_bytes + area_bytes;
         if (static_cast<size_t>(end - p) != need) return false;
-        out.vertices.resize(nverts);
-        std::memcpy(out.vertices.data(), p, nverts * sizeof(geom::Vec3d));
-        p += nverts * sizeof(geom::Vec3d);
-        out.triangles.resize(ntris);
-        std::memcpy(out.triangles.data(), p, ntris * 3 * sizeof(uint32_t));
-        p += ntris * 3 * sizeof(uint32_t);
-        out.normals.resize(ntris);
-        std::memcpy(out.normals.data(), p, ntris * sizeof(geom::Vec3d));
-        p += ntris * sizeof(geom::Vec3d);
-        out.areas.resize(ntris);
-        std::memcpy(out.areas.data(), p, ntris * sizeof(double));
-        out.groups = std::move(groups);
-        // Rebuild the report from payload so resume never trusts a stale one.
+        NormalizedMesh cached;
+        cached.vertices.resize(vertex_count);
+        std::memcpy(cached.vertices.data(), p, vertex_bytes);
+        p += vertex_bytes;
+        cached.triangles.resize(triangle_count);
+        std::memcpy(cached.triangles.data(), p, index_bytes);
+        p += index_bytes;
+        p += normal_bytes + area_bytes; // derived fields are untrusted and rebuilt below
+
         std::vector<RawTriangle> raw;
-        raw.reserve(ntris);
-        for (const auto& t : out.triangles)
-            raw.push_back({out.vertices[t[0]], out.vertices[t[1]], out.vertices[t[2]]});
-        BuiltMesh rebuilt = build_mesh(raw, max_aspect_ratio);
-        out.report = rebuilt.report;
+        raw.reserve(triangle_count);
+        for (const auto& v : cached.vertices)
+            if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) return false;
+        for (const auto& t : cached.triangles) {
+            if (t[0] >= vertex_count || t[1] >= vertex_count || t[2] >= vertex_count)
+                return false;
+            const auto& a = cached.vertices[t[0]];
+            const auto& b = cached.vertices[t[1]];
+            const auto& c = cached.vertices[t[2]];
+            const double area = geom::triangleArea(a, b, c);
+            if (!std::isfinite(area) || !(area > 0.0)) return false;
+            raw.push_back({a, b, c});
+        }
         BuiltMesh check;
-        check.vertices = out.vertices;
-        check.triangles = out.triangles;
+        check.vertices = cached.vertices;
+        check.triangles = cached.triangles;
         if (hash_normalized(check) != stored_hash) return false;
-        out.normalized_mesh_hash = stored_hash;
-        out.repaired = (repaired_flag != 0);
-        out.report_before = stored_before;
-        out.cache_hit = true;
+        BuiltMesh rebuilt = build_mesh(raw, max_aspect_ratio);
+        cached.normals = std::move(rebuilt.normals);
+        cached.areas = std::move(rebuilt.areas);
+        cached.report = rebuilt.report;
+        cached.groups = std::move(groups);
+        cached.normalized_mesh_hash = stored_hash;
+        cached.geometry_hash = key;
+        cached.repaired = (repaired_flag != 0);
+        cached.report_before = stored_before;
+        cached.cache_hit = true;
+        out = std::move(cached);
         return true;
-    } catch (const MeshLoadError&) {
+    } catch (const std::exception&) {
         return false;
     }
 }

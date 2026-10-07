@@ -1,7 +1,7 @@
 #pragma once
 // STL/OBJ triangle mesh loading, normalization, inspection, repair, cache.
-// SPEC FR-2, IMPLEMENTATION.md section 6. Open meshes are legal (plates);
-// degenerate triangles and non-manifold edges are fatal.
+// Open meshes are legal (plates); degenerate triangles and non-manifold edges
+// are fatal unless explicit repair is requested.
 #include <array>
 #include <cstddef>
 #include <cstdint>

@@ -41,8 +41,7 @@
             "scale": {"type": "number", "exclusiveMinimum": 0, "default": 1.0}
           }
         },
-        "mesh_repair": {"type": "string", "enum": ["off", "report", "repair"], "default": "report"},
-        "cache_hash": {"type": "string", "minLength": 1}
+        "mesh_repair": {"type": "string", "enum": ["off", "report", "repair"], "default": "report"}
       }
     },
     "frequency": {
@@ -80,7 +79,7 @@
       "additionalProperties": false,
       "properties": {
         "monostatic": {"const": true, "default": true},
-        "polarization_basis": {"type": "string", "enum": ["linear", "circular"], "default": "linear"},
+        "polarization_basis": {"const": "linear", "default": "linear", "description": "The v1 incidence basis is fixed to linear; circular output channels are selected through polarization."},
         "incident_amplitude": {"type": "number", "exclusiveMinimum": 0, "default": 1.0}
       }
     },
@@ -104,7 +103,7 @@
             "items": [{"type": "number"}, {"type": "number"}]
           }
         },
-        "deduplicate_periodic_endpoints": {"type": "boolean", "default": true}
+        "deduplicate_periodic_endpoints": {"const": true, "default": true, "description": "Periodic endpoints and duplicate directions are always deduplicated in v1."}
       }
     },
     "polarization": {
@@ -121,7 +120,7 @@
       "properties": {
         "type": {"const": "PO", "default": "PO"},
         "precision": {"type": "string", "enum": ["float32", "float64"], "default": "float64"},
-        "rcs_units": {"type": "string", "enum": ["dBsm", "sqm"], "default": "dBsm"},
+        "rcs_units": {"const": "dBsm", "default": "dBsm", "description": "Compatibility field; v1 output always contains both square metres and dBsm."},
         "po_options": {
           "type": "object",
           "additionalProperties": false,
@@ -140,7 +139,7 @@
       "additionalProperties": false,
       "properties": {
         "mode": {"const": "input", "default": "input"},
-        "validate_orientation": {"type": "boolean", "default": true},
+        "validate_orientation": {"const": true, "default": true, "description": "Winding diagnostics are always computed and reported in v1."},
         "max_aspect_ratio": {"type": "number", "exclusiveMinimum": 1, "default": 20.0},
         "cache_dir": {"type": "string", "minLength": 1}
       }
@@ -150,9 +149,9 @@
       "additionalProperties": false,
       "properties": {
         "cpu_threads": {"type": "integer", "minimum": 1, "default": 1},
-        "batch_samples": {"type": "integer", "minimum": 1, "default": 4096},
+        "batch_samples": {"const": 4096, "default": 4096, "description": "Reserved; v1 uses an internal solver batch size."},
         "max_memory_mb": {"type": "number", "exclusiveMinimum": 0, "default": 16384},
-        "deterministic": {"type": "boolean", "default": true},
+        "deterministic": {"const": true, "default": true},
         "accelerator": {"type": "string", "enum": ["cpu", "cuda"], "default": "cpu"},
         "cuda_device_id": {"type": "integer", "minimum": 0, "default": 0},
         "cuda_batch_units": {"type": "integer", "minimum": 0, "default": 0}
@@ -166,8 +165,8 @@
         "path": {"type": "string", "minLength": 1},
         "format": {"type": "string", "enum": ["csv", "hdf5"], "default": "hdf5"},
         "precision": {"type": "integer", "minimum": 1, "maximum": 17, "default": 6},
-        "compression": {"type": "boolean", "default": false},
-        "include_metadata": {"type": "boolean", "default": true}
+        "compression": {"const": false, "default": false, "description": "Compression is not supported in v1."},
+        "include_metadata": {"const": true, "default": true, "description": "Provenance metadata is always written in v1."}
       }
     },
     "run": {
@@ -176,7 +175,7 @@
       "properties": {
         "checkpoint_every_n_samples": {"type": "integer", "minimum": 1, "default": 1000},
         "resume_from_checkpoint": {"type": "string", "minLength": 1},
-        "log_level": {"type": "string", "enum": ["error", "warn", "info", "debug", "trace"], "default": "info"}
+        "log_level": {"const": "info", "default": "info", "description": "Reserved; v1 currently has no configurable log filtering."}
       }
     }
   },

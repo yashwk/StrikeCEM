@@ -1,8 +1,10 @@
 // Mesh pipeline tests: STL/OBJ parsing, reports, transforms, repair
 // modes, hashes, and the geometry cache.
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <gtest/gtest.h>
 
 #include "strikecem/core/Config.hpp"
@@ -118,6 +120,75 @@ TEST(Mesh, CacheHitAndStableHashes) {
     EXPECT_EQ(first.geometry_hash, second.geometry_hash);
     EXPECT_EQ(first.normalized_mesh_hash, second.normalized_mesh_hash);
     EXPECT_EQ(first.report.triangle_count, second.report.triangle_count);
+}
+
+TEST(Mesh, CorruptCacheDerivedDataIsRebuiltAndBadIndicesMiss) {
+    const fs::path dir = fs::temp_directory_path() / "scem_mesh_cache_integrity";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() {
+            std::error_code ec;
+            fs::remove_all(path, ec);
+        }
+    } cleanup{dir};
+
+    nlohmann::json config;
+    {
+        std::ifstream in(fixture("valid_minimal.json"));
+        in >> config;
+    }
+    config["model"]["path"] = fs::absolute(example("plate.stl")).string();
+    config["output"]["path"] = (dir / "out.h5").string();
+    config["mesh"]["cache_dir"] = "cache";
+    const fs::path config_path = dir / "config.json";
+    {
+        std::ofstream out(config_path);
+        out << config.dump(2);
+    }
+    const auto rc = strikecem::load_config(config_path.string(), SCEM_SCHEMA_PATH);
+    const auto first = strikecem::load_normalized_mesh(rc.value, dir, rc.schema_version);
+    ASSERT_EQ(first.areas.size(), 2u);
+    const auto cache_entry = fs::directory_iterator(dir / "cache");
+    ASSERT_NE(cache_entry, fs::directory_iterator{});
+    const fs::path cache_path = cache_entry->path();
+    auto read_cache = [&] {
+        std::ifstream in(cache_path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    auto write_cache = [&](const std::string& bytes) {
+        std::ofstream out(cache_path, std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+
+    std::string bytes = read_cache();
+    ASSERT_GE(bytes.size(), sizeof(double));
+    const double wrong_area = 50.0;
+    std::memcpy(bytes.data() + bytes.size() - sizeof(double), &wrong_area, sizeof(wrong_area));
+    write_cache(bytes);
+    const auto rebuilt = strikecem::load_normalized_mesh(rc.value, dir, rc.schema_version);
+    EXPECT_TRUE(rebuilt.cache_hit);
+    EXPECT_EQ(rebuilt.geometry_hash, first.geometry_hash);
+    EXPECT_EQ(rebuilt.areas, first.areas);
+    EXPECT_DOUBLE_EQ(rebuilt.report.total_area_m2, first.report.total_area_m2);
+
+    bytes = read_cache();
+    const size_t payload_bytes = rebuilt.vertices.size() * sizeof(geom::Vec3d) +
+                                 rebuilt.triangles.size() * 3 * sizeof(uint32_t) +
+                                 rebuilt.triangles.size() * sizeof(geom::Vec3d) +
+                                 rebuilt.triangles.size() * sizeof(double);
+    ASSERT_GE(bytes.size(), payload_bytes);
+    const size_t index_offset = bytes.size() - payload_bytes +
+                                rebuilt.vertices.size() * sizeof(geom::Vec3d);
+    const uint32_t invalid_index = UINT32_MAX;
+    std::memcpy(bytes.data() + index_offset, &invalid_index, sizeof(invalid_index));
+    write_cache(bytes);
+    const auto fallback = strikecem::load_normalized_mesh(rc.value, dir, rc.schema_version);
+    EXPECT_FALSE(fallback.cache_hit);
+    EXPECT_EQ(fallback.normalized_mesh_hash, first.normalized_mesh_hash);
+    EXPECT_EQ(fallback.areas, first.areas);
 }
 
 } // namespace

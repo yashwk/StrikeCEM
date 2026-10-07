@@ -6,6 +6,7 @@
 #include "strikecem/solvers/GpuPO.hpp"
 
 #include <cmath>
+#include <limits>
 
 #include <cuda_runtime.h>
 
@@ -21,6 +22,24 @@ namespace {
             throw CudaError(std::string("CUDA failure: ") +                   \
                             cudaGetErrorString(err));                         \
     } while (0)
+
+template <typename T> class DeviceBuffer {
+public:
+    explicit DeviceBuffer(size_t count) {
+        if (count > std::numeric_limits<size_t>::max() / sizeof(T))
+            throw CudaError("CUDA buffer size overflow");
+        if (count != 0) CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&ptr_), count * sizeof(T)));
+    }
+    ~DeviceBuffer() {
+        if (ptr_) (void)cudaFree(ptr_);
+    }
+    DeviceBuffer(const DeviceBuffer&) = delete;
+    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+    T* get() const { return ptr_; }
+
+private:
+    T* ptr_ = nullptr;
+};
 
 template <typename Real> struct Cplx {
     Real re{0}, im{0};
@@ -230,27 +249,25 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
         h_norm[3 * t + 2] = static_cast<Real>(mesh.normals[t].z);
         h_area[t] = static_cast<Real>(mesh.areas[t]);
     }
-    Real *d_cent = nullptr, *d_norm = nullptr, *d_area = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_cent, h_cent.size() * sizeof(Real)));
-    CUDA_CHECK(cudaMalloc(&d_norm, h_norm.size() * sizeof(Real)));
-    CUDA_CHECK(cudaMalloc(&d_area, h_area.size() * sizeof(Real)));
-    CUDA_CHECK(cudaMemcpy(d_cent, h_cent.data(), h_cent.size() * sizeof(Real),
+    DeviceBuffer<Real> d_cent(h_cent.size());
+    DeviceBuffer<Real> d_norm(h_norm.size());
+    DeviceBuffer<Real> d_area(h_area.size());
+    CUDA_CHECK(cudaMemcpy(d_cent.get(), h_cent.data(), h_cent.size() * sizeof(Real),
                           cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_norm, h_norm.data(), h_norm.size() * sizeof(Real),
+    CUDA_CHECK(cudaMemcpy(d_norm.get(), h_norm.data(), h_norm.size() * sizeof(Real),
                           cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_area, h_area.data(), h_area.size() * sizeof(Real),
+    CUDA_CHECK(cudaMemcpy(d_area.get(), h_area.data(), h_area.size() * sizeof(Real),
                           cudaMemcpyHostToDevice));
 
     const size_t override_units =
         static_cast<size_t>(resolved["execution"].value("cuda_batch_units", 0u));
     const size_t batch = cuda_select_batch_units(resolved, units.size(), ntris, device_id,
-                                                 override_units);
-    UnitParams<Real>* d_units = nullptr;
-    Cplx<Real>* d_out = nullptr;
-    int* d_lit = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_units, batch * sizeof(UnitParams<Real>)));
-    CUDA_CHECK(cudaMalloc(&d_out, 6 * batch * sizeof(Cplx<Real>)));
-    CUDA_CHECK(cudaMalloc(&d_lit, batch * sizeof(int)));
+                                                  override_units);
+    if (batch > std::numeric_limits<size_t>::max() / 6)
+        throw CudaError("CUDA output batch size overflow");
+    DeviceBuffer<UnitParams<Real>> d_units(batch);
+    DeviceBuffer<Cplx<Real>> d_out(6 * batch);
+    DeviceBuffer<int> d_lit(batch);
     std::vector<UnitParams<Real>> h_units(batch);
     std::vector<Cplx<Real>> h_out(6 * batch);
     std::vector<int> h_lit(batch);
@@ -282,16 +299,17 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             p.eta = static_cast<Real>(eta);
             p.e0 = static_cast<Real>(e0);
         }
-        CUDA_CHECK(cudaMemcpy(d_units, h_units.data(), count * sizeof(UnitParams<Real>),
+        CUDA_CHECK(cudaMemcpy(d_units.get(), h_units.data(), count * sizeof(UnitParams<Real>),
                               cudaMemcpyHostToDevice));
         po_kernel<Real>
-            <<<static_cast<unsigned>(count), kBlock>>>(d_cent, d_norm, d_area, d_units, d_out,
-                                                       d_lit, static_cast<int>(ntris));
+            <<<static_cast<unsigned>(count), kBlock>>>(d_cent.get(), d_norm.get(), d_area.get(),
+                                                       d_units.get(), d_out.get(), d_lit.get(),
+                                                       static_cast<int>(ntris));
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, 6 * count * sizeof(Cplx<Real>),
+        CUDA_CHECK(cudaMemcpy(h_out.data(), d_out.get(), 6 * count * sizeof(Cplx<Real>),
                               cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_lit.data(), d_lit, count * sizeof(int),
+        CUDA_CHECK(cudaMemcpy(h_lit.data(), d_lit.get(), count * sizeof(int),
                               cudaMemcpyDeviceToHost));
         // Project on the host with the shared channel math.
         const size_t npol = plan.polarizations.size();
@@ -321,12 +339,6 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             }
         }
     }
-    CUDA_CHECK(cudaFree(d_cent));
-    CUDA_CHECK(cudaFree(d_norm));
-    CUDA_CHECK(cudaFree(d_area));
-    CUDA_CHECK(cudaFree(d_units));
-    CUDA_CHECK(cudaFree(d_out));
-    CUDA_CHECK(cudaFree(d_lit));
     return out;
 }
 

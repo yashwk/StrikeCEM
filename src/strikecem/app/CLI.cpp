@@ -1,8 +1,8 @@
-// v1 CLI: validate resolves, inspects the mesh, and reports; estimate adds
-// plan counts; run validates then refuses until the Phase 1 solver lands.
+// v1 CLI: validate, estimate, and run the configured PO pipeline.
 #include "strikecem/app/CLI.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -21,6 +21,13 @@ namespace strikecem::cli {
 namespace {
 
 namespace fs = std::filesystem;
+
+#ifndef SCEM_SCHEMA_INSTALL_RELATIVE_PATH
+#define SCEM_SCHEMA_INSTALL_RELATIVE_PATH "../share/strikecem/schemas/config.schema.json"
+#endif
+#ifndef SCEM_SOURCE_SCHEMA_PATH
+#define SCEM_SOURCE_SCHEMA_PATH ""
+#endif
 
 constexpr const char* kUsage =
     "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run> config.json\n"
@@ -41,6 +48,25 @@ void print_warnings(const SamplePlan& plan) {
 fs::path config_dir_of(const std::string& config_path) {
     const fs::path dir = fs::path(config_path).parent_path();
     return dir.empty() ? fs::current_path() : dir;
+}
+
+std::string default_schema_path(const char* argv0) {
+    std::error_code ec;
+    fs::path executable = fs::read_symlink("/proc/self/exe", ec);
+    if (ec) {
+        ec.clear();
+        const fs::path invoked(argv0 ? argv0 : "");
+        if (invoked.has_parent_path()) executable = fs::absolute(invoked, ec);
+    }
+    if (!executable.empty()) {
+        const fs::path installed = executable.parent_path() / SCEM_SCHEMA_INSTALL_RELATIVE_PATH;
+        if (fs::is_regular_file(installed, ec)) return installed.string();
+    }
+    if (SCEM_SOURCE_SCHEMA_PATH[0] != '\0' && fs::is_regular_file(SCEM_SOURCE_SCHEMA_PATH, ec))
+        return SCEM_SOURCE_SCHEMA_PATH;
+    const fs::path from_cwd = fs::current_path(ec) / "schemas/config.schema.json";
+    if (!ec && fs::is_regular_file(from_cwd, ec)) return from_cwd.string();
+    return "schemas/config.schema.json";
 }
 
 void print_mesh_report(const MeshReport& r) {
@@ -131,7 +157,7 @@ int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path,
 
 int run(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
-    std::string schema_path = "schemas/config.schema.json";
+    std::string schema_path = default_schema_path(argc > 0 ? argv[0] : nullptr);
     std::string bench_profile;
     std::string command, config_path;
     for (size_t i = 0; i < args.size(); ++i) {

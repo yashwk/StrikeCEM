@@ -107,7 +107,7 @@ target_compile_definitions(scem_core PUBLIC
         SCEM_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
         SCEM_COMPILER_VERSION="${CMAKE_CXX_COMPILER_VERSION}")
 
-# Executable (SPEC FR-11: invoked as `strikecem`).
+# Command-line executable.
 add_executable(strikecem src/strikecem/main.cpp src/strikecem/app/CLI.cpp)
 target_link_libraries(strikecem PRIVATE scem_core)
 
@@ -140,11 +140,43 @@ gtest_discover_tests(scem_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Installation rules
 include(GNUInstallDirs)
+if(IS_ABSOLUTE CMAKE_INSTALL_BINDIR)
+    set(SCEM_INSTALL_BIN_DIR "${CMAKE_INSTALL_BINDIR}")
+else()
+    set(SCEM_INSTALL_BIN_DIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}")
+endif()
+if(IS_ABSOLUTE CMAKE_INSTALL_DATADIR)
+    set(SCEM_INSTALL_DATA_DIR "${CMAKE_INSTALL_DATADIR}")
+else()
+    set(SCEM_INSTALL_DATA_DIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}")
+endif()
+file(RELATIVE_PATH SCEM_SCHEMA_INSTALL_RELATIVE_PATH "${SCEM_INSTALL_BIN_DIR}"
+     "${SCEM_INSTALL_DATA_DIR}/strikecem/schemas/config.schema.json")
+set(SCEM_SOURCE_SCHEMA_PATH "${CMAKE_CURRENT_SOURCE_DIR}/schemas/config.schema.json")
+target_compile_definitions(strikecem PRIVATE
+        SCEM_SCHEMA_INSTALL_RELATIVE_PATH="${SCEM_SCHEMA_INSTALL_RELATIVE_PATH}"
+        SCEM_SOURCE_SCHEMA_PATH="${SCEM_SOURCE_SCHEMA_PATH}")
+target_compile_definitions(strikecem_lib PRIVATE
+        SCEM_SCHEMA_INSTALL_RELATIVE_PATH="${SCEM_SCHEMA_INSTALL_RELATIVE_PATH}"
+        SCEM_SOURCE_SCHEMA_PATH="${SCEM_SOURCE_SCHEMA_PATH}")
+target_compile_definitions(scem_tests PRIVATE
+        SCEM_SCHEMA_INSTALL_RELATIVE_PATH="${SCEM_SCHEMA_INSTALL_RELATIVE_PATH}"
+        SCEM_SOURCE_SCHEMA_PATH="${SCEM_SOURCE_SCHEMA_PATH}")
+
 install(TARGETS strikecem strikecem_lib
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/strikecem)
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY examples/ DESTINATION ${CMAKE_INSTALL_DATADIR}/strikecem/examples)
 install(DIRECTORY schemas/ DESTINATION ${CMAKE_INSTALL_DATADIR}/strikecem/schemas)
+
+add_test(NAME install_smoke
+        COMMAND ${CMAKE_COMMAND}
+                "-DSCEM_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+                "-DSCEM_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/install-smoke"
+                "-DSCEM_BINDIR=${CMAKE_INSTALL_BINDIR}"
+                "-DSCEM_INCLUDEDIR=${CMAKE_INSTALL_INCLUDEDIR}"
+                "-DSCEM_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/install_smoke.cmake")
