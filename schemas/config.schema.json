@@ -250,7 +250,19 @@
       "properties": {
         "checkpoint_every_n_samples": {"type": "integer", "minimum": 1, "default": 1000},
         "resume_from_checkpoint": {"type": "string", "minLength": 1},
-        "log_level": {"const": "info", "default": "info", "description": "Reserved; v1 currently has no configurable log filtering."}
+        "log_level": {"const": "info", "default": "info", "description": "Reserved; v1 currently has no configurable log filtering."},
+        "shard": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shard_id", "num_shards"],
+          "properties": {
+            "shard_id": {"type": "integer", "minimum": 0},
+            "num_shards": {"type": "integer", "minimum": 1},
+            "run_id": {"type": "string"},
+            "worker_identity": {"type": "string"},
+            "parent_config_hash": {"type": "string"}
+          }
+        }
       }
     }
   },

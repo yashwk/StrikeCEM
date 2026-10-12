@@ -4,11 +4,15 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "strikecem/core/Config.hpp"
+#include "strikecem/distributed/Shard.hpp"
 #include "strikecem/io/CsvWriter.hpp"
 #include "strikecem/io/DesignerPackage.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
@@ -31,10 +35,14 @@ namespace fs = std::filesystem;
 #endif
 
 constexpr const char* kUsage =
-    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run> config.json\n"
+    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run|shard|merge> [options...] <args...>\n"
     "  validate  resolve config, inspect mesh, print hashes\n"
     "  estimate  validate plus plan counts and resource estimates\n"
     "  run       full pipeline (PO solver, CSV/HDF5 output)\n"
+    "  shard     partition sample plan across N shards and write shard configs + manifest\n"
+    "            options: --num-shards N (default 2), --out-dir DIR (default ./shards), --run-id ID\n"
+    "  merge     merge completed shard outputs into a unified database\n"
+    "            options: --output PATH <manifest.json | shard1 shard2 ...>\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -156,36 +164,104 @@ int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path,
     return 0;
 }
 
+int cmd_shard(const ResolvedConfig& rc, const SamplePlan& plan,
+              const NormalizedMesh& mesh, const std::string& config_path,
+              size_t num_shards, const std::string& out_dir,
+              const std::string& run_id) {
+    ShardManifest manifest =
+        create_shards(rc, plan, mesh, config_path, num_shards, out_dir, run_id);
+    std::cout << "shards: " << manifest.num_shards << "\n";
+    std::cout << "total_units: " << manifest.total_units << "\n";
+    std::cout << "total_samples: " << manifest.total_samples << "\n";
+    std::cout << "run_id: " << manifest.run_id << "\n";
+    std::cout << "manifest: " << (fs::path(out_dir) / "shard_manifest.json").string() << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
+int cmd_merge(const std::string& first_path, const std::vector<std::string>& additional,
+              std::string output_path, const std::string& schema_path) {
+    if (output_path.empty()) {
+        if (fs::exists(first_path) && fs::path(first_path).extension() == ".json") {
+            try {
+                std::ifstream in(first_path);
+                const auto j = nlohmann::json::parse(in);
+                if (j.contains("config_path") && fs::exists(j["config_path"].get<std::string>())) {
+                    std::ifstream cfg_in(j["config_path"].get<std::string>());
+                    const auto cfg_j = nlohmann::json::parse(cfg_in);
+                    if (cfg_j.contains("output") && cfg_j["output"].contains("path")) {
+                        output_path = cfg_j["output"]["path"].get<std::string>();
+                    }
+                }
+            } catch (...) {}
+        }
+        if (output_path.empty()) {
+            output_path = "merged.h5";
+        }
+    }
+    merge_shards(first_path, additional, output_path, schema_path);
+    std::cout << "merged_output: " << output_path << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
     std::string schema_path = default_schema_path(argc > 0 ? argv[0] : nullptr);
     std::string bench_profile;
-    std::string command, config_path;
+    std::string command;
+    std::string output_path;
+    std::string out_dir = "shards";
+    std::string run_id;
+    size_t num_shards = 2;
+    std::vector<std::string> positional;
+
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "--schema" && i + 1 < args.size()) {
             schema_path = args[++i];
         } else if (args[i] == "--bench-profile" && i + 1 < args.size()) {
             bench_profile = args[++i];
+        } else if (args[i] == "--num-shards" && i + 1 < args.size()) {
+            num_shards = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--out-dir" && i + 1 < args.size()) {
+            out_dir = args[++i];
+        } else if (args[i] == "--run-id" && i + 1 < args.size()) {
+            run_id = args[++i];
+        } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
+            output_path = args[++i];
         } else if (args[i] == "--help" || args[i] == "-h") {
             std::cout << kUsage;
             return 0;
         } else if (command.empty()) {
             command = args[i];
-        } else if (config_path.empty()) {
-            config_path = args[i];
         } else {
-            std::cerr << kUsage;
-            return static_cast<int>(ExitCode::Config);
+            positional.push_back(args[i]);
         }
     }
-    if (command.empty() || config_path.empty() ||
-        (command != "validate" && command != "estimate" && command != "run")) {
+
+    if (command.empty() || positional.empty()) {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
+    if (command != "validate" && command != "estimate" && command != "run" &&
+        command != "shard" && command != "merge") {
+        std::cerr << kUsage;
+        return static_cast<int>(ExitCode::Config);
+    }
+
     try {
+        if (command == "merge") {
+            std::vector<std::string> additional(positional.begin() + 1, positional.end());
+            return cmd_merge(positional[0], additional, output_path, schema_path);
+        }
+
+        if (positional.size() != 1) {
+            std::cerr << kUsage;
+            return static_cast<int>(ExitCode::Config);
+        }
+        const std::string& config_path = positional[0];
         ResolvedConfig rc = load_config(config_path, schema_path);
         if (!bench_profile.empty() && command != "run") {
             std::cerr << kUsage;
@@ -194,14 +270,20 @@ int run(int argc, char** argv) {
         const std::vector<BenchmarkProfile> profiles = load_benchmark_profiles();
         if (command == "validate") return cmd_validate(rc, config_path);
         if (command == "estimate") return cmd_estimate(rc, config_path, profiles);
-        std::cout << "scem_schema_version: " << rc.schema_version << "\n";
-        std::cout << "resolved_config_hash: " << rc.hash << "\n";
+
         SamplePlan plan = build_sample_plan(rc.value);
         print_warnings(plan);
         const DesignerIdentity designer = validate_designer_package(rc.value, config_path);
         for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         NormalizedMesh mesh =
             load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+
+        if (command == "shard") {
+            return cmd_shard(rc, plan, mesh, config_path, num_shards, out_dir, run_id);
+        }
+
+        std::cout << "scem_schema_version: " << rc.schema_version << "\n";
+        std::cout << "resolved_config_hash: " << rc.hash << "\n";
         const ResolvedMaterials resolved_mat = resolve_materials(rc.value, mesh);
         for (const auto& w : resolved_mat.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         MaterialOptions material;
@@ -226,8 +308,11 @@ int run(int argc, char** argv) {
         }
         const std::string format = rc.value["output"]["format"].get<std::string>();
         const fs::path out_path(rc.value["output"]["path"].get<std::string>());
+        const bool is_shard = rc.value["run"].contains("shard");
         const bool resume = !rc.resume_from_checkpoint.empty();
         if (resume) {
+            if (is_shard)
+                throw ConfigError("resuming individual shards is not supported; rerun shard directly");
             if (format != "hdf5")
                 throw ConfigError("run.resume_from_checkpoint requires HDF5 output");
             const std::string& checkpoint = rc.resume_from_checkpoint;
@@ -252,16 +337,44 @@ int run(int argc, char** argv) {
             return 0;
         }
         if (fs::exists(out_path)) {
-            if (format != "hdf5")
-                throw OutputError("output file exists; remove it to regenerate: " +
-                                  out_path.string());
-            if (check_existing_hdf5(rc, plan, mesh, out_path.string())) {
-                std::cout << "status: already complete\n";
-                return 0;
+            if (is_shard) {
+                fs::remove(out_path);
+                if (format == "csv") {
+                    fs::remove(out_path.string() + ".json");
+                }
+            } else {
+                if (format != "hdf5")
+                    throw OutputError("output file exists; remove it to regenerate: " +
+                                      out_path.string());
+                if (check_existing_hdf5(rc, plan, mesh, out_path.string())) {
+                    std::cout << "status: already complete\n";
+                    return 0;
+                }
             }
         }
         const auto solve_start = std::chrono::steady_clock::now();
-        PoResult result = solve_po(mesh, plan, rc.value, fringe, go, material);
+        PoResult result;
+        if (!is_shard) {
+            result = solve_po(mesh, plan, rc.value, fringe, go, material);
+        } else {
+            const size_t shard_id = rc.value["run"]["shard"]["shard_id"].get<size_t>();
+            const size_t shard_count = rc.value["run"]["shard"]["num_shards"].get<size_t>();
+            const size_t total_units = plan.frequencies_hz.size() * plan.directions.size();
+            const size_t base_units = total_units / shard_count;
+            const size_t rem_units = total_units % shard_count;
+            const size_t u_count = base_units + (shard_id < rem_units ? 1 : 0);
+            const size_t u_start = shard_id * base_units + std::min(shard_id, rem_units);
+            const size_t ndir = plan.directions.size();
+
+            std::vector<std::pair<uint32_t, uint32_t>> shard_units;
+            shard_units.reserve(u_count);
+            for (size_t u = u_start; u < u_start + u_count; ++u) {
+                const uint32_t fi = static_cast<uint32_t>(u / ndir);
+                const uint32_t di = static_cast<uint32_t>(u % ndir);
+                shard_units.emplace_back(fi, di);
+            }
+            result = solve_po_units(mesh, plan, rc.value, shard_units, fringe, go, material);
+        }
         const double solve_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";

@@ -76,7 +76,15 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                        {"compiler", std::string(SCEM_COMPILER_ID) + " " + SCEM_COMPILER_VERSION}};
     sidecar["host"] = {{"hostname", hostname()}, {"device", "cpu"}};
     sidecar["completed_utc"] = completed;
-    sidecar["config_hash"] = rc.hash;
+    const bool is_shard = rc.value["run"].contains("shard");
+    const std::string parent_cfg_hash =
+        (is_shard && rc.value["run"]["shard"].contains("parent_config_hash"))
+            ? rc.value["run"]["shard"]["parent_config_hash"].get<std::string>()
+            : rc.hash;
+    sidecar["config_hash"] = parent_cfg_hash;
+    if (is_shard) {
+        sidecar["shard_config_hash"] = rc.hash;
+    }
     sidecar["geometry_hash"] = mesh.geometry_hash;
     sidecar["normalized_mesh_hash"] = mesh.normalized_mesh_hash;
     sidecar["sample_plan"] = {{"frequencies", plan.frequencies_hz.size()},
@@ -106,6 +114,12 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                        {"triangles", mesh.report.triangle_count},
                        {"surface_area_m2", mesh.report.total_area_m2},
                        {"repaired", mesh.repaired}};
+    if (rc.value["run"].contains("shard")) {
+        sidecar["shard"] = rc.value["run"]["shard"];
+        sidecar["shard"]["sample_id_start"] =
+            result.samples.empty() ? 0 : result.samples.front().sample_id;
+        sidecar["shard"]["sample_id_count"] = result.samples.size();
+    }
     if (!designer.design_id.empty()) {
         sidecar["designer"] = {{"design_id", designer.design_id},
                                {"revision", designer.revision},
@@ -120,7 +134,9 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
     sidecar["warnings"] = nlohmann::json::array();
     for (const auto& w : plan.warnings) sidecar["warnings"].push_back(w);
     for (const auto& w : result.warnings) sidecar["warnings"].push_back(w);
-    sidecar["resolved_config"] = rc.value;
+    auto parent_cfg = rc.value;
+    if (is_shard) parent_cfg["run"].erase("shard");
+    sidecar["resolved_config"] = parent_cfg;
 
     const fs::path sidecar_path = csv_path.string() + ".json";
     {

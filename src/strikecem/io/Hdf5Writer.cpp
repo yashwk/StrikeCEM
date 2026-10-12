@@ -309,7 +309,8 @@ void commit_chunk(OpenDb& db, size_t chunk) {
 }
 
 void commit_units(OpenDb& db, const SamplePlan& plan, const PoResult& result,
-                  const std::vector<std::pair<uint32_t, uint32_t>>& units) {
+                  const std::vector<std::pair<uint32_t, uint32_t>>& units,
+                  bool sequential_rows = false) {
     const size_t npol = plan.polarizations.size();
     const size_t ndir = plan.directions.size();
     // Rows keyed by global sample_id (subset results arrive in unit order).
@@ -317,11 +318,14 @@ void commit_units(OpenDb& db, const SamplePlan& plan, const PoResult& result,
     for (const auto& row : result.samples) by_id[row.sample_id] = &row;
     // Group solved units into maximal contiguous row runs per chunk commit.
     std::vector<bool> touched(db.n_chunks, false);
-    for (const auto& [fi, di] : units) {
-        const size_t base = (static_cast<size_t>(fi) * ndir + di) * npol;
+    for (size_t u_idx = 0; u_idx < units.size(); ++u_idx) {
+        const auto& [fi, di] = units[u_idx];
+        const size_t file_base = sequential_rows ? (u_idx * npol)
+                                                 : ((static_cast<size_t>(fi) * ndir + di) * npol);
+        const uint64_t sample_id_base = ((static_cast<uint64_t>(fi) * ndir) + di) * npol;
         // Gather this unit's P rows by global sample_id.
         const hsize_t count[1] = {npol};
-        const hsize_t start[1] = {base};
+        const hsize_t start[1] = {file_base};
         const H5::DataSpace mem(1, count);
         auto slab = [&](H5::DataSet& ds) {
             H5::DataSpace file_space = ds.getSpace();
@@ -339,7 +343,7 @@ void commit_units(OpenDb& db, const SamplePlan& plan, const PoResult& result,
         std::vector<uint8_t> valid(npol, 1);
         std::vector<std::string> status(npol, "ok");
         for (size_t pi = 0; pi < npol; ++pi) {
-            const uint64_t id = base + pi;
+            const uint64_t id = sample_id_base + pi;
             const auto it = by_id.find(id);
             if (it == by_id.end())
                 throw OutputError("solver did not return sample " + std::to_string(id));
@@ -377,8 +381,8 @@ void commit_units(OpenDb& db, const SamplePlan& plan, const PoResult& result,
             put(db.db_ds, db_d.data(), ftype);
         }
         put(db.valid_ds, valid.data(), H5::PredType::NATIVE_UINT8);
-        write_string_slice(db.status_ds, status, base);
-        for (size_t r = base; r < base + npol; ++r) touched[r / db.chunk_rows] = true;
+        write_string_slice(db.status_ds, status, file_base);
+        for (size_t r = file_base; r < file_base + npol; ++r) touched[r / db.chunk_rows] = true;
     }
     for (size_t c = 0; c < db.n_chunks; ++c)
         if (touched[c]) commit_chunk(db, c);
@@ -446,7 +450,8 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
     if (configured_chunk_rows <= 0) throw OutputError("checkpoint chunk size must be positive");
     const size_t chunk_rows = static_cast<size_t>(configured_chunk_rows);
     const size_t n_rows = result.samples.size();
-    if (n_rows != checked_plan_rows(plan))
+    const bool is_shard = rc.value["run"].contains("shard");
+    if (!is_shard && n_rows != checked_plan_rows(plan))
         throw OutputError("solver result row count does not match sample plan");
     const size_t n_chunks = n_rows / chunk_rows + (n_rows % chunk_rows != 0);
 
@@ -508,8 +513,17 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
 
         write_str_attr(file, "scem_schema_version", rc.schema_version);
         write_str_attr(file, "output_format_version", "1.0");
-        write_str_attr(file, "config_json", canonical_json(rc.value));
-        write_str_attr(file, "config_hash", rc.hash);
+        auto parent_cfg = rc.value;
+        if (is_shard) parent_cfg["run"].erase("shard");
+        write_str_attr(file, "config_json", canonical_json(parent_cfg));
+        const std::string parent_cfg_hash =
+            (is_shard && rc.value["run"]["shard"].contains("parent_config_hash"))
+                ? rc.value["run"]["shard"]["parent_config_hash"].get<std::string>()
+                : rc.hash;
+        write_str_attr(file, "config_hash", parent_cfg_hash);
+        if (is_shard) {
+            write_str_attr(file, "shard_config_hash", rc.hash);
+        }
         write_str_attr(file, "geometry_hash", mesh.geometry_hash);
         write_str_attr(file, "normalized_mesh_hash", mesh.normalized_mesh_hash);
         write_str_attr(file, "sample_plan_hash", plan.hash);
@@ -545,14 +559,33 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         for (const auto& w : plan.warnings) warnings += w + "\n";
         for (const auto& w : result.warnings) warnings += w + "\n";
         write_str_attr(file, "warnings", warnings);
+        if (is_shard) {
+            write_u64_attr(file, "is_shard", 1);
+            write_u64_attr(file, "shard_id", rc.value["run"]["shard"]["shard_id"].get<uint64_t>());
+            write_u64_attr(file, "num_shards", rc.value["run"]["shard"]["num_shards"].get<uint64_t>());
+            write_str_attr(file, "run_id", rc.value["run"]["shard"].value("run_id", ""));
+            write_str_attr(file, "worker_identity", rc.value["run"]["shard"].value("worker_identity", ""));
+            write_u64_attr(file, "sample_id_start", result.samples.empty() ? 0 : result.samples.front().sample_id);
+            write_u64_attr(file, "sample_id_count", result.samples.size());
+        }
         file.flush(H5F_SCOPE_GLOBAL);
 
         // Commit every unit, then every chunk.
         std::vector<std::pair<uint32_t, uint32_t>> units;
-        for (uint32_t fi = 0; fi < plan.frequencies_hz.size(); ++fi)
-            for (uint32_t di = 0; di < plan.directions.size(); ++di)
-                units.emplace_back(fi, di);
-        commit_units(db, plan, result, units);
+        if (!is_shard) {
+            for (uint32_t fi = 0; fi < plan.frequencies_hz.size(); ++fi)
+                for (uint32_t di = 0; di < plan.directions.size(); ++di)
+                    units.emplace_back(fi, di);
+            commit_units(db, plan, result, units, false);
+        } else {
+            std::vector<std::pair<uint32_t, uint32_t>> shard_units;
+            for (const auto& s : result.samples) {
+                if (shard_units.empty() || shard_units.back() != std::make_pair(s.frequency_id, s.direction_id)) {
+                    shard_units.emplace_back(s.frequency_id, s.direction_id);
+                }
+            }
+            commit_units(db, plan, result, shard_units, true);
+        }
         file.flush(H5F_SCOPE_GLOBAL);
         file.close();
     } catch (const H5::Exception& e) {

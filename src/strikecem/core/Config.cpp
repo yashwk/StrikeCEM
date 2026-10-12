@@ -195,6 +195,15 @@ void validate_semantics(const json& r, const fs::path& config_dir) {
             throw ConfigError("default_material '" + def_mat + "' is not defined in materials");
     }
 
+    if (r["run"].contains("shard")) {
+        const auto& sh = r["run"]["shard"];
+        const int shard_id = sh["shard_id"].get<int>();
+        const int num_shards = sh["num_shards"].get<int>();
+        if (num_shards <= 0) throw ConfigError("run.shard.num_shards must be at least 1");
+        if (shard_id < 0 || shard_id >= num_shards)
+            throw ConfigError("run.shard.shard_id must be in [0, num_shards - 1]");
+    }
+
     const std::string output_path = r["output"]["path"].get<std::string>();
     const fs::path parent = fs::path(output_path).parent_path();
     if (!parent.empty() && !fs::is_directory(parent))
