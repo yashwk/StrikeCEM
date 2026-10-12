@@ -178,6 +178,24 @@ void validate_semantics(const json& r, const fs::path& config_dir) {
         }
     }
 
+    if (angles.contains("adaptive")) {
+        if (!angles.contains("azimuth") || !angles.contains("elevation")) {
+            throw ConfigError("angles.adaptive requires bounded angles.azimuth and angles.elevation ranges");
+        }
+        const auto& ad = angles["adaptive"];
+        const double c_step = ad["coarse_step_deg"].get<double>();
+        const double r_step = ad["refine_step_deg"].get<double>();
+        if (!(r_step < c_step)) {
+            throw ConfigError("angles.adaptive requires refine_step_deg < coarse_step_deg");
+        }
+        if (ad.contains("window_half_width_deg") && ad["window_half_width_deg"].get<double>() <= 0) {
+            throw ConfigError("angles.adaptive window_half_width_deg must be positive");
+        }
+        if (ad.contains("gradient_threshold_db_per_deg") && ad["gradient_threshold_db_per_deg"].get<double>() <= 0) {
+            throw ConfigError("angles.adaptive gradient_threshold_db_per_deg must be positive");
+        }
+    }
+
     if (r.contains("materials")) {
         const auto& mat_conf = r["materials"];
         const std::string def_mat = mat_conf.value("default_material", "pec");
@@ -274,8 +292,10 @@ SamplePlan build_sample_plan(const json& resolved) {
     const auto& angles = resolved["angles"];
     if (angles.contains("azimuth")) {
         const auto& az = angles["azimuth"], el = angles["elevation"];
-        auto az_values = expand_axis(az["start"].get<double>(), az["stop"].get<double>(),
-                                     az["step"].get<double>());
+        const double az_step = angles.contains("adaptive")
+                                   ? angles["adaptive"]["coarse_step_deg"].get<double>()
+                                   : az["step"].get<double>();
+        auto az_values = expand_axis(az["start"].get<double>(), az["stop"].get<double>(), az_step);
         auto el_values = expand_axis(el["start"].get<double>(), el["stop"].get<double>(),
                                      el["step"].get<double>());
         for (double& a : az_values) a = normalize_azimuth(a);

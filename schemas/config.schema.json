@@ -103,7 +103,20 @@
             "items": [{"type": "number"}, {"type": "number"}]
           }
         },
-        "deduplicate_periodic_endpoints": {"const": true, "default": true, "description": "Periodic endpoints and duplicate directions are always deduplicated in v1."}
+        "deduplicate_periodic_endpoints": {"const": true, "default": true, "description": "Periodic endpoints and duplicate directions are always deduplicated in v1."},
+        "adaptive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["coarse_step_deg", "refine_step_deg"],
+          "properties": {
+            "coarse_step_deg": {"type": "number", "exclusiveMinimum": 0},
+            "refine_step_deg": {"type": "number", "exclusiveMinimum": 0},
+            "peak_threshold_dbsm": {"type": "number"},
+            "gradient_threshold_db_per_deg": {"type": "number", "exclusiveMinimum": 0, "default": 2.0},
+            "window_half_width_deg": {"type": "number", "exclusiveMinimum": 0, "default": 5.0},
+            "max_refinement_stages": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1}
+          }
+        }
       }
     },
     "polarization": {

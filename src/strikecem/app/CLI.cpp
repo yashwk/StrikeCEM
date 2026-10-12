@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "strikecem/adaptive/AdaptiveSampling.hpp"
 #include "strikecem/core/Config.hpp"
 #include "strikecem/distributed/Shard.hpp"
 #include "strikecem/io/CsvWriter.hpp"
@@ -352,9 +353,19 @@ int run(int argc, char** argv) {
                 }
             }
         }
+        const bool is_adaptive = rc.value["angles"].contains("adaptive");
         const auto solve_start = std::chrono::steady_clock::now();
         PoResult result;
-        if (!is_shard) {
+        SamplePlan execution_plan = plan;
+        if (is_adaptive) {
+            AdaptiveResult a_res = solve_adaptive(mesh, rc, fringe, go, material);
+            result = a_res.merged_result;
+            execution_plan = a_res.merged_plan;
+            std::cout << "adaptive_coarse_samples: " << a_res.coarse_result.samples.size() << "\n";
+            std::cout << "adaptive_peaks: " << a_res.peaks_detected << "\n";
+            std::cout << "adaptive_windows: " << a_res.windows.size() << "\n";
+            std::cout << "adaptive_refinement_samples: " << a_res.refinement_result.samples.size() << "\n";
+        } else if (!is_shard) {
             result = solve_po(mesh, plan, rc.value, fringe, go, material);
         } else {
             const size_t shard_id = rc.value["run"]["shard"]["shard_id"].get<size_t>();
@@ -379,14 +390,14 @@ int run(int argc, char** argv) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (format == "csv")
-            write_csv_and_sidecar(rc, plan, mesh, result, designer, fringe, material);
+            write_csv_and_sidecar(rc, execution_plan, mesh, result, designer, fringe, material);
         else
-            write_hdf5_output(rc, plan, mesh, result, designer, fringe, material);
+            write_hdf5_output(rc, execution_plan, mesh, result, designer, fringe, material);
         if (!bench_profile.empty())
             write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count,
-                                    plan.sample_count(), solve_seconds,
-                                    rc.value["execution"].value("accelerator", "cpu"),
-                                    cuda::active_device_name(rc.value));
+                                     execution_plan.sample_count(), solve_seconds,
+                                     rc.value["execution"].value("accelerator", "cpu"),
+                                     cuda::active_device_name(rc.value));
         std::cout << "samples: " << result.samples.size() << "\n";
         std::cout << "status: ok\n";
         return 0;
