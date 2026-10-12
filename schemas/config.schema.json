@@ -179,7 +179,18 @@
         "format": {"type": "string", "enum": ["csv", "hdf5"], "default": "hdf5"},
         "precision": {"type": "integer", "minimum": 1, "maximum": 17, "default": 6},
         "compression": {"const": false, "default": false, "description": "Compression is not supported in v1."},
-        "include_metadata": {"const": true, "default": true, "description": "Provenance metadata is always written in v1."}
+        "include_metadata": {"const": true, "default": true, "description": "Provenance metadata is always written in v1."},
+        "diagnostics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "vtk_export_path": {"type": "string", "minLength": 1},
+            "export_facet_currents": {"type": "boolean", "default": true},
+            "export_lit_status": {"type": "boolean", "default": true},
+            "export_material_ids": {"type": "boolean", "default": true},
+            "sample_index": {"type": "integer", "minimum": 0, "default": 0}
+          }
+        }
       }
     },
     "materials": {

@@ -74,7 +74,8 @@ add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/Mesh
         src/strikecem/solvers/EdgeModel.cpp src/strikecem/solvers/UtdWedge.cpp
         src/strikecem/solvers/EdgeFringe.cpp src/strikecem/solvers/Ray.cpp
         src/strikecem/solvers/Fresnel.cpp src/strikecem/solvers/Material.cpp
-        src/strikecem/distributed/Shard.cpp src/strikecem/adaptive/AdaptiveSampling.cpp)
+        src/strikecem/distributed/Shard.cpp src/strikecem/adaptive/AdaptiveSampling.cpp
+        src/strikecem/diagnostics/VtkWriter.cpp)
 if(SCEM_HAVE_CUDA)
     target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO.cu)
     target_compile_definitions(scem_core PUBLIC SCEM_ENABLE_CUDA)
@@ -132,7 +133,7 @@ add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests
         tests/test_estimate.cpp tests/test_resume.cpp tests/test_gpu.cpp tests/test_designer.cpp
         tests/test_edges.cpp tests/test_utd.cpp tests/test_fringe.cpp tests/test_benchmarks.cpp
         tests/test_ray.cpp tests/test_fresnel.cpp tests/test_material.cpp tests/test_distributed.cpp
-        tests/test_adaptive.cpp
+        tests/test_adaptive.cpp tests/test_vtk.cpp
         src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE

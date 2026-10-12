@@ -13,6 +13,7 @@
 
 #include "strikecem/adaptive/AdaptiveSampling.hpp"
 #include "strikecem/core/Config.hpp"
+#include "strikecem/diagnostics/VtkWriter.hpp"
 #include "strikecem/distributed/Shard.hpp"
 #include "strikecem/io/CsvWriter.hpp"
 #include "strikecem/io/DesignerPackage.hpp"
@@ -36,7 +37,7 @@ namespace fs = std::filesystem;
 #endif
 
 constexpr const char* kUsage =
-    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run|shard|merge> [options...] <args...>\n"
+    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run|shard|merge|vtk> [options...] <args...>\n"
     "  validate  resolve config, inspect mesh, print hashes\n"
     "  estimate  validate plus plan counts and resource estimates\n"
     "  run       full pipeline (PO solver, CSV/HDF5 output)\n"
@@ -44,6 +45,8 @@ constexpr const char* kUsage =
     "            options: --num-shards N (default 2), --out-dir DIR (default ./shards), --run-id ID\n"
     "  merge     merge completed shard outputs into a unified database\n"
     "            options: --output PATH <manifest.json | shard1 shard2 ...>\n"
+    "  vtk       export 3D per-facet currents and lit/shadow diagnostics to VTK (.vtu)\n"
+    "            options: --output PATH, --direction-id N (default 0)\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -206,6 +209,25 @@ int cmd_merge(const std::string& first_path, const std::vector<std::string>& add
     return 0;
 }
 
+int cmd_vtk(const ResolvedConfig& rc, const SamplePlan& plan,
+            const NormalizedMesh& mesh, const std::string& vtu_path,
+            size_t direction_id, const FringeOptions& fringe,
+            const GoOptions& go, const MaterialOptions& material) {
+    if (plan.directions.empty()) throw OutputError("sample plan has no directions");
+    const size_t dir_idx = std::min(direction_id, plan.directions.size() - 1);
+    const Direction& dir = plan.directions[dir_idx];
+    const double freq = plan.frequencies_hz.empty() ? 10e9 : plan.frequencies_hz.front();
+    const std::string pol = plan.polarizations.empty() ? "HH" : plan.polarizations.front();
+
+    const VtkMeshDiagnostics diag = compute_facet_diagnostics(mesh, dir, freq, pol, go, material);
+    write_vtu(vtu_path, mesh, diag);
+    std::cout << "vtk_output: " << vtu_path << "\n";
+    std::cout << "direction_azimuth_deg: " << dir.azimuth_deg << "\n";
+    std::cout << "direction_elevation_deg: " << dir.elevation_deg << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -217,6 +239,7 @@ int run(int argc, char** argv) {
     std::string out_dir = "shards";
     std::string run_id;
     size_t num_shards = 2;
+    size_t direction_id = 0;
     std::vector<std::string> positional;
 
     for (size_t i = 0; i < args.size(); ++i) {
@@ -226,6 +249,8 @@ int run(int argc, char** argv) {
             bench_profile = args[++i];
         } else if (args[i] == "--num-shards" && i + 1 < args.size()) {
             num_shards = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--direction-id" && i + 1 < args.size()) {
+            direction_id = static_cast<size_t>(std::stoul(args[++i]));
         } else if (args[i] == "--out-dir" && i + 1 < args.size()) {
             out_dir = args[++i];
         } else if (args[i] == "--run-id" && i + 1 < args.size()) {
@@ -247,7 +272,7 @@ int run(int argc, char** argv) {
         return static_cast<int>(ExitCode::Config);
     }
     if (command != "validate" && command != "estimate" && command != "run" &&
-        command != "shard" && command != "merge") {
+        command != "shard" && command != "merge" && command != "vtk") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -301,6 +326,12 @@ int run(int argc, char** argv) {
         }
         GoOptions go{rc.value["solver"]["po_options"].value("shadowing", false),
                      rc.value["solver"]["po_options"].value("max_bounces", 1)};
+
+        if (command == "vtk") {
+            const std::string vtu_file = output_path.empty() ? "diag.vtu" : output_path;
+            return cmd_vtk(rc, plan, mesh, vtu_file, direction_id, fringe, go, material);
+        }
+
         const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
         for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (!est.fits) {
@@ -398,6 +429,18 @@ int run(int argc, char** argv) {
                                      execution_plan.sample_count(), solve_seconds,
                                      rc.value["execution"].value("accelerator", "cpu"),
                                      cuda::active_device_name(rc.value));
+        if (rc.value["output"].contains("diagnostics") &&
+            rc.value["output"]["diagnostics"].contains("vtk_export_path")) {
+            const std::string vtu_file = rc.value["output"]["diagnostics"]["vtk_export_path"].get<std::string>();
+            const size_t s_idx = rc.value["output"]["diagnostics"].value("sample_index", 0);
+            const size_t dir_idx = std::min(s_idx, execution_plan.directions.size() - 1);
+            const Direction& dir = execution_plan.directions[dir_idx];
+            const double freq = execution_plan.frequencies_hz.front();
+            const std::string pol = execution_plan.polarizations.front();
+            const VtkMeshDiagnostics diag = compute_facet_diagnostics(mesh, dir, freq, pol, go, material);
+            write_vtu(vtu_file, mesh, diag);
+            std::cout << "vtk_diagnostics: " << vtu_file << "\n";
+        }
         std::cout << "samples: " << result.samples.size() << "\n";
         std::cout << "status: ok\n";
         return 0;
