@@ -436,7 +436,8 @@ void check_resume_identity(H5::H5File& file, const ResolvedConfig& rc, const Sam
 
 void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
                        const NormalizedMesh& mesh, const PoResult& result,
-                       const DesignerIdentity& designer, const FringeOptions& fringe) {
+                       const DesignerIdentity& designer, const FringeOptions& fringe,
+                       const MaterialOptions& material) {
     H5::Exception::dontPrint();
     const fs::path out_path(rc.value["output"]["path"].get<std::string>());
     const bool float32 = rc.value["solver"]["precision"].get<std::string>() == "float32";
@@ -523,6 +524,8 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         write_u64_attr(file, "max_bounces",
                        rc.value["solver"]["po_options"].value("max_bounces", 1));
         write_u64_attr(file, "bounce_chains", result.chains_fired);
+        write_u64_attr(file, "materials_enabled", material.enabled ? 1 : 0);
+        write_u64_attr(file, "material_models_count", material.models.size());
         write_str_attr(file, "design_id", designer.design_id);
         write_str_attr(file, "design_revision", designer.revision);
         write_str_attr(file, "export_id", designer.export_id);
@@ -626,7 +629,8 @@ void open_resume_db(OpenDb& db, const std::string& path, const ResolvedConfig& r
 
 size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
                           const NormalizedMesh& mesh, const std::string& path,
-                          const FringeOptions& fringe, const GoOptions& go) {
+                          const FringeOptions& fringe, const GoOptions& go,
+                          const MaterialOptions& material) {
     H5::Exception::dontPrint();
     try {
         OpenDb db;
@@ -655,7 +659,7 @@ size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
             db.file.close();
             return 0;
         }
-        PoResult subset = solve_po_units(mesh, plan, rc.value, units, fringe, go);
+        PoResult subset = solve_po_units(mesh, plan, rc.value, units, fringe, go, material);
         commit_units(db, plan, subset, units);
         db.file.flush(H5F_SCOPE_GLOBAL);
         db.file.close();

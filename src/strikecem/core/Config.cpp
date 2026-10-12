@@ -10,9 +10,12 @@
 #include <iomanip>
 #include <limits>
 #include <openssl/sha.h>
+#include <set>
 #include <sstream>
 
 #include <nlohmann/json-schema.hpp>
+
+#include "strikecem/solvers/Material.hpp"
 
 namespace strikecem {
 namespace {
@@ -96,6 +99,13 @@ json resolve_defaults(const json& raw) {
     if (!output.contains("compression")) output["compression"] = false;
     if (!output.contains("include_metadata")) output["include_metadata"] = true;
 
+    if (r.contains("materials")) {
+        auto& materials = r["materials"];
+        if (!materials.contains("default_material")) materials["default_material"] = "pec";
+        if (!materials.contains("tag_coverage")) materials["tag_coverage"] = "warn";
+        if (!materials.contains("definitions")) materials["definitions"] = json::array();
+    }
+
     if (!r.contains("run")) r["run"] = json::object();
     auto& run = r["run"];
     if (!run.contains("checkpoint_every_n_samples")) run["checkpoint_every_n_samples"] = 1000;
@@ -166,6 +176,23 @@ void validate_semantics(const json& r, const fs::path& config_dir) {
             if (el < -90.0 || el > 90.0)
                 throw ConfigError("angles.list elevation out of [-90, 90]");
         }
+    }
+
+    if (r.contains("materials")) {
+        const auto& mat_conf = r["materials"];
+        const std::string def_mat = mat_conf.value("default_material", "pec");
+        std::set<std::string> tags;
+        tags.insert("pec");
+        if (mat_conf.contains("definitions")) {
+            for (const auto& def_j : mat_conf["definitions"]) {
+                MaterialModel m = material_from_json(def_j);
+                if (tags.find(m.tag) != tags.end() && m.tag != "pec")
+                    throw ConfigError("duplicate material tag: " + m.tag);
+                tags.insert(m.tag);
+            }
+        }
+        if (tags.find(def_mat) == tags.end())
+            throw ConfigError("default_material '" + def_mat + "' is not defined in materials");
     }
 
     const std::string output_path = r["output"]["path"].get<std::string>();

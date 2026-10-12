@@ -98,7 +98,20 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         out.warnings.push_back(
             "GO shadowing enabled: hard shadow boundaries without edge diffraction; "
             "multi-bounce not included");
-    const bool use_material = material.enabled && material.wall != WallType::Pec;
+    bool has_multi_material = material.enabled && !material.facet_material_indices.empty();
+    bool any_non_pec = false;
+    if (material.enabled) {
+        if (material.wall != WallType::Pec) any_non_pec = true;
+        if (has_multi_material) {
+            for (uint32_t idx : material.facet_material_indices) {
+                if (idx < material.models.size() && material.models[idx].type != WallType::Pec) {
+                    any_non_pec = true;
+                    break;
+                }
+            }
+        }
+    }
+    const bool use_material = any_non_pec;
     if (use_material && fringe.enabled)
         out.warnings.push_back("fringe correction is PEC-derived and unvalidated for "
                                "material walls; edge returns stay PEC-based");
@@ -115,10 +128,23 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const Bvh bvh = build_bvh(mesh);
     const ComplexMedium incident{{eps_r, 0.0}, {mu_r, 0.0}};
     std::vector<ComplexMedium> wall_per_freq;
-    if (use_material && material.wall == WallType::Dielectric) {
-        wall_per_freq.reserve(nfreq);
-        for (double f : plan.frequencies_hz)
-            wall_per_freq.push_back(evaluate_material(material.model, f));
+    std::vector<std::vector<ComplexMedium>> models_wall_per_freq;
+    if (use_material) {
+        if (!has_multi_material && material.wall == WallType::Dielectric) {
+            wall_per_freq.reserve(nfreq);
+            for (double f : plan.frequencies_hz)
+                wall_per_freq.push_back(evaluate_material(material.model, f));
+        } else if (has_multi_material) {
+            models_wall_per_freq.resize(material.models.size());
+            for (size_t m = 0; m < material.models.size(); ++m) {
+                if (material.models[m].type == WallType::Dielectric) {
+                    models_wall_per_freq[m].reserve(nfreq);
+                    for (double f : plan.frequencies_hz)
+                        models_wall_per_freq[m].push_back(
+                            evaluate_material(material.models[m], f));
+                }
+            }
+        }
     }
 
     auto run_unit = [&](size_t pos) {
@@ -179,7 +205,24 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
             const C eout_phase = std::exp(C(0, k * dot(r_hat, centroid)));
             const C coeff = coeff_jk * area * eout_phase;
             const CVec3<Real> n_c = to_complex<Real>(n);
-            if (!use_material) {
+            WallType facet_wall = WallType::Pec;
+            const MaterialModel* facet_model = nullptr;
+            if (material.enabled) {
+                if (has_multi_material) {
+                    if (t < material.facet_material_indices.size()) {
+                        uint32_t midx = material.facet_material_indices[t];
+                        if (midx < material.models.size()) {
+                            facet_model = &material.models[midx];
+                            facet_wall = facet_model->type;
+                        }
+                    }
+                } else if (material.wall != WallType::Pec) {
+                    facet_wall = material.wall;
+                    facet_model = &material.model;
+                }
+            }
+
+            if (facet_wall == WallType::Pec) {
                 for (int tx = 0; tx < 2; ++tx) {
                     const CVec3<Real> e_c = to_complex<Real>(tx_e[tx]);
                     CVec3<Real> h_inc = cross_c(k_hat_c, e_c);
@@ -196,14 +239,21 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                     1.0, std::max(0.0, static_cast<double>(dot(n, r_hat))));
                 std::complex<double> r_te{-1.0, 0.0};
                 std::complex<double> r_tm{1.0, 0.0};
-                if (material.wall == WallType::Dielectric) {
-                    const FresnelResult fr = fresnel(incident, wall_per_freq[fi], cos_i);
+                if (facet_wall == WallType::Dielectric) {
+                    ComplexMedium wmed;
+                    if (has_multi_material) {
+                        uint32_t midx = material.facet_material_indices[t];
+                        wmed = models_wall_per_freq[midx][fi];
+                    } else {
+                        wmed = wall_per_freq[fi];
+                    }
+                    const FresnelResult fr = fresnel(incident, wmed, cos_i);
                     r_te = fr.r_te;
                     r_tm = fr.r_tm;
                 } else {
                     const double lambda_vac = kSpeedOfLight / freq;
                     const CoatedResult cr =
-                        coated_pec_reflection(incident, material.model.layers, cos_i, lambda_vac);
+                        coated_pec_reflection(incident, facet_model->layers, cos_i, lambda_vac);
                     r_te = cr.r_te;
                     r_tm = cr.r_tm;
                 }
@@ -498,16 +548,29 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
         throw cuda::CudaError("GO corrections are CPU-only in v1");
     if (go.max_bounces < 1 || go.max_bounces > 3)
         throw std::invalid_argument("max_bounces must be 1, 2, or 3");
-    if (material.enabled && material.wall != WallType::Pec) {
-        validate_material(material.model);
-        if (material.model.type != material.wall)
-            throw std::invalid_argument("material model type must match the active wall");
-        if (material.wall == WallType::Coated && !material.model.table.empty())
-            throw std::invalid_argument("coated frequency tables are future work");
-        if (resolved["execution"].value("accelerator", "cpu") == "cuda")
-            throw cuda::CudaError("material walls are CPU-only in v1");
-        if (go.max_bounces > 1)
-            throw std::invalid_argument("multi-bounce GO requires PEC walls in v1");
+    bool any_non_pec = false;
+    if (material.enabled) {
+        if (!material.facet_material_indices.empty()) {
+            for (uint32_t idx : material.facet_material_indices) {
+                if (idx < material.models.size() && material.models[idx].type != WallType::Pec) {
+                    any_non_pec = true;
+                    break;
+                }
+            }
+        } else if (material.wall != WallType::Pec) {
+            any_non_pec = true;
+            validate_material(material.model);
+            if (material.model.type != material.wall)
+                throw std::invalid_argument("material model type must match the active wall");
+            if (material.wall == WallType::Coated && !material.model.table.empty())
+                throw std::invalid_argument("coated frequency tables are future work");
+        }
+        if (any_non_pec) {
+            if (resolved["execution"].value("accelerator", "cpu") == "cuda")
+                throw cuda::CudaError("material walls are CPU-only in v1");
+            if (go.max_bounces > 1)
+                throw std::invalid_argument("multi-bounce GO requires PEC walls in v1");
+        }
     }
     if (resolved["execution"].value("accelerator", "cpu") == "cuda") {
         const int device = resolved["execution"].value("cuda_device_id", 0);

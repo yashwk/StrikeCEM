@@ -44,6 +44,8 @@ struct MaterialOptions {
     bool enabled = false;
     WallType wall = WallType::Pec;
     MaterialModel model;
+    std::vector<MaterialModel> models;
+    std::vector<uint32_t> facet_material_indices;
 };
 
 PoResult solve_po(const NormalizedMesh& mesh, const SamplePlan& plan,

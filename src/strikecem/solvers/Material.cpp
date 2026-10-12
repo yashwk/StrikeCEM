@@ -1,10 +1,14 @@
 #include "strikecem/solvers/Material.hpp"
 
 #include <cmath>
+#include <map>
 #include <numbers>
+#include <set>
 #include <stdexcept>
 
+#include "strikecem/core/Config.hpp"
 #include "strikecem/core/Conventions.hpp"
+#include "strikecem/io/MeshLoader.hpp"
 
 namespace strikecem {
 namespace {
@@ -128,6 +132,176 @@ CoatedResult coated_pec_reflection(const ComplexMedium& incident,
         r_tm = (rs_tm[j] + r_tm * phis[j]) / (1.0 + rs_tm[j] * r_tm * phis[j]);
     }
     return {r_te, r_tm};
+}
+
+MaterialModel material_from_json(const nlohmann::json& j) {
+    if (!j.contains("tag") || !j["tag"].is_string() || j["tag"].get<std::string>().empty())
+        throw ConfigError("material definition requires non-empty string 'tag'");
+    MaterialModel m;
+    m.tag = j["tag"].get<std::string>();
+    if (!j.contains("type") || !j["type"].is_string())
+        throw ConfigError("material definition '" + m.tag + "' requires string 'type'");
+    const std::string type_str = j["type"].get<std::string>();
+    if (type_str == "pec") {
+        m.type = WallType::Pec;
+    } else if (type_str == "dielectric") {
+        m.type = WallType::Dielectric;
+    } else if (type_str == "coated") {
+        m.type = WallType::Coated;
+    } else {
+        throw ConfigError("unknown material type: '" + type_str + "'");
+    }
+
+    auto parse_complex = [](const nlohmann::json& val, const char* name) -> std::complex<double> {
+        if (val.is_number()) {
+            return {val.get<double>(), 0.0};
+        } else if (val.is_array()) {
+            if (val.empty() || val.size() > 2)
+                throw ConfigError(std::string(name) + " must have 1 or 2 components");
+            double r = val[0].get<double>();
+            double i = val.size() > 1 ? val[1].get<double>() : 0.0;
+            return {r, i};
+        }
+        throw ConfigError(std::string(name) + " must be a number or [real, imag] array");
+    };
+
+    if (j.contains("frequency_table")) {
+        for (const auto& entry_j : j["frequency_table"]) {
+            MaterialEntry entry;
+            if (!entry_j.contains("frequency_hz") || !entry_j["frequency_hz"].is_number())
+                throw ConfigError("frequency_table entry requires number 'frequency_hz'");
+            entry.frequency_hz = entry_j["frequency_hz"].get<double>();
+            if (entry_j.contains("epsilon_r")) {
+                entry.medium.eps_r = parse_complex(entry_j["epsilon_r"], "epsilon_r");
+            } else {
+                entry.medium.eps_r = {1.0, 0.0};
+            }
+            if (entry_j.contains("mu_r")) {
+                entry.medium.mu_r = parse_complex(entry_j["mu_r"], "mu_r");
+            } else {
+                entry.medium.mu_r = {1.0, 0.0};
+            }
+            if (entry_j.contains("sigma")) {
+                entry.sigma = entry_j["sigma"].get<double>();
+            }
+            m.table.push_back(entry);
+        }
+    }
+
+    if (j.contains("layers")) {
+        for (const auto& layer_j : j["layers"]) {
+            CoatingLayer layer;
+            if (!layer_j.contains("thickness_m") || !layer_j["thickness_m"].is_number())
+                throw ConfigError("coating layer requires number 'thickness_m'");
+            layer.thickness_m = layer_j["thickness_m"].get<double>();
+            if (layer_j.contains("epsilon_r")) {
+                layer.medium.eps_r = parse_complex(layer_j["epsilon_r"], "epsilon_r");
+            } else {
+                layer.medium.eps_r = {1.0, 0.0};
+            }
+            if (layer_j.contains("mu_r")) {
+                layer.medium.mu_r = parse_complex(layer_j["mu_r"], "mu_r");
+            } else {
+                layer.medium.mu_r = {1.0, 0.0};
+            }
+            m.layers.push_back(layer);
+        }
+    }
+
+    try {
+        validate_material(m);
+    } catch (const std::exception& e) {
+        throw ConfigError(std::string("invalid material '") + m.tag + "': " + e.what());
+    }
+    return m;
+}
+
+ResolvedMaterials resolve_materials(const nlohmann::json& resolved, const NormalizedMesh& mesh) {
+    ResolvedMaterials res;
+    if (!resolved.contains("materials")) {
+        return res;
+    }
+    const auto& mat_conf = resolved["materials"];
+    res.default_material = mat_conf.value("default_material", "pec");
+    res.tag_coverage = mat_conf.value("tag_coverage", "warn");
+
+    // Index 0 is always PEC
+    MaterialModel pec_model;
+    pec_model.tag = "pec";
+    pec_model.type = WallType::Pec;
+    res.models.push_back(pec_model);
+
+    std::map<std::string, uint32_t> tag_to_model;
+    tag_to_model["pec"] = 0;
+
+    if (mat_conf.contains("definitions")) {
+        for (const auto& def_j : mat_conf["definitions"]) {
+            MaterialModel model = material_from_json(def_j);
+            if (tag_to_model.find(model.tag) != tag_to_model.end() && model.tag != "pec") {
+                throw ConfigError("duplicate material tag definition: " + model.tag);
+            }
+            if (model.tag == "pec") {
+                res.models[0] = model;
+            } else {
+                uint32_t idx = static_cast<uint32_t>(res.models.size());
+                res.models.push_back(model);
+                tag_to_model[model.tag] = idx;
+            }
+        }
+    }
+
+    auto default_it = tag_to_model.find(res.default_material);
+    if (default_it == tag_to_model.end()) {
+        throw ConfigError("default_material '" + res.default_material + "' is not defined");
+    }
+    const uint32_t default_idx = default_it->second;
+
+    const size_t n_tris = mesh.triangles.size();
+    res.facet_material_indices.resize(n_tris, default_idx);
+
+    bool had_untagged = false;
+    std::set<std::string> unmatched_tags;
+
+    for (size_t t = 0; t < n_tris; ++t) {
+        const std::string& tag = (t < mesh.triangle_tags.size()) ? mesh.triangle_tags[t] : "";
+        if (tag.empty()) {
+            if (res.tag_coverage == "strict") {
+                throw ConfigError("mesh contains untagged facet(s) under strict material tag coverage");
+            }
+            had_untagged = true;
+            res.facet_material_indices[t] = default_idx;
+        } else {
+            auto it = tag_to_model.find(tag);
+            if (it != tag_to_model.end()) {
+                res.facet_material_indices[t] = it->second;
+            } else {
+                if (res.tag_coverage == "strict") {
+                    throw ConfigError("mesh tag '" + tag + "' has no material definition under strict coverage");
+                }
+                unmatched_tags.insert(tag);
+                res.facet_material_indices[t] = default_idx;
+            }
+        }
+    }
+
+    if (res.tag_coverage == "warn") {
+        if (had_untagged) {
+            res.warnings.push_back("mesh contains untagged facets; using default material '" + res.default_material + "'");
+        }
+        for (const auto& ut : unmatched_tags) {
+            res.warnings.push_back("mesh tag '" + ut + "' not found in material definitions; using default material '" + res.default_material + "'");
+        }
+    }
+
+    for (size_t t = 0; t < n_tris; ++t) {
+        uint32_t idx = res.facet_material_indices[t];
+        if (res.models[idx].type != WallType::Pec) {
+            res.has_materials = true;
+            ++res.non_pec_facets;
+        }
+    }
+
+    return res;
 }
 
 } // namespace strikecem

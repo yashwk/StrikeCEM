@@ -65,10 +65,25 @@
   coated frequency tables throw, model/wall type mismatch throws,
   out-of-range table frequency throws at solve time, fringe + non-PEC
   warns (edge returns stay PEC-based). Shadowing composes (geometric
-  only). Remaining for unlock (4b/4c): per-face tag mapping in the mesh
-  loader (FR-12 forbids tag-driven behavior until it exists), then the
-  materials schema block with the tag-coverage policy, provenance, and
-  estimator treatment.
+  only).
+- Slice 4b (done): per-face tag mapping in mesh loader (`triangle_tags`
+  in `ObjMesh` and `NormalizedMesh`). OBJ groups/objects (`g`/`o`) map
+  directly to per-facet string tags. Mesh disk cache format updated
+  to `SCEMMESH05` storing dictionary strings and indices prior to binary
+  vertex payload, preserving cache validation. Mesh repair preserves
+  and cleans tags consistently with surviving triangles.
+- Slice 4c (done): schema unlock, provenance, estimator, and multi-material
+  solver integration. The `materials` block in `config.schema.json` defines
+  `default_material`, `tag_coverage` (`strict`, `warn`, `allow_untagged`),
+  and material `definitions` (dielectric tables, coated layers, PEC).
+  The runtime estimator advises that material surfaces are excluded
+  from benchmark profile calibration lower bounds. Solver loops evaluate
+  per-facet reflection coefficients ($R_{\mathrm{TE}}, R_{\mathrm{TM}}$)
+  and sum coherent scattered fields across mixed PEC and non-PEC facets.
+  Full provenance is recorded in CSV sidecar JSON (`materials` block) and
+  HDF5 root attributes (`materials_enabled`, `material_models_count`).
+  Fail-closed guards remain intact: CUDA accelerator and multi-bounce GO
+  with non-PEC facets throw explicit descriptive exceptions.
 - TE means E perpendicular to the local plane of incidence (s-pol);
   TM means E in the plane (p-pol), with Hecht's reflected-basis sign
   ($R_{\mathrm{TM}} = -R_{\mathrm{TE}}$ at normal incidence; PEC limit

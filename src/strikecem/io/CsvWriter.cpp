@@ -40,7 +40,8 @@ std::string hostname() {
 
 void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                            const NormalizedMesh& mesh, const PoResult& result,
-                           const DesignerIdentity& designer, const FringeOptions& fringe) {
+                           const DesignerIdentity& designer, const FringeOptions& fringe,
+                           const MaterialOptions& material) {
     const auto& output = rc.value["output"];
     const fs::path csv_path(output["path"].get<std::string>());
     const int precision = output["precision"].get<int>();
@@ -93,6 +94,9 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                          {"shadowing", rc.value["solver"]["po_options"].value("shadowing", false)},
                          {"max_bounces", rc.value["solver"]["po_options"].value("max_bounces", 1)},
                          {"bounce_chains", result.chains_fired},
+                         {"materials", {{"enabled", material.enabled},
+                                        {"tag_coverage", rc.value.contains("materials") ? rc.value["materials"].value("tag_coverage", "none") : "none"},
+                                        {"models_count", material.models.size()}}},
                          {"deterministic", rc.value["execution"]["deterministic"]},
                          {"backend", rc.value["execution"].value("accelerator", "cpu")},
                          {"device", cuda::active_device_name(rc.value)}};

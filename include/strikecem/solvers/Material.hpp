@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "strikecem/solvers/Fresnel.hpp"
 
 namespace strikecem {
@@ -41,5 +43,21 @@ struct CoatedResult {
 CoatedResult coated_pec_reflection(const ComplexMedium& incident,
                                    const std::vector<CoatingLayer>& outer_to_pec,
                                    double cos_theta_i, double wavelength_m);
+
+MaterialModel material_from_json(const nlohmann::json& j);
+
+struct NormalizedMesh;
+
+struct ResolvedMaterials {
+    bool has_materials = false;
+    std::string tag_coverage = "warn";
+    std::string default_material = "pec";
+    std::vector<MaterialModel> models;
+    std::vector<uint32_t> facet_material_indices;
+    std::vector<std::string> warnings;
+    size_t non_pec_facets = 0;
+};
+
+ResolvedMaterials resolve_materials(const nlohmann::json& resolved, const NormalizedMesh& mesh);
 
 } // namespace strikecem

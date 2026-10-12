@@ -191,4 +191,80 @@ TEST(Mesh, CorruptCacheDerivedDataIsRebuiltAndBadIndicesMiss) {
     EXPECT_EQ(fallback.areas, first.areas);
 }
 
+TEST(Mesh, ObjGroupsPopulateTriangleTags) {
+    const fs::path tmp = fs::temp_directory_path() / "scem_tagged_mesh.obj";
+    {
+        std::ofstream out(tmp);
+        out << "v 0 0 0\n"
+            << "v 1 0 0\n"
+            << "v 0 1 0\n"
+            << "v 1 1 0\n"
+            << "g fin_left\n"
+            << "f 1 2 3\n"
+            << "g fin_right\n"
+            << "f 2 4 3\n";
+    }
+    const auto obj = strikecem::parse_obj(tmp);
+    ASSERT_EQ(obj.triangles.size(), 2u);
+    ASSERT_EQ(obj.groups.size(), 2u);
+    EXPECT_EQ(obj.groups[0], "fin_left");
+    EXPECT_EQ(obj.groups[1], "fin_right");
+    ASSERT_EQ(obj.triangle_tags.size(), 2u);
+    EXPECT_EQ(obj.triangle_tags[0], "fin_left");
+    EXPECT_EQ(obj.triangle_tags[1], "fin_right");
+    std::error_code ec;
+    fs::remove(tmp, ec);
+}
+
+TEST(Mesh, LoadNormalizedMeshPreservesTagsAndCache) {
+    const fs::path dir = fs::temp_directory_path() / "scem_mesh_tags_cache";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() {
+            std::error_code ec;
+            fs::remove_all(path, ec);
+        }
+    } cleanup{dir};
+    const fs::path mesh_path = dir / "two_fins.obj";
+    {
+        std::ofstream out(mesh_path);
+        out << "v 0 0 0\n"
+            << "v 1 0 0\n"
+            << "v 0 1 0\n"
+            << "v 1 1 0\n"
+            << "g fin_left\n"
+            << "f 1 2 3\n"
+            << "g fin_right\n"
+            << "f 2 4 3\n";
+    }
+    nlohmann::json config;
+    {
+        std::ifstream in(fixture("valid_minimal.json"));
+        in >> config;
+    }
+    config["model"]["path"] = mesh_path.string();
+    config["output"]["path"] = (dir / "out.h5").string();
+    config["mesh"]["cache_dir"] = "cache";
+    const fs::path config_path = dir / "config.json";
+    {
+        std::ofstream out(config_path);
+        out << config.dump(2);
+    }
+    const auto rc = strikecem::load_config(config_path.string(), SCEM_SCHEMA_PATH);
+    const auto first = strikecem::load_normalized_mesh(rc.value, dir, rc.schema_version);
+    ASSERT_EQ(first.triangle_tags.size(), 2u);
+    EXPECT_EQ(first.triangle_tags[0], "fin_left");
+    EXPECT_EQ(first.triangle_tags[1], "fin_right");
+    EXPECT_FALSE(first.cache_hit);
+
+    const auto cached = strikecem::load_normalized_mesh(rc.value, dir, rc.schema_version);
+    EXPECT_TRUE(cached.cache_hit);
+    ASSERT_EQ(cached.triangle_tags.size(), 2u);
+    EXPECT_EQ(cached.triangle_tags[0], "fin_left");
+    EXPECT_EQ(cached.triangle_tags[1], "fin_right");
+}
+
 } // namespace

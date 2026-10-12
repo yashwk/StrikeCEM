@@ -18,6 +18,7 @@ namespace strikecem {
 void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                            const NormalizedMesh& mesh, const PoResult& result,
                            const DesignerIdentity& designer = {},
-                           const FringeOptions& fringe = {});
+                           const FringeOptions& fringe = {},
+                           const MaterialOptions& material = {});
 
 } // namespace strikecem

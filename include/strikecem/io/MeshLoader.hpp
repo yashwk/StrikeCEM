@@ -24,6 +24,7 @@ std::vector<RawTriangle> parse_stl(const std::filesystem::path& path);
 struct ObjMesh {
     std::vector<RawTriangle> triangles;
     std::vector<std::string> groups;
+    std::vector<std::string> triangle_tags;
 };
 ObjMesh parse_obj(const std::filesystem::path& path);
 
@@ -50,6 +51,7 @@ struct NormalizedMesh {
     std::vector<geom::Vec3d> normals;
     std::vector<double> areas;
     std::vector<std::string> groups;
+    std::vector<std::string> triangle_tags;
     MeshReport report;
     bool repaired = false;
     MeshReport report_before; // valid only when repaired

@@ -176,9 +176,9 @@ std::string hash_normalized(const BuiltMesh& m) {
     return sha256_hex(bytes);
 }
 
-// Cache layout v3: magic + key-input echo + counts + mesh hash +
-// repair metadata + payload.
-constexpr char kMagic[] = "SCEMMESH04";
+// Cache layout v5: magic + key-input echo + counts + mesh hash +
+// repair metadata + groups + tag dict/indices + payload.
+constexpr char kMagic[] = "SCEMMESH05";
 
 void append_u64(std::string& out, uint64_t v) {
     out.append(reinterpret_cast<const char*>(&v), sizeof(v));
@@ -303,6 +303,26 @@ bool try_load_cache(const std::string& key, const std::string& key_echo,
             groups.emplace_back(p, static_cast<size_t>(len));
             p += static_cast<size_t>(len);
         }
+        const uint64_t ntag_dict = take_u64(p, end, "tag dict count");
+        if (ntag_dict > 100'000) return false;
+        std::vector<std::string> tag_dict;
+        for (uint64_t i = 0; i < ntag_dict; ++i) {
+            const uint64_t len = take_u64(p, end, "tag name");
+            if (len > 4096 || len > static_cast<uint64_t>(end - p)) return false;
+            tag_dict.emplace_back(p, static_cast<size_t>(len));
+            p += static_cast<size_t>(len);
+        }
+        const uint64_t ntag_indices = take_u64(p, end, "tag indices count");
+        if (ntag_indices != ntris) return false;
+        if (static_cast<size_t>(end - p) < ntris * sizeof(uint32_t)) return false;
+        std::vector<uint32_t> tag_indices(static_cast<size_t>(ntris));
+        std::memcpy(tag_indices.data(), p, static_cast<size_t>(ntris) * sizeof(uint32_t));
+        p += static_cast<size_t>(ntris) * sizeof(uint32_t);
+        std::vector<std::string> cached_tags(static_cast<size_t>(ntris));
+        for (size_t i = 0; i < ntris; ++i) {
+            if (tag_indices[i] >= tag_dict.size()) return false;
+            cached_tags[i] = tag_dict[tag_indices[i]];
+        }
         if (nverts == 0 || ntris == 0 || nverts > 100'000'000 || ntris > 100'000'000 ||
             nverts > std::numeric_limits<size_t>::max() ||
             ntris > std::numeric_limits<size_t>::max())
@@ -361,6 +381,7 @@ bool try_load_cache(const std::string& key, const std::string& key_echo,
         cached.areas = std::move(rebuilt.areas);
         cached.report = rebuilt.report;
         cached.groups = std::move(groups);
+        cached.triangle_tags = std::move(cached_tags);
         cached.normalized_mesh_hash = stored_hash;
         cached.geometry_hash = key;
         cached.repaired = (repaired_flag != 0);
@@ -391,6 +412,30 @@ void store_cache(const std::string& key, const std::string& key_echo, const fs::
     for (const auto& g : mesh.groups) {
         append_u64(bytes, g.size());
         bytes += g;
+    }
+    std::vector<std::string> tag_dict;
+    std::map<std::string, uint32_t> tag_map;
+    auto get_tag_id = [&](const std::string& s) -> uint32_t {
+        auto it = tag_map.find(s);
+        if (it != tag_map.end()) return it->second;
+        uint32_t id = static_cast<uint32_t>(tag_dict.size());
+        tag_dict.push_back(s);
+        tag_map[s] = id;
+        return id;
+    };
+    std::vector<uint32_t> tag_indices(mesh.triangle_tags.size());
+    for (size_t i = 0; i < mesh.triangle_tags.size(); ++i) {
+        tag_indices[i] = get_tag_id(mesh.triangle_tags[i]);
+    }
+    append_u64(bytes, tag_dict.size());
+    for (const auto& tag : tag_dict) {
+        append_u64(bytes, tag.size());
+        bytes += tag;
+    }
+    append_u64(bytes, tag_indices.size());
+    if (!tag_indices.empty()) {
+        bytes.append(reinterpret_cast<const char*>(tag_indices.data()),
+                     tag_indices.size() * sizeof(uint32_t));
     }
     bytes.append(reinterpret_cast<const char*>(mesh.vertices.data()),
                  mesh.vertices.size() * sizeof(geom::Vec3d));
@@ -477,6 +522,7 @@ ObjMesh parse_obj(const fs::path& path) {
     std::vector<geom::Vec3d> verts;
     ObjMesh mesh;
     std::string line;
+    std::string current_group;
     while (std::getline(in, line)) {
         std::istringstream ls(line);
         std::string tag;
@@ -488,9 +534,11 @@ ObjMesh parse_obj(const fs::path& path) {
             verts.push_back(v);
         } else if (tag == "g" || tag == "o") {
             std::string name;
-            if (ls >> name &&
-                std::find(mesh.groups.begin(), mesh.groups.end(), name) == mesh.groups.end())
-                mesh.groups.push_back(name);
+            if (ls >> name) {
+                current_group = name;
+                if (std::find(mesh.groups.begin(), mesh.groups.end(), name) == mesh.groups.end())
+                    mesh.groups.push_back(name);
+            }
         } else if (tag == "f") {
             std::vector<geom::Vec3d> face;
             std::string token;
@@ -502,8 +550,10 @@ ObjMesh parse_obj(const fs::path& path) {
             if (face.size() < 3)
                 throw MeshLoadError("OBJ face with fewer than 3 vertices in " + path.string());
             // Fan triangulation for polygonal faces.
-            for (size_t i = 1; i + 1 < face.size(); ++i)
+            for (size_t i = 1; i + 1 < face.size(); ++i) {
                 mesh.triangles.push_back({face[0], face[i], face[i + 1]});
+                mesh.triangle_tags.push_back(current_group);
+            }
         }
     }
     return mesh;
@@ -538,6 +588,7 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
 
     const std::string lower = rel;
     std::vector<RawTriangle> raw;
+    std::vector<std::string> tags;
     auto ends_with = [&](const char* ext) {
         const size_t n = std::strlen(ext);
         if (lower.size() < n) return false;
@@ -547,10 +598,12 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
     try {
         if (ends_with(".stl")) {
             raw = parse_stl(mesh_path);
+            tags.assign(raw.size(), "");
         } else if (ends_with(".obj")) {
             ObjMesh obj = parse_obj(mesh_path);
             raw = std::move(obj.triangles);
             mesh.groups = std::move(obj.groups);
+            tags = std::move(obj.triangle_tags);
         } else {
             throw MeshLoadError("unsupported mesh extension (v1 accepts .stl/.obj): " + rel);
         }
@@ -587,12 +640,19 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
     if (repair == "repair") {
         mesh.report_before = built.report;
         std::vector<RawTriangle> kept;
+        std::vector<std::string> kept_tags;
         kept.reserve(raw.size());
-        for (const auto& tri : raw)
-            if (geom::triangleArea(tri.a, tri.b, tri.c) != 0.0) kept.push_back(tri);
+        kept_tags.reserve(tags.size());
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (geom::triangleArea(raw[i].a, raw[i].b, raw[i].c) != 0.0) {
+                kept.push_back(raw[i]);
+                if (i < tags.size()) kept_tags.push_back(tags[i]);
+            }
+        }
         if (kept.size() != raw.size()) {
             mesh.repaired = true;
             built = build_mesh(kept, max_ar);
+            tags = std::move(kept_tags);
         }
         if (built.report.nonmanifold_edge_count > 0)
             throw MeshLoadError("repair could not resolve non-manifold edges");
@@ -608,6 +668,7 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
     mesh.triangles = std::move(built.triangles);
     mesh.normals = std::move(built.normals);
     mesh.areas = std::move(built.areas);
+    mesh.triangle_tags = std::move(tags);
     mesh.report = built.report;
     BuiltMesh check;
     check.vertices = mesh.vertices;

@@ -120,6 +120,20 @@ ResourceEstimate estimate_resources(const nlohmann::json& resolved, const Sample
         resolved["solver"]["po_options"].value("max_bounces", 1) > 1)
         est.warnings.emplace_back("GO corrections are excluded from the operation count; "
                                   "treat calibrated runtime ranges as lower bounds");
+    if (resolved.contains("materials")) {
+        const auto& mat_conf = resolved["materials"];
+        bool has_non_pec = false;
+        if (mat_conf.value("default_material", "pec") != "pec") has_non_pec = true;
+        if (mat_conf.contains("definitions")) {
+            for (const auto& d : mat_conf["definitions"]) {
+                if (d.value("type", "pec") != "pec") has_non_pec = true;
+            }
+        }
+        if (has_non_pec) {
+            est.warnings.emplace_back("material surfaces are excluded from benchmark profile calibrations; "
+                                      "treat calibrated runtime ranges as lower bounds");
+        }
+    }
     est.backend = resolved["execution"].value("accelerator", "cpu");
     if (est.backend == "cuda") est.device_bytes = cuda::cuda_footprint_bytes(resolved, tris);
 

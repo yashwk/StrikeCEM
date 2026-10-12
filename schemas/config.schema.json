@@ -169,6 +169,81 @@
         "include_metadata": {"const": true, "default": true, "description": "Provenance metadata is always written in v1."}
       }
     },
+    "materials": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_material": {"type": "string", "default": "pec"},
+        "tag_coverage": {
+          "type": "string",
+          "enum": ["strict", "warn", "allow_untagged"],
+          "default": "warn"
+        },
+        "definitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["tag", "type"],
+            "additionalProperties": false,
+            "properties": {
+              "tag": {"type": "string", "minLength": 1},
+              "type": {"type": "string", "enum": ["pec", "dielectric", "coated"]},
+              "frequency_table": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["frequency_hz"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "frequency_hz": {"type": "number", "exclusiveMinimum": 0},
+                    "epsilon_r": {
+                      "oneOf": [
+                        {"type": "number"},
+                        {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "number"}}
+                      ],
+                      "default": 1.0
+                    },
+                    "mu_r": {
+                      "oneOf": [
+                        {"type": "number"},
+                        {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "number"}}
+                      ],
+                      "default": 1.0
+                    },
+                    "sigma": {"type": "number", "minimum": 0, "default": 0.0}
+                  }
+                }
+              },
+              "layers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["thickness_m"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "thickness_m": {"type": "number", "exclusiveMinimum": 0},
+                    "epsilon_r": {
+                      "oneOf": [
+                        {"type": "number"},
+                        {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "number"}}
+                      ],
+                      "default": 1.0
+                    },
+                    "mu_r": {
+                      "oneOf": [
+                        {"type": "number"},
+                        {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "number"}}
+                      ],
+                      "default": 1.0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "run": {
       "type": "object",
       "additionalProperties": false,

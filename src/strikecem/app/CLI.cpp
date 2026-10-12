@@ -15,6 +15,7 @@
 #include "strikecem/io/MeshLoader.hpp"
 #include "strikecem/runtime/Estimate.hpp"
 #include "strikecem/solvers/GpuPO.hpp"
+#include "strikecem/solvers/Material.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
 namespace strikecem::cli {
@@ -90,6 +91,8 @@ int cmd_validate(const ResolvedConfig& rc, const std::string& config_path) {
     for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
     NormalizedMesh mesh =
         load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+    const ResolvedMaterials resolved_mat = resolve_materials(rc.value, mesh);
+    for (const auto& w : resolved_mat.warnings) std::cerr << "strikecem: warning: " << w << "\n";
     std::cout << "scem_schema_version: " << rc.schema_version << "\n";
     std::cout << "resolved_config_hash: " << rc.hash << "\n";
     std::cout << "model: " << rc.value["model"]["path"].get<std::string>() << "\n";
@@ -199,6 +202,13 @@ int run(int argc, char** argv) {
         for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         NormalizedMesh mesh =
             load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+        const ResolvedMaterials resolved_mat = resolve_materials(rc.value, mesh);
+        for (const auto& w : resolved_mat.warnings) std::cerr << "strikecem: warning: " << w << "\n";
+        MaterialOptions material;
+        material.enabled = rc.value.contains("materials") || resolved_mat.has_materials;
+        material.models = resolved_mat.models;
+        material.facet_material_indices = resolved_mat.facet_material_indices;
+
         EdgeModel edge_model;
         FringeOptions fringe;
         if (rc.value["solver"]["po_options"].value("edge_correction", "none") == "fringe") {
@@ -227,7 +237,7 @@ int run(int argc, char** argv) {
                 fs::absolute(out_path).lexically_normal())
                 throw ConfigError("run.resume_from_checkpoint must equal output.path");
             const auto solve_start = std::chrono::steady_clock::now();
-            const size_t solved = resume_hdf5_output(rc, plan, mesh, checkpoint, fringe, go);
+            const size_t solved = resume_hdf5_output(rc, plan, mesh, checkpoint, fringe, go, material);
             const double solve_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start)
                     .count();
@@ -251,14 +261,14 @@ int run(int argc, char** argv) {
             }
         }
         const auto solve_start = std::chrono::steady_clock::now();
-        PoResult result = solve_po(mesh, plan, rc.value, fringe, go);
+        PoResult result = solve_po(mesh, plan, rc.value, fringe, go, material);
         const double solve_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (format == "csv")
-            write_csv_and_sidecar(rc, plan, mesh, result, designer, fringe);
+            write_csv_and_sidecar(rc, plan, mesh, result, designer, fringe, material);
         else
-            write_hdf5_output(rc, plan, mesh, result, designer, fringe);
+            write_hdf5_output(rc, plan, mesh, result, designer, fringe, material);
         if (!bench_profile.empty())
             write_benchmark_profile(bench_profile, rc, mesh.report.triangle_count,
                                     plan.sample_count(), solve_seconds,
