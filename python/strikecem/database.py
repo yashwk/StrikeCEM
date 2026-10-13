@@ -1,10 +1,17 @@
 from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import List, Optional, Sequence, Union, Any
 
 from .bindings import load_bindings, ScemQueryResult, ScemQueryRequest
 from .errors import raise_for_status, DesignMismatchError
+
+class InterpolationMode(IntEnum):
+    NEAREST = 0
+    LINEAR = 1
+    BICUBIC = 2
+    SPHERICAL = 3
 
 @dataclass(frozen=True)
 class QueryResult:
@@ -127,9 +134,43 @@ class Database:
         raise_for_status(status)
         return [arr[i].value.decode("utf-8") for i in range(count.value)]
 
-    def query(self, az_deg: float, el_deg: float, freq_hz: float, pol: str) -> QueryResult:
+    @property
+    def interpolation_mode(self) -> InterpolationMode:
+        """Gets current interpolation mode for queries."""
+        self._check_open()
+        mode_val = ctypes.c_int(0)
+        status = self._lib.scem_database_get_interpolation_mode(self._handle, ctypes.byref(mode_val))
+        raise_for_status(status)
+        return InterpolationMode(mode_val.value)
+
+    @interpolation_mode.setter
+    def interpolation_mode(self, mode: Union[InterpolationMode, int]) -> None:
+        """Sets interpolation mode (Nearest, Linear, Bicubic, or Spherical)."""
+        self._check_open()
+        status = self._lib.scem_database_set_interpolation_mode(self._handle, int(mode))
+        if status != 0:
+            err = self._lib.scem_get_last_error()
+            msg = err.decode("utf-8") if err else "Failed to set interpolation mode"
+            raise_for_status(status, msg)
+
+    def query(
+        self,
+        az_deg: float,
+        el_deg: float,
+        freq_hz: float,
+        pol: str,
+        interpolation_mode: Optional[Union[InterpolationMode, int]] = None
+    ) -> QueryResult:
         """Queries interpolated RCS at a given angle, frequency, and polarization channel."""
         self._check_open()
+        if interpolation_mode is not None:
+            prev_mode = self.interpolation_mode
+            self.interpolation_mode = interpolation_mode
+            try:
+                return self.query(az_deg, el_deg, freq_hz, pol)
+            finally:
+                self.interpolation_mode = prev_mode
+
         res = ScemQueryResult()
         status = self._lib.scem_database_query(
             self._handle,
@@ -150,9 +191,21 @@ class Database:
             rcs_dbsm=res.rcs_dbsm,
         )
 
-    def query_batch(self, requests: Sequence[Union[QueryRequest, tuple]]) -> List[QueryResult]:
+    def query_batch(
+        self,
+        requests: Sequence[Union[QueryRequest, tuple]],
+        interpolation_mode: Optional[Union[InterpolationMode, int]] = None
+    ) -> List[QueryResult]:
         """Queries multiple trajectory points in a single high-throughput vectorized C call."""
         self._check_open()
+        if interpolation_mode is not None:
+            prev_mode = self.interpolation_mode
+            self.interpolation_mode = interpolation_mode
+            try:
+                return self.query_batch(requests)
+            finally:
+                self.interpolation_mode = prev_mode
+
         n = len(requests)
         if n == 0:
             return []

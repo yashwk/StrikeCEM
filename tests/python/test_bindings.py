@@ -8,6 +8,7 @@ from strikecem import (
     Database,
     QueryResult,
     QueryRequest,
+    InterpolationMode,
     find_library,
     ChannelNotFoundError,
     DesignMismatchError,
@@ -163,6 +164,34 @@ class TestStrikeCemPythonSdk(unittest.TestCase):
     def test_11_nonexistent_file(self):
         with self.assertRaises((DatabaseOpenError, DatabaseCorruptError)):
             Database.open("/nonexistent/path/db.scem")
+
+    def test_12_interpolation_modes(self):
+        with Database.open(str(self.scem_db_path)) as db:
+            # Default should be BICUBIC
+            self.assertEqual(db.interpolation_mode, InterpolationMode.BICUBIC)
+
+            # Change to LINEAR
+            db.interpolation_mode = InterpolationMode.LINEAR
+            self.assertEqual(db.interpolation_mode, InterpolationMode.LINEAR)
+
+            # Change to NEAREST
+            db.interpolation_mode = InterpolationMode.NEAREST
+            self.assertEqual(db.interpolation_mode, InterpolationMode.NEAREST)
+
+            # Change to SPHERICAL
+            db.interpolation_mode = InterpolationMode.SPHERICAL
+            self.assertEqual(db.interpolation_mode, InterpolationMode.SPHERICAL)
+
+    def test_13_query_with_mode_override(self):
+        with Database.open(str(self.scem_db_path)) as db:
+            # Test exact grid query
+            r_bicubic = db.query(az_deg=0.0, el_deg=-90.0, freq_hz=10e9, pol="HH", interpolation_mode=InterpolationMode.BICUBIC)
+            r_linear = db.query(az_deg=0.0, el_deg=-90.0, freq_hz=10e9, pol="HH", interpolation_mode=InterpolationMode.LINEAR)
+            self.assertAlmostEqual(r_bicubic.rcs_sqm, r_linear.rcs_sqm, places=7)
+
+            # Test interpolated query
+            r_interp = db.query(az_deg=15.0, el_deg=-90.0, freq_hz=10e9, pol="HH", interpolation_mode=InterpolationMode.BICUBIC)
+            self.assertGreater(r_interp.rcs_sqm, 0.0)
 
 if __name__ == "__main__":
     unittest.main()

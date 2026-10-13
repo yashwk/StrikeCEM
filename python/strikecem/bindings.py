@@ -103,6 +103,12 @@ def load_bindings(lib_path: Optional[str] = None) -> ctypes.CDLL:
     ]
     lib.scem_database_query_batch.restype = ctypes.c_int
 
+    lib.scem_database_set_interpolation_mode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.scem_database_set_interpolation_mode.restype = ctypes.c_int
+
+    lib.scem_database_get_interpolation_mode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    lib.scem_database_get_interpolation_mode.restype = ctypes.c_int
+
     lib.scem_get_last_error.argtypes = []
     lib.scem_get_last_error.restype = ctypes.c_char_p
 

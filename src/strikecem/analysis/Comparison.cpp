@@ -158,7 +158,8 @@ std::string render_ascii_cut(const DatabaseCut& cut, int width) {
         max_val = std::max(max_val, s.rcs_dbsm);
     }
 
-    if (max_val <= min_val) max_val = min_val + 1.0;
+    const bool is_flat = (max_val - min_val < 1e-6);
+    if (is_flat) max_val = min_val + 1.0;
 
     std::ostringstream ss;
     ss << "=== 1D " << cut.cut_type << " Cut at " << cut.fixed_angle_deg
@@ -166,7 +167,7 @@ std::string render_ascii_cut(const DatabaseCut& cut, int width) {
     ss << "Range: [" << std::fixed << std::setprecision(1) << min_val << " dBsm, " << max_val << " dBsm]\n\n";
 
     for (const auto& s : cut.samples) {
-        const double norm = std::clamp((s.rcs_dbsm - min_val) / (max_val - min_val), 0.0, 1.0);
+        const double norm = is_flat ? 0.5 : std::clamp((s.rcs_dbsm - min_val) / (max_val - min_val), 0.0, 1.0);
         const int bar_len = static_cast<int>(norm * width);
 
         ss << std::setw(6) << std::fixed << std::setprecision(1) << s.angle_deg << " deg | "

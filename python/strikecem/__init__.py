@@ -1,7 +1,7 @@
 """StrikeCEM Python SDK: Real-Time Radar Cross Section (RCS) Query Engine."""
 
 from .bindings import find_library
-from .database import Database, QueryResult, QueryRequest
+from .database import Database, QueryResult, QueryRequest, InterpolationMode
 from .errors import (
     StrikeCemError,
     InvalidArgumentError,
@@ -18,6 +18,7 @@ __all__ = [
     "Database",
     "QueryResult",
     "QueryRequest",
+    "InterpolationMode",
     "find_library",
     "StrikeCemError",
     "InvalidArgumentError",

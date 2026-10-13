@@ -67,6 +67,17 @@ SCEM_API scem_status_t scem_database_query(scem_database_t* db, double az_deg, d
 
 SCEM_API scem_status_t scem_database_query_batch(scem_database_t* db, const scem_query_request_t* requests, size_t count, scem_query_result_t* out_results);
 
+typedef enum {
+    SCEM_INTERP_NEAREST = 0,
+    SCEM_INTERP_LINEAR = 1,
+    SCEM_INTERP_BICUBIC = 2,
+    SCEM_INTERP_SPHERICAL = 3
+} scem_interpolation_mode_t;
+
+SCEM_API scem_status_t scem_database_set_interpolation_mode(scem_database_t* db, scem_interpolation_mode_t mode);
+
+SCEM_API scem_status_t scem_database_get_interpolation_mode(scem_database_t* db, scem_interpolation_mode_t* out_mode);
+
 SCEM_API const char* scem_get_last_error(void);
 
 #ifdef __cplusplus

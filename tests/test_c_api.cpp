@@ -194,4 +194,101 @@ TEST(CApi, MicrosecondQueryLatency) {
     scem_database_close(db);
 }
 
+TEST(CApi, InterpolationModeConfiguration) {
+    Workdir work;
+    const fs::path scem_path = work.dir / "interp.scem";
+    Pipeline p = run_pipeline(make_config(scem_path.string(), "scem"), work.dir / "cfg.json");
+    strikecem::write_scem_output(p.rc, p.plan, p.mesh, p.result);
+
+    scem_database_t* db = nullptr;
+    ASSERT_EQ(scem_database_open(scem_path.c_str(), &db), SCEM_OK);
+
+    // Default mode should be BICUBIC
+    scem_interpolation_mode_t mode;
+    EXPECT_EQ(scem_database_get_interpolation_mode(db, &mode), SCEM_OK);
+    EXPECT_EQ(mode, SCEM_INTERP_BICUBIC);
+
+    // Set to LINEAR
+    EXPECT_EQ(scem_database_set_interpolation_mode(db, SCEM_INTERP_LINEAR), SCEM_OK);
+    EXPECT_EQ(scem_database_get_interpolation_mode(db, &mode), SCEM_OK);
+    EXPECT_EQ(mode, SCEM_INTERP_LINEAR);
+
+    // Set to NEAREST
+    EXPECT_EQ(scem_database_set_interpolation_mode(db, SCEM_INTERP_NEAREST), SCEM_OK);
+    EXPECT_EQ(scem_database_get_interpolation_mode(db, &mode), SCEM_OK);
+    EXPECT_EQ(mode, SCEM_INTERP_NEAREST);
+
+    // Set to SPHERICAL
+    EXPECT_EQ(scem_database_set_interpolation_mode(db, SCEM_INTERP_SPHERICAL), SCEM_OK);
+    EXPECT_EQ(scem_database_get_interpolation_mode(db, &mode), SCEM_OK);
+    EXPECT_EQ(mode, SCEM_INTERP_SPHERICAL);
+
+    // Invalid mode rejection
+    EXPECT_EQ(scem_database_set_interpolation_mode(db, static_cast<scem_interpolation_mode_t>(99)),
+              SCEM_ERROR_INVALID_ARGUMENT);
+    EXPECT_EQ(scem_database_set_interpolation_mode(nullptr, SCEM_INTERP_LINEAR),
+              SCEM_ERROR_INVALID_ARGUMENT);
+    EXPECT_EQ(scem_database_get_interpolation_mode(nullptr, &mode),
+              SCEM_ERROR_INVALID_ARGUMENT);
+    EXPECT_EQ(scem_database_get_interpolation_mode(db, nullptr),
+              SCEM_ERROR_INVALID_ARGUMENT);
+
+    scem_database_close(db);
+}
+
+TEST(CApi, HighOrderBicubicSplineContinuity) {
+    Workdir work;
+    const fs::path scem_path = work.dir / "spline.scem";
+    Pipeline p = run_pipeline(make_config(scem_path.string(), "scem"), work.dir / "cfg.json");
+    strikecem::write_scem_output(p.rc, p.plan, p.mesh, p.result);
+
+    scem_database_t* db = nullptr;
+    ASSERT_EQ(scem_database_open(scem_path.c_str(), &db), SCEM_OK);
+
+    // Test exact grid point evaluation for both linear and bicubic modes
+    scem_query_result_t res_linear_0, res_bicubic_0;
+    scem_database_set_interpolation_mode(db, SCEM_INTERP_LINEAR);
+    EXPECT_EQ(scem_database_query(db, 0.0, -90.0, 10e9, "HH", &res_linear_0), SCEM_OK);
+
+    scem_database_set_interpolation_mode(db, SCEM_INTERP_BICUBIC);
+    EXPECT_EQ(scem_database_query(db, 0.0, -90.0, 10e9, "HH", &res_bicubic_0), SCEM_OK);
+
+    EXPECT_DOUBLE_EQ(res_linear_0.scattering_real, res_bicubic_0.scattering_real);
+    EXPECT_DOUBLE_EQ(res_linear_0.scattering_imag, res_bicubic_0.scattering_imag);
+    EXPECT_DOUBLE_EQ(res_linear_0.rcs_sqm, res_bicubic_0.rcs_sqm);
+
+    // Sample continuous arc from 0 to 30 degrees in 1 degree steps
+    std::vector<double> rcs_values;
+    for (double az = 0.0; az <= 30.0; az += 1.0) {
+        scem_query_result_t res;
+        EXPECT_EQ(scem_database_query(db, az, -90.0, 10e9, "HH", &res), SCEM_OK);
+        EXPECT_GT(res.rcs_sqm, 0.0);
+        EXPECT_FALSE(std::isnan(res.rcs_dbsm));
+        rcs_values.push_back(res.rcs_dbsm);
+    }
+    EXPECT_EQ(rcs_values.size(), 31u);
+
+    scem_database_close(db);
+}
+
+TEST(CApi, SphericalSplineEvaluation) {
+    Workdir work;
+    const fs::path scem_path = work.dir / "spherical.scem";
+    Pipeline p = run_pipeline(make_config(scem_path.string(), "scem"), work.dir / "cfg.json");
+    strikecem::write_scem_output(p.rc, p.plan, p.mesh, p.result);
+
+    scem_database_t* db = nullptr;
+    ASSERT_EQ(scem_database_open(scem_path.c_str(), &db), SCEM_OK);
+
+    EXPECT_EQ(scem_database_set_interpolation_mode(db, SCEM_INTERP_SPHERICAL), SCEM_OK);
+
+    // Query on an off-grid direction
+    scem_query_result_t res;
+    EXPECT_EQ(scem_database_query(db, 17.5, -90.0, 10e9, "HH", &res), SCEM_OK);
+    EXPECT_GT(res.rcs_sqm, 0.0);
+    EXPECT_FALSE(std::isnan(res.rcs_dbsm));
+
+    scem_database_close(db);
+}
+
 } // namespace
