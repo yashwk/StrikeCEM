@@ -16,6 +16,7 @@
 
 #include "strikecem/solvers/Projection.hpp"
 #include "strikecem/geometry/Symmetry.hpp"
+#include "strikecem/solvers/Curvature.hpp"
 
 #include "strikecem/solvers/GpuPO.hpp"
 
@@ -138,6 +139,12 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const HalfMeshResult half_result = use_symmetry ? extract_half_mesh(mesh, sym_opts) : HalfMeshResult{mesh, {}, {}};
     const NormalizedMesh& effective_mesh = use_symmetry ? half_result.mesh : mesh;
 
+    bool curvature_correction = false;
+    if (resolved.contains("solver") && resolved["solver"].contains("po_options")) {
+        curvature_correction = resolved["solver"]["po_options"].value("curvature_correction", false);
+    }
+    const std::vector<CurvatureInfo> curvatures = curvature_correction ? estimate_mesh_curvatures(mesh) : std::vector<CurvatureInfo>{};
+
     const size_t nfreq = plan.frequencies_hz.size();
     const size_t ndir = plan.directions.size();
     const size_t npol = plan.polarizations.size();
@@ -242,13 +249,21 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                 }
             }
 
+            C curv_c{Real(1), Real(0)};
+            if (curvature_correction && mat_t < curvatures.size() && !curvatures[mat_t].is_discontinuous) {
+                const auto c_fac = po_curvature_factor(curvatures[mat_t].mean_curvature,
+                                                       static_cast<double>(k),
+                                                       static_cast<double>(dot(n, to_inc)));
+                curv_c = C(static_cast<Real>(c_fac.real()), static_cast<Real>(c_fac.imag()));
+            }
+
             if (facet_wall == WallType::Pec) {
                 for (int tx = 0; tx < 2; ++tx) {
                     const CVec3<Real> e_c = to_complex<Real>(tx_e[tx]);
                     CVec3<Real> h_inc = cross_c(k_hat_c, e_c);
                     for (auto& c : h_inc) c *= ein_phase / eta_r;
                     CVec3<Real> j_po = cross_c(n_c, h_inc);
-                    for (auto& c : j_po) c *= Real(2);
+                    for (auto& c : j_po) c *= Real(2) * curv_c;
                     // ADR-0001 transverse projector: r_hat x (r_hat x J).
                     const CVec3<Real> t1 = cross_c(r_hat_c, j_po);
                     const CVec3<Real> t2 = cross_c(r_hat_c, t1);
@@ -314,7 +329,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                                        e_inc, kd_d, eta_d, area_d, cd, r_te, r_tm);
                     for (int i = 0; i < 3; ++i)
                         f_tx[tx][i] += C(static_cast<Real>(df[i].real()),
-                                         static_cast<Real>(df[i].imag()));
+                                         static_cast<Real>(df[i].imag())) * curv_c;
                 }
             }
         };
@@ -602,6 +617,11 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
             throw std::invalid_argument("fringe correction enabled without an edge model");
         if (resolved["execution"].value("accelerator", "cpu") == "cuda")
             throw cuda::CudaError("fringe correction is CPU-only in v1");
+    }
+    if (resolved.contains("solver") && resolved["solver"].contains("po_options") &&
+        resolved["solver"]["po_options"].value("curvature_correction", false) &&
+        resolved["execution"].value("accelerator", "cpu") == "cuda") {
+        throw cuda::CudaError("curvature correction is CPU-only in v1");
     }
     if ((go.shadowing || go.max_bounces > 1) &&
         resolved["execution"].value("accelerator", "cpu") == "cuda")
