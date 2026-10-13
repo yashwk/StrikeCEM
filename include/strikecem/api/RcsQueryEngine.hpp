@@ -24,6 +24,7 @@ public:
     const std::string& design_id() const { return design_id_; }
     const std::string& design_revision() const { return design_revision_; }
     const std::vector<double>& frequencies() const { return frequencies_; }
+    const std::vector<Direction>& directions() const { return directions_; }
     const std::vector<std::string>& polarizations() const { return polarizations_; }
 
     bool verify_design(const std::string& expected_id, const std::string& expected_rev) const;

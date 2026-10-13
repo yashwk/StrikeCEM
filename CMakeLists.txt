@@ -77,7 +77,8 @@ add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/Mesh
         src/strikecem/distributed/Shard.cpp src/strikecem/adaptive/AdaptiveSampling.cpp
         src/strikecem/diagnostics/VtkWriter.cpp src/strikecem/io/BinaryTransport.cpp
         src/strikecem/api/RcsQueryEngine.cpp src/strikecem/sampling/SphericalSampling.cpp
-        src/strikecem/geometry/AnalyticGeometry.cpp src/strikecem/telemetry/Telemetry.cpp)
+        src/strikecem/geometry/AnalyticGeometry.cpp src/strikecem/telemetry/Telemetry.cpp
+        src/strikecem/analysis/Comparison.cpp)
 if(SCEM_HAVE_CUDA)
     target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO.cu)
     target_compile_definitions(scem_core PUBLIC SCEM_ENABLE_CUDA)
@@ -115,6 +116,13 @@ target_compile_definitions(scem_core PUBLIC
 add_executable(strikecem src/strikecem/main.cpp src/strikecem/app/CLI.cpp)
 target_link_libraries(strikecem PRIVATE scem_core)
 
+# Analysis and verification tools
+add_executable(scem_quicklook tools/scem_quicklook/main.cpp)
+target_link_libraries(scem_quicklook PRIVATE scem_core)
+
+add_executable(scem_compare tools/scem_compare/main.cpp)
+target_link_libraries(scem_compare PRIVATE scem_core)
+
 # Shared library target for later StrikeEngine integration
 add_library(strikecem_lib SHARED src/strikecem/app/CLI.cpp)
 target_link_libraries(strikecem_lib PUBLIC scem_core)
@@ -137,6 +145,7 @@ add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests
         tests/test_ray.cpp tests/test_fresnel.cpp tests/test_material.cpp tests/test_distributed.cpp
         tests/test_adaptive.cpp tests/test_vtk.cpp tests/test_binary.cpp tests/test_c_api.cpp
         tests/test_spherical.cpp tests/test_analytic.cpp tests/test_telemetry.cpp
+        tests/test_analysis.cpp
         src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE
@@ -169,7 +178,7 @@ target_compile_definitions(scem_tests PRIVATE
         SCEM_SCHEMA_INSTALL_RELATIVE_PATH="${SCEM_SCHEMA_INSTALL_RELATIVE_PATH}"
         SCEM_SOURCE_SCHEMA_PATH="${SCEM_SOURCE_SCHEMA_PATH}")
 
-install(TARGETS strikecem strikecem_lib
+install(TARGETS strikecem scem_quicklook scem_compare strikecem_lib
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
