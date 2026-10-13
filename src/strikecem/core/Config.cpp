@@ -59,6 +59,7 @@ json resolve_defaults(const json& raw) {
     if (!physics.contains("monostatic")) physics["monostatic"] = true;
     if (!physics.contains("polarization_basis")) physics["polarization_basis"] = "linear";
     if (!physics.contains("incident_amplitude")) physics["incident_amplitude"] = 1.0;
+    if (!physics.contains("phase_reference")) physics["phase_reference"] = json::array({0.0, 0.0, 0.0});
 
     auto& angles = r["angles"];
     if (!angles.contains("deduplicate_periodic_endpoints"))

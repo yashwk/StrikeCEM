@@ -117,6 +117,13 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                "material walls; edge returns stay PEC-based");
     const double eta = kEta0 * std::sqrt(mu_r / eps_r);
     const double e0 = resolved["physics"]["incident_amplitude"].get<double>();
+    geom::Vec3d phase_ref{0.0, 0.0, 0.0};
+    if (resolved.contains("physics") && resolved["physics"].contains("phase_reference")) {
+        const auto& pr = resolved["physics"]["phase_reference"];
+        if (pr.is_array() && pr.size() == 3) {
+            phase_ref = {pr[0].get<double>(), pr[1].get<double>(), pr[2].get<double>()};
+        }
+    }
 
     const size_t nfreq = plan.frequencies_hz.size();
     const size_t ndir = plan.directions.size();
@@ -183,7 +190,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         size_t lit = 0;
         for (size_t t = 0; t < mesh.triangles.size(); ++t) {
             const auto& tri = mesh.triangles[t];
-            const Vec3<Real> centroid{
+            const Vec3<Real> world_centroid{
                 static_cast<Real>((mesh.vertices[tri[0]].x + mesh.vertices[tri[1]].x +
                                    mesh.vertices[tri[2]].x) /
                                   3.0),
@@ -198,9 +205,9 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                static_cast<Real>(mesh.normals[t].z)};
             if (!(dot(n, to_inc) > Real(0))) continue; // hard shadow: n.(-k_inc)
             if (go.shadowing) {
-                const geom::Vec3d center_d{static_cast<double>(centroid.x),
-                                           static_cast<double>(centroid.y),
-                                           static_cast<double>(centroid.z)};
+                const geom::Vec3d center_d{static_cast<double>(world_centroid.x),
+                                           static_cast<double>(world_centroid.y),
+                                           static_cast<double>(world_centroid.z)};
                 const geom::Vec3d r_hat_d{static_cast<double>(r_hat.x),
                                           static_cast<double>(r_hat.y),
                                           static_cast<double>(r_hat.z)};
@@ -210,6 +217,10 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                     continue;
             }
             ++lit;
+            const Vec3<Real> centroid{
+                world_centroid.x - static_cast<Real>(phase_ref.x),
+                world_centroid.y - static_cast<Real>(phase_ref.y),
+                world_centroid.z - static_cast<Real>(phase_ref.z)};
             const Real area = static_cast<Real>(mesh.areas[t]);
             const C ein_phase = std::exp(C(0, -k * dot(k_hat, centroid)));
             const C eout_phase = std::exp(C(0, k * dot(r_hat, centroid)));
@@ -323,7 +334,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                         std::complex<double>(static_cast<double>(tx_e[tx].x) / e0_d, 0.0),
                         std::complex<double>(static_cast<double>(tx_e[tx].y) / e0_d, 0.0),
                         std::complex<double>(static_cast<double>(tx_e[tx].z) / e0_d, 0.0)};
-                    const auto fv = fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_unit);
+                    const auto fv = fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_unit, phase_ref);
                     if (!fv) {
                         if (tx == 0) ++fringe_skipped;
                         continue;

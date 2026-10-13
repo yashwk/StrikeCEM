@@ -231,19 +231,26 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     if (units.empty()) return out;
 
     CUDA_CHECK(cudaSetDevice(device_id));
+    geom::Vec3d phase_ref{0.0, 0.0, 0.0};
+    if (resolved.contains("physics") && resolved["physics"].contains("phase_reference")) {
+        const auto& pr = resolved["physics"]["phase_reference"];
+        if (pr.is_array() && pr.size() == 3) {
+            phase_ref = {pr[0].get<double>(), pr[1].get<double>(), pr[2].get<double>()};
+        }
+    }
     const size_t ntris = mesh.triangles.size();
     std::vector<Real> h_cent(3 * ntris), h_norm(3 * ntris), h_area(ntris);
     for (size_t t = 0; t < ntris; ++t) {
         const auto& tri = mesh.triangles[t];
-        h_cent[3 * t] = static_cast<Real>((mesh.vertices[tri[0]].x + mesh.vertices[tri[1]].x +
-                                           mesh.vertices[tri[2]].x) /
-                                          3.0);
-        h_cent[3 * t + 1] = static_cast<Real>((mesh.vertices[tri[0]].y + mesh.vertices[tri[1]].y +
+        h_cent[3 * t] = static_cast<Real>(((mesh.vertices[tri[0]].x + mesh.vertices[tri[1]].x +
+                                            mesh.vertices[tri[2]].x) /
+                                           3.0) - phase_ref.x);
+        h_cent[3 * t + 1] = static_cast<Real>(((mesh.vertices[tri[0]].y + mesh.vertices[tri[1]].y +
                                                mesh.vertices[tri[2]].y) /
-                                              3.0);
-        h_cent[3 * t + 2] = static_cast<Real>((mesh.vertices[tri[0]].z + mesh.vertices[tri[1]].z +
+                                              3.0) - phase_ref.y);
+        h_cent[3 * t + 2] = static_cast<Real>(((mesh.vertices[tri[0]].z + mesh.vertices[tri[1]].z +
                                                mesh.vertices[tri[2]].z) /
-                                              3.0);
+                                              3.0) - phase_ref.z);
         h_norm[3 * t] = static_cast<Real>(mesh.normals[t].x);
         h_norm[3 * t + 1] = static_cast<Real>(mesh.normals[t].y);
         h_norm[3 * t + 2] = static_cast<Real>(mesh.normals[t].z);

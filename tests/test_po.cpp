@@ -320,4 +320,68 @@ TEST(PoSolver, MaxBouncesValidated) {
     EXPECT_NO_THROW(strikecem::solve_po(c.mesh, plan, c.rc.value, {}, three));
 }
 
+TEST(PoSolver, PhaseReferencePreservesRcsMagnitude) {
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {45.0, -45.0}}, {"HH", "VV"});
+
+    // Baseline with default phase reference [0, 0, 0]
+    const auto po_default = strikecem::solve_po(c.mesh, plan, c.rc.value);
+
+    // Solve with arbitrary non-zero phase reference
+    auto shifted_cfg = c.rc.value;
+    shifted_cfg["physics"]["phase_reference"] = {12.3, -4.5, 6.7};
+    const auto po_shifted = strikecem::solve_po(c.mesh, plan, shifted_cfg);
+
+    ASSERT_EQ(po_default.samples.size(), po_shifted.samples.size());
+    for (size_t i = 0; i < po_default.samples.size(); ++i) {
+        const auto& s_def = po_default.samples[i];
+        const auto& s_shift = po_shifted.samples[i];
+        // Monostatic RCS (magnitude in m^2) must be strictly invariant
+        EXPECT_NEAR(s_def.rcs_sqm, s_shift.rcs_sqm, 1e-9);
+
+        // Complex phase must rotate by exactly Delta phi = 2 * k * (k_hat . phase_ref)
+        const double f = plan.frequencies_hz[s_def.frequency_id];
+        const double k = 2.0 * std::numbers::pi * f / 299792458.0;
+        const geom::Vec3d pref{12.3, -4.5, 6.7};
+        const auto& dir = plan.directions[s_def.direction_id];
+        const double expected_phase_shift = 2.0 * k * geom::dot(dir.k_hat, pref);
+        const double phase_default = std::arg(s_def.scattering);
+        const double phase_shifted = std::arg(s_shift.scattering);
+        double diff = phase_shifted - (phase_default + expected_phase_shift);
+        while (diff > std::numbers::pi) diff -= 2.0 * std::numbers::pi;
+        while (diff < -std::numbers::pi) diff += 2.0 * std::numbers::pi;
+        EXPECT_NEAR(diff, 0.0, 1e-7);
+    }
+}
+
+TEST(PoSolver, TargetTranslationWithMatchingPhaseReferenceBitIdentical) {
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {30.0, -60.0}}, {"HH", "VV"});
+
+    // Baseline plate at origin
+    const auto po_origin = strikecem::solve_po(c.mesh, plan, c.rc.value);
+
+    // Plate translated by d = [5, -2, 3]
+    strikecem::NormalizedMesh translated_mesh = c.mesh;
+    const geom::Vec3d d{5.0, -2.0, 3.0};
+    for (auto& v : translated_mesh.vertices) {
+        v = v + d;
+    }
+    // Set phase reference to matching d = [5, -2, 3]
+    auto cfg_translated = c.rc.value;
+    cfg_translated["physics"]["phase_reference"] = {5.0, -2.0, 3.0};
+    const auto po_translated = strikecem::solve_po(translated_mesh, plan, cfg_translated);
+
+    ASSERT_EQ(po_origin.samples.size(), po_translated.samples.size());
+    for (size_t i = 0; i < po_origin.samples.size(); ++i) {
+        // Complex scattering must be identical to double-precision tolerance
+        EXPECT_NEAR(po_origin.samples[i].scattering.real(),
+                    po_translated.samples[i].scattering.real(), 1e-9);
+        EXPECT_NEAR(po_origin.samples[i].scattering.imag(),
+                    po_translated.samples[i].scattering.imag(), 1e-9);
+        EXPECT_NEAR(po_origin.samples[i].rcs_sqm,
+                    po_translated.samples[i].rcs_sqm, 1e-7);
+    }
+}
+
 } // namespace

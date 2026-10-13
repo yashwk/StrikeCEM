@@ -113,7 +113,15 @@
       "properties": {
         "monostatic": {"type": "boolean", "default": true},
         "polarization_basis": {"const": "linear", "default": "linear", "description": "The v1 incidence basis is fixed to linear; circular output channels are selected through polarization."},
-        "incident_amplitude": {"type": "number", "exclusiveMinimum": 0, "default": 1.0}
+        "incident_amplitude": {"type": "number", "exclusiveMinimum": 0, "default": 1.0},
+        "phase_reference": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3,
+          "default": [0.0, 0.0, 0.0],
+          "description": "Coordinate origin for electromagnetic complex phase factors: [x, y, z] in meters."
+        }
       }
     },
     "angles": {
