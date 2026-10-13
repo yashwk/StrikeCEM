@@ -21,6 +21,7 @@
 #include "strikecem/distributed/ClusterScheduler.hpp"
 #include "strikecem/solvers/Similitude.hpp"
 #include "strikecem/analysis/VehiclePreScan.hpp"
+#include "strikecem/analysis/IsarImaging.hpp"
 #include "strikecem/io/AssetBundle.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
@@ -71,6 +72,9 @@ constexpr const char* kUsage =
     "  cluster      generate HPC/cloud job scripts:\n"
     "               generate-slurm --manifest PATH --output PATH [--partition P] [--cpus N] [--time T]\n"
     "               generate-k8s   --manifest PATH --output PATH [--image IMG] [--coordinator URL] [--parallelism N]\n"
+    "  isar         generate 2D ISAR radar image (range-Doppler) from frequency-azimuth sweep\n"
+    "               options: <database.h5> [--output isar.json] [--ascii] [--pol POL] [--dyn-range DB]\n"
+    "                        [--range-samples N] [--cross-range-samples M] [--no-window] [--elevation DEG]\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -462,6 +466,41 @@ int cmd_prescan(const std::string& input_path, const std::string& report_out,
     return 0;
 }
 
+int cmd_isar(const std::string& input_path, const std::string& output_json,
+             bool print_ascii, const std::string& pol, double dyn_range,
+             size_t range_samples, size_t cross_range_samples, bool windowing,
+             double elevation) {
+    if (input_path.empty()) {
+        std::cerr << "strikecem: error: isar requires an input HDF5 database path\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+    try {
+        analysis::IsarConfig cfg;
+        cfg.polarization = pol;
+        cfg.dynamic_range_db = dyn_range;
+        cfg.range_samples = range_samples;
+        cfg.cross_range_samples = cross_range_samples;
+        cfg.windowing = windowing;
+        cfg.target_elevation_deg = elevation;
+
+        const analysis::IsarImage img = analysis::IsarProcessor::compute_from_file(input_path, cfg);
+
+        if (print_ascii || output_json.empty()) {
+            std::cout << img.to_ascii_heatmap();
+        }
+
+        if (!output_json.empty()) {
+            img.write_json(output_json);
+            std::cout << "isar_output: " << output_json << "\n";
+        }
+        std::cout << "status: ok\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "strikecem: error: ISAR processing failed: " << e.what() << "\n";
+        return static_cast<int>(ExitCode::Output);
+    }
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -507,6 +546,15 @@ int run(int argc, char** argv) {
     double scale_override = 0.0;
     std::string prescan_report;
     std::string auto_tune_config_out;
+
+    // ISAR parameters
+    bool isar_ascii = false;
+    std::string isar_pol = "HH";
+    double isar_dyn_range = 35.0;
+    size_t isar_range_samples = 64;
+    size_t isar_cross_range_samples = 64;
+    bool isar_windowing = true;
+    double isar_elevation = 0.0;
 
     std::vector<std::string> positional;
 
@@ -590,6 +638,20 @@ int run(int argc, char** argv) {
             prescan_report = args[++i];
         } else if (args[i] == "--auto-tune-config" && i + 1 < args.size()) {
             auto_tune_config_out = args[++i];
+        } else if (args[i] == "--ascii") {
+            isar_ascii = true;
+        } else if (args[i] == "--pol" && i + 1 < args.size()) {
+            isar_pol = args[++i];
+        } else if (args[i] == "--dyn-range" && i + 1 < args.size()) {
+            isar_dyn_range = std::stod(args[++i]);
+        } else if (args[i] == "--range-samples" && i + 1 < args.size()) {
+            isar_range_samples = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--cross-range-samples" && i + 1 < args.size()) {
+            isar_cross_range_samples = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--no-window") {
+            isar_windowing = false;
+        } else if (args[i] == "--elevation" && i + 1 < args.size()) {
+            isar_elevation = std::stod(args[++i]);
         } else if (args[i] == "--format" && i + 1 < args.size()) {
             mesh_format = args[++i];
         } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
@@ -615,7 +677,8 @@ int run(int argc, char** argv) {
         command != "shard" && command != "merge" && command != "vtk" &&
         command != "export-mesh" && command != "bundle" && command != "run-parallel" &&
         command != "coordinate" && command != "worker" && command != "cluster" &&
-        command != "cluster-slurm" && command != "cluster-k8s" && command != "prescan") {
+        command != "cluster-slurm" && command != "cluster-k8s" && command != "prescan" &&
+        command != "isar") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -665,6 +728,12 @@ int run(int argc, char** argv) {
         if (command == "prescan") {
             const std::string& input = positional.empty() ? "" : positional[0];
             return cmd_prescan(input, prescan_report, auto_tune_config_out, schema_path);
+        }
+        if (command == "isar") {
+            const std::string& input = positional.empty() ? "" : positional[0];
+            return cmd_isar(input, output_path, isar_ascii, isar_pol, isar_dyn_range,
+                            isar_range_samples, isar_cross_range_samples, isar_windowing,
+                            isar_elevation);
         }
 
         if (positional.size() != 1) {

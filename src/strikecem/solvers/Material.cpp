@@ -38,6 +38,12 @@ void validate_material(const MaterialModel& model) {
             throw std::invalid_argument("PEC is bare by definition");
         return;
     }
+    if (model.type == WallType::Impedance) {
+        if (model.surface_impedance.real() < -1e-12 || !std::isfinite(model.surface_impedance.real()) ||
+            !std::isfinite(model.surface_impedance.imag()))
+            throw std::invalid_argument("surface impedance real part must be non-negative and finite");
+        return;
+    }
     if (model.type == WallType::Dielectric && !model.layers.empty())
         throw std::invalid_argument("layered walls use the coated type");
     if (model.type == WallType::Coated && model.layers.empty())
@@ -134,6 +140,26 @@ CoatedResult coated_pec_reflection(const ComplexMedium& incident,
     return {r_te, r_tm};
 }
 
+ImpedanceResult impedance_reflection(const std::complex<double>& eta_s, double cos_theta_i) {
+    if (cos_theta_i < 0.0 || cos_theta_i > 1.0 || !std::isfinite(cos_theta_i))
+        throw std::invalid_argument("cos_theta_i must be in [0, 1]");
+    if (eta_s.real() < -1e-12 || !std::isfinite(eta_s.real()) || !std::isfinite(eta_s.imag()))
+        throw std::invalid_argument("surface impedance real part must be non-negative and finite");
+
+    // Leontovich surface impedance boundary condition
+    // For TE (perpendicular): r_te = (eta_s * cos_theta_i - 1) / (eta_s * cos_theta_i + 1)
+    std::complex<double> num_te = eta_s * cos_theta_i - 1.0;
+    std::complex<double> den_te = eta_s * cos_theta_i + 1.0;
+    std::complex<double> r_te = (std::abs(den_te) < 1e-14) ? std::complex<double>(-1.0, 0.0) : num_te / den_te;
+
+    // For TM (parallel): r_tm = (eta_s - cos_theta_i) / (eta_s + cos_theta_i)
+    std::complex<double> num_tm = eta_s - cos_theta_i;
+    std::complex<double> den_tm = eta_s + cos_theta_i;
+    std::complex<double> r_tm = (std::abs(den_tm) < 1e-14) ? std::complex<double>(1.0, 0.0) : num_tm / den_tm;
+
+    return {r_te, r_tm};
+}
+
 MaterialModel material_from_json(const nlohmann::json& j) {
     if (!j.contains("tag") || !j["tag"].is_string() || j["tag"].get<std::string>().empty())
         throw ConfigError("material definition requires non-empty string 'tag'");
@@ -148,6 +174,8 @@ MaterialModel material_from_json(const nlohmann::json& j) {
         m.type = WallType::Dielectric;
     } else if (type_str == "coated") {
         m.type = WallType::Coated;
+    } else if (type_str == "impedance" || type_str == "sibc") {
+        m.type = WallType::Impedance;
     } else {
         throw ConfigError("unknown material type: '" + type_str + "'");
     }
@@ -205,6 +233,17 @@ MaterialModel material_from_json(const nlohmann::json& j) {
                 layer.medium.mu_r = {1.0, 0.0};
             }
             m.layers.push_back(layer);
+        }
+    }
+
+    if (m.type == WallType::Impedance) {
+        if (j.contains("surface_impedance_ohms")) {
+            auto z = parse_complex(j["surface_impedance_ohms"], "surface_impedance_ohms");
+            m.surface_impedance = z / 376.73031346177066;
+        } else if (j.contains("normalized_impedance")) {
+            m.surface_impedance = parse_complex(j["normalized_impedance"], "normalized_impedance");
+        } else {
+            m.surface_impedance = {1.0, 0.0};
         }
     }
 

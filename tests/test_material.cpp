@@ -493,5 +493,82 @@ TEST(Material, EstimatorWarnsOnNonPec) {
     EXPECT_TRUE(saw_warning);
 }
 
+TEST(Material, ImpedanceReflectionLimits) {
+    // 1. PEC limit: eta_s = 0.0
+    auto pec = strikecem::impedance_reflection({0.0, 0.0}, 1.0);
+    EXPECT_NEAR(pec.r_te.real(), -1.0, 1e-12);
+    EXPECT_NEAR(pec.r_te.imag(), 0.0, 1e-12);
+    EXPECT_NEAR(pec.r_tm.real(), -1.0, 1e-12);
+    EXPECT_NEAR(pec.r_tm.imag(), 0.0, 1e-12);
+
+    // 2. Matched absorber limit: eta_s = 1.0 at normal incidence
+    auto ram = strikecem::impedance_reflection({1.0, 0.0}, 1.0);
+    EXPECT_NEAR(std::abs(ram.r_te), 0.0, 1e-12);
+    EXPECT_NEAR(std::abs(ram.r_tm), 0.0, 1e-12);
+
+    // 3. Oblique incidence on resistive surface: eta_s = 2.0 at 60 deg (cos_i = 0.5)
+    // r_te = (2.0 * 0.5 - 1) / (2.0 * 0.5 + 1) = (1 - 1) / (1 + 1) = 0.0! (Brewster angle for TE!)
+    auto brewster = strikecem::impedance_reflection({2.0, 0.0}, 0.5);
+    EXPECT_NEAR(std::abs(brewster.r_te), 0.0, 1e-12);
+    // r_tm = (2.0 - 0.5) / (2.0 + 0.5) = 1.5 / 2.5 = 0.6
+    EXPECT_NEAR(brewster.r_tm.real(), 0.6, 1e-12);
+}
+
+TEST(Material, ImpedanceJsonParsing) {
+    // Ohms parsing: 376.73 Ohms -> eta_s = 1.0
+    nlohmann::json j_ohms = {
+        {"tag", "ram_absorber"},
+        {"type", "impedance"},
+        {"surface_impedance_ohms", 376.73031346177066}
+    };
+    auto m_ohms = strikecem::material_from_json(j_ohms);
+    EXPECT_EQ(m_ohms.type, strikecem::WallType::Impedance);
+    EXPECT_NEAR(m_ohms.surface_impedance.real(), 1.0, 1e-6);
+    EXPECT_NEAR(m_ohms.surface_impedance.imag(), 0.0, 1e-6);
+
+    // Normalized parsing: eta = [0.8, -0.2]
+    nlohmann::json j_norm = {
+        {"tag", "sibc_skin"},
+        {"type", "sibc"},
+        {"normalized_impedance", {0.8, -0.2}}
+    };
+    auto m_norm = strikecem::material_from_json(j_norm);
+    EXPECT_EQ(m_norm.type, strikecem::WallType::Impedance);
+    EXPECT_DOUBLE_EQ(m_norm.surface_impedance.real(), 0.8);
+    EXPECT_DOUBLE_EQ(m_norm.surface_impedance.imag(), -0.2);
+}
+
+TEST(Material, ImpedanceSolveFlatPlateAbsorption) {
+    const auto rc = strikecem::load_config(std::string(SCEM_FIXTURE_DIR) + "/valid_minimal.json", SCEM_SCHEMA_PATH);
+    auto mesh = strikecem::load_normalized_mesh(rc.value, SCEM_FIXTURE_DIR, rc.schema_version);
+
+    strikecem::SamplePlan plan;
+    plan.frequencies_hz = {10e9};
+    plan.directions.push_back({0, 0.0, -90.0, strikecem::direction_from_az_el(0.0, -90.0)}); // broadside lit
+    plan.polarizations = {"HH", "VV"};
+
+    // 1. Bare PEC solve
+    strikecem::MaterialOptions mat_pec;
+    auto res_pec = strikecem::solve_po(mesh, plan, rc.value, {}, {}, mat_pec);
+    ASSERT_EQ(res_pec.samples.size(), 2u);
+    EXPECT_GT(res_pec.samples[0].rcs_sqm, 10.0);
+
+    // 2. Matched RAM absorber solve (eta = 1.0)
+    strikecem::MaterialOptions mat_ram;
+    mat_ram.enabled = true;
+    mat_ram.wall = strikecem::WallType::Impedance;
+    mat_ram.model.tag = "ideal_ram";
+    mat_ram.model.type = strikecem::WallType::Impedance;
+    mat_ram.model.surface_impedance = {1.0, 0.0};
+
+    auto res_ram = strikecem::solve_po(mesh, plan, rc.value, {}, {}, mat_ram);
+    ASSERT_EQ(res_ram.samples.size(), 2u);
+
+    // Broadside reflection should be absorbed by > 100 dB (rcs_sqm < 1e-12)
+    EXPECT_NEAR(res_ram.samples[0].rcs_sqm, 0.0, 1e-12);
+    EXPECT_NEAR(res_ram.samples[1].rcs_sqm, 0.0, 1e-12);
+}
+
 } // namespace
+
 

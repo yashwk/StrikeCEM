@@ -285,12 +285,16 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                     const FresnelResult fr = fresnel(incident, wmed, cos_i);
                     r_te = fr.r_te;
                     r_tm = fr.r_tm;
-                } else {
+                } else if (facet_wall == WallType::Coated) {
                     const double lambda_vac = kSpeedOfLight / freq;
                     const CoatedResult cr =
                         coated_pec_reflection(incident, facet_model->layers, cos_i, lambda_vac);
                     r_te = cr.r_te;
                     r_tm = cr.r_tm;
+                } else if (facet_wall == WallType::Impedance) {
+                    const auto ir = impedance_reflection(facet_model->surface_impedance, cos_i);
+                    r_te = ir.r_te;
+                    r_tm = ir.r_tm;
                 }
                 const geom::Vec3d nd{static_cast<double>(n.x), static_cast<double>(n.y),
                                      static_cast<double>(n.z)};

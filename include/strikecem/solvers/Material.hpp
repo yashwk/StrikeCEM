@@ -9,7 +9,7 @@
 
 namespace strikecem {
 
-enum class WallType { Pec, Dielectric, Coated };
+enum class WallType { Pec, Dielectric, Coated, Impedance };
 
 struct MaterialEntry {
     double frequency_hz = 0.0;
@@ -27,6 +27,7 @@ struct MaterialModel {
     WallType type = WallType::Dielectric;
     std::vector<MaterialEntry> table;
     std::vector<CoatingLayer> layers;
+    std::complex<double> surface_impedance{0.0, 0.0}; // Normalized surface impedance eta_s = Z_s / Z_0
 };
 
 void validate_material(const MaterialModel& model);
@@ -43,6 +44,13 @@ struct CoatedResult {
 CoatedResult coated_pec_reflection(const ComplexMedium& incident,
                                    const std::vector<CoatingLayer>& outer_to_pec,
                                    double cos_theta_i, double wavelength_m);
+
+struct ImpedanceResult {
+    std::complex<double> r_te;
+    std::complex<double> r_tm;
+};
+
+ImpedanceResult impedance_reflection(const std::complex<double>& eta_s, double cos_theta_i);
 
 MaterialModel material_from_json(const nlohmann::json& j);
 
