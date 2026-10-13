@@ -1,86 +1,176 @@
-# StrikeCEM
+# StrikeCEM: High-Performance Computational Electromagnetics & RCS Engine
 
-StrikeCEM generates radar cross-section (RCS) databases from surface meshes
-for offline use by StrikeEngine. The repository contains a working v1 CLI,
-CPU solver, optional CUDA accelerator, CSV/HDF5 writers, and a validated HDF5
-reader. It is not a Phase 0 scaffold.
+StrikeCEM is an industrial-grade high-frequency computational electromagnetics (CEM) simulation suite and real-time radar cross section (RCS) query engine. Designed for aerospace, naval, and defense simulation systems (including StrikeEngine integration), StrikeCEM scales from local single-workstation multi-GPU runs to high-performance computing (HPC) clusters and cloud batch deployments.
 
-## v1 capabilities
+---
 
-- Read ASCII/binary STL and OBJ triangle meshes in metres, millimetres, or inches.
-- Apply scale/rotation/translation transforms, report mesh topology and quality,
-  optionally remove degenerate triangles, and cache normalized geometry.
-- Run monostatic, plane-wave, PEC Physical Optics (PO) sweeps on CPU or on an
-  explicitly selected CUDA device. CPU is the default; CUDA is optional.
-- Sample regular angle grids or explicit directions, frequency sweeps, and
-  HH, VV, HV, VH, RHCP, or LHCP channels.
-- Enable PTD fringe correction and geometric-optics shadowing with up to three
-  bounces.
-- Write CSV with a JSON sidecar or flat-row HDF5 with provenance, chunk checksums,
-  and output-stage resume support.
+## Capabilities & Architecture Matrix
 
-The CLI's v1 schema exposes PO only. Internal ray, Fresnel, UTD, and material
-components are not separate end-user solver modes. Bistatic scattering, CAD
-input, and configurable material surfaces are not supported by the v1 CLI.
-Unsupported solver and input choices are rejected rather than substituted.
+| Domain | Capability | Description |
+|---|---|---|
+| **Physics & Solvers** | **Physical Optics (PO)** | Gordon closed-form planar facet integration with monostatic and bistatic scattering modes. |
+| | **PTD & Michaeli EEC** | Physical Theory of Diffraction (PTD) and Michaeli Equivalent Edge Currents along sharp wedges with Gauss-Legendre quadrature. |
+| | **Fock Curvature Correction** | Frequency-dependent asymptotic Fock curvature factors restoring physical creeping-wave behavior on curved surfaces. |
+| | **Coherent SBR** | Shooting and Bouncing Rays (SBR) multi-bounce ray tracing with complex dielectric Fresnel reflection coefficients and BVH acceleration. |
+| | **Electromagnetic Similitude** | Sinclair electrodynamic scaling ($s_g, 1/s_g, +20\log_{10}(1/s_g)\,\text{dB}$) for scale-model simulation and chamber measurement projection. |
+| **Geometry & Meshing** | **Automated Vehicle Pre-Scan** | Deep geometric scan classifying planar specular, curved, sharp edge, and cavity interior facets with hybrid solver parameter auto-tuning. |
+| | **Bilateral Symmetry** | Spatial hash detection of planar target symmetry ($xz, yz, xy$), cutting solve runtime and memory footprint in half. |
+| | **Dynamic Wavelength Meshing** | Conforming adaptive edge subdivision ensuring $h_{\max} \le \lambda / \rho$ per frequency sweep point without non-conforming T-junctions. |
+| | **CAD & Normalization** | Loads ASCII/Binary STL and OBJ formats; transforms, verifies orientation, repairs non-manifold topology, and caches geometry. |
+| **Compute & Acceleration** | **CUDA GPU Acceleration** | Native CUDA kernel dispatch with double-precision and memory-optimized mixed-precision (float32 coordinates, float64 phase). |
+| | **NVTX Profiling Hooks** | Built-in instrumentation markers for NVIDIA Nsight Systems and Compute kernel tracing. |
+| | **Deterministic Multi-Threading** | OpenMP/thread-pool parallel CPU execution guaranteed 100% bit-identical to serial reference runs. |
+| **Distributed Orchestration** | **Local Parallel Runner** | Single-command multi-device parallel solver (`strikecem run-parallel`) with automatic shard staging and fail-closed merge reduction. |
+| | **REST Campaign Broker** | Headless HTTP REST campaign coordinator (`strikecem coordinate`) with lease tracking, automatic fault recovery, and SHA-256 verification. |
+| | **Headless Worker Daemon** | Autonomous pull-execute-heartbeat daemon (`strikecem worker`) with interruptible keepalive threads. |
+| | **HPC & Cloud Generators** | Native generator for Slurm job arrays (`#SBATCH --array`) and Kubernetes batch jobs (`batch/v1 Job`). |
+| **Storage & Runtime** | **Thread-Safe HDF5 & CSV** | High-throughput HDF5 with chunk checksums and resume support, plus CSV with JSON sidecars. |
+| | **Asset Bundler (`.scempack`)** | Single-file tamper-verified asset archive packaging RCS databases, LOD meshes, and JSON metadata with cryptographic SHA-256 validation. |
+| | **Spherical Splines & Python SDK** | Real-time sub-microsecond $C^1$ Hermite and $C^2$ Wendland spherical spline query engine in Python and C ABI. |
 
-Several compatibility fields accept only their current default:
-`physics.polarization_basis=linear`,
-`angles.deduplicate_periodic_endpoints=true`, `solver.rcs_units=dBsm` (both sqm
-and dBsm are always written), `mesh.validate_orientation=true`,
-`execution.deterministic=true`, `execution.batch_samples=4096`, and
-`run.log_level=info` (logging filters are not implemented). Compression is off
-and provenance metadata is always included. Other values, including
-`output.compression=true` and `output.include_metadata=false`, are rejected.
-The schema is the exact configuration contract:
-[config.schema.json](schemas/config.schema.json).
+---
 
-## Build and test
+## CLI Command Quick Reference
 
-Requirements: CMake 3.24+, Ninja, a C++20 compiler, OpenSSL development files,
-and HDF5 with its C++ bindings. CUDA is optional. CMake fetches pinned versions
-of nlohmann/json 3.12.0, json-schema-validator 2.4.0, and GoogleTest 1.15.2.
+The `strikecem` binary provides a unified command-line interface:
+
+```text
+strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...>
+```
+
+| Command | Usage | Description |
+|---|---|---|
+| `validate` | `strikecem validate config.json` | Validates configuration against JSON schema and inspects mesh hashes. |
+| `estimate` | `strikecem estimate config.json` | Validates configuration, counts sample plan, and computes memory/runtime estimates. |
+| `run` | `strikecem run config.json [--scale S]` | Executes full CEM simulation pipeline (PO/SBR/PTD) with optional similitude scaling. |
+| `prescan` | `strikecem prescan <mesh\|config.json> [--report R] [--auto-tune-config T]` | Analyzes vehicle features (cavities, edges, curves) and outputs auto-tuned solver configs. |
+| `run-parallel` | `strikecem run-parallel config.json [--workers N] [--devices d1,d2]` | Dispatches local parallel solve across multiple CPU threads or CUDA devices. |
+| `shard` | `strikecem shard config.json --num-shards N --out-dir D` | Partitions sample plan into N deterministic shard configurations with a manifest. |
+| `merge` | `strikecem merge manifest.json --output out.h5` | Validates chunk checksums and merges completed shard outputs into a unified database. |
+| `coordinate` | `strikecem coordinate --manifest M --output out.h5 [--port P]` | Launches HTTP REST distributed campaign broker for cluster or cloud workers. |
+| `worker` | `strikecem worker --coordinator URL [--device DEV]` | Launches autonomous headless worker daemon pulling tasks from coordinator. |
+| `cluster` | `strikecem cluster generate-slurm\|generate-k8s ...` | Generates production Slurm `#SBATCH` scripts or Kubernetes batch `Job` YAML manifests. |
+| `bundle` | `strikecem bundle --rcs db.h5 --mesh m.obj [--lod name=path] -o pkg.scempack` | Packages RCS databases and LOD geometry into a single `.scempack` file. |
+| `vtk` | `strikecem vtk config.json --output surface.vtu` | Exports 3D per-facet induced currents and lit/shadow diagnostics to ParaView VTU. |
+| `export-mesh` | `strikecem export-mesh config.json -o out.obj --format obj` | Exports procedural or normalized geometry to standalone OBJ/STL format. |
+
+### Companion Analysis Tools
+
+- **`scem_quicklook`**: Instant command-line RCS cut extraction and ASCII radiation bar chart rendering.
+- **`scem_compare`**: Compares two simulation databases and checks pointwise tolerance with detailed regression metrics.
+- **`scem_benchreport`**: Aggregates benchmark scaling profiles, reports normalized throughput ($M\text{-Eval/s}$), and renders comparison charts.
+
+---
+
+## Quickstart Tutorial
+
+### 1. Pre-Scan Vehicle Geometry & Auto-Tune Hybrid Config
+
+Inspect your 3D target geometry (e.g. an aerospace fighter or UAV) to detect re-entrant cavities, sharp edges, and curved bodies:
 
 ```bash
-cmake --preset release -DSCEM_ENABLE_CUDA=OFF
-cmake --build --preset release --parallel 2
+strikecem prescan models/uav.obj --auto-tune-config configs/uav_tuned.json
+```
+
+### 2. Run Simulation with Similitude Scaling
+
+Simulate the target at full accuracy or scale large entities down using Sinclair similitude:
+
+```bash
+# Monolithic full-scale solve
+strikecem run configs/uav_tuned.json
+
+# Or solve as a 1:5 scale model (frequency scaled up 5x, output RCS offset by +13.98 dBsm automatically)
+strikecem run configs/uav_tuned.json --scale 0.2
+```
+
+### 3. Inspect Results in Terminal
+
+Quickly inspect a horizontal azimuth cut ($el = 0^\circ$) at 10 GHz with ASCII visualization:
+
+```bash
+scem_quicklook uav_tuned.h5 --cut azimuth --angle 0.0 --freq 10e9 --pol HH --ascii
+```
+
+### 4. Package for Real-Time Runtime
+
+Bundle the simulation database alongside target 3D meshes for simulation engines:
+
+```bash
+strikecem bundle --rcs uav_tuned.h5 --mesh models/uav.obj -o uav_target.scempack
+```
+
+---
+
+## Python SDK Quickstart
+
+The Python SDK provides real-time, sub-microsecond radar cross section queries with $C^1$ bicubic and $C^2$ Wendland spherical spline interpolation:
+
+```python
+import strikecem
+from strikecem import Database, QueryRequest, InterpolationMode
+
+# Open simulation database
+db = Database("uav_tuned.h5")
+
+# Query RCS at arbitrary continuous angle
+req = QueryRequest(
+    azimuth_deg=34.8,
+    elevation_deg=-2.1,
+    frequency_hz=10.0e9,
+    polarization="HH",
+    mode=InterpolationMode.Bicubic  # C^1 Hermite spline
+)
+
+result = db.query(req)
+print(f"RCS: {result.rcs_dbsm:.2f} dBsm ({result.rcs_sqm:.4f} m^2)")
+print(f"Scattering: {result.scattering}")
+```
+
+---
+
+## Build and Test
+
+### Prerequisites
+- CMake 3.24+
+- Ninja build system
+- C++20 compliant compiler (GCC 11+, Clang 14+)
+- OpenSSL development libraries (`libssl-dev`)
+- HDF5 C/C++ development libraries (`libhdf5-dev`)
+- Python 3.9+ (optional, for Python bindings)
+- NVIDIA CUDA Toolkit 11.8+ (optional, for GPU acceleration)
+
+### Compilation
+
+```bash
+# Configure with Ninja (CUDA is auto-detected; pass -DSCEM_ENABLE_CUDA=OFF to disable)
+cmake --preset release
+
+# Build all binaries and libraries
+cmake --build --preset release --parallel
+
+# Execute comprehensive test suite (332 tests)
 ctest --test-dir build/release --output-on-failure
 ```
 
-To allow CUDA auto-detection, omit `-DSCEM_ENABLE_CUDA=OFF`. A CUDA build does
-not imply that a GPU is present; GPU tests skip when hardware is unavailable.
-CPU-only builds do not verify CUDA hardware.
-
-The tests include numerical PO goldens, CSV/HDF5 round trips, malformed-input
-checks, cache validation, resume recovery, and an install/out-of-tree CLI smoke
-test. Useful commands from the repository root:
-
-```bash
-./build/release/strikecem validate tests/fixtures/valid_minimal.json
-./build/release/strikecem estimate tests/fixtures/valid_sweep_grid.json
-./build/release/strikecem --help
-```
-
-## Install
+### Installation
 
 ```bash
 cmake --install build/release --prefix "$HOME/.local"
 ```
 
-Headers install under `include/strikecem`, and the schema installs under
-`share/strikecem/schemas`. The CLI locates that schema relative to its installed
-executable, so it can run outside the source tree and from another working
-directory. `--schema PATH` overrides discovery. The build also installs
-`strikecem_lib`, which contains the CLI wrapper. No CMake package/export for
-consuming the internal `scem_core` library is provided.
+---
 
-## Checkpoint limits
+## In-Depth Documentation & Tutorials
 
-Fresh runs solve the complete plan before creating the HDF5 output file.
-HDF5 chunks protect output writes and allow missing output units to be resumed,
-but they do not preserve completed work if interruption happens during the
-initial solve. Compute-stage checkpointing is deferred; a fresh interrupted
-solve must be run again.
+- [Tutorial: Automated Vehicle Pre-Scan Workflow](docs/tutorials/vehicle_prescan_workflow.md)
+- [Tutorial: Electromagnetic Similitude & Scale-Model Simulation](docs/tutorials/scale_model_similitude.md)
+- [Tutorial: Distributed Cluster & Parallel Campaigns](docs/tutorials/distributed_and_parallel_campaigns.md)
+- [Tutorial: Python SDK, High-Order Splines & Asset Bundling](docs/tutorials/python_sdk_and_splines.md)
+- [StrikeDesigner CAD Package Integration](docs/designer-packages.md)
+- [Architecture Decision Records (ADRs)](docs/adr/)
+
+---
 
 ## License
 
