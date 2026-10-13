@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -253,6 +254,131 @@ bool occluded_bvh(const Bvh& bvh, const NormalizedMesh& mesh, const geom::Vec3d&
         }
     }
     return false;
+}
+
+geom::Vec3d reflect_direction(const geom::Vec3d& d, const geom::Vec3d& n) {
+    const double p = geom::dot(d, n);
+    return geom::Vec3d(d.x - 2.0 * p * n.x, d.y - 2.0 * p * n.y, d.z - 2.0 * p * n.z);
+}
+
+std::array<std::complex<double>, 3> reflect_electric_field(
+    const std::array<std::complex<double>, 3>& e, const geom::Vec3d& n) {
+    const std::complex<double> dot = e[0] * n.x + e[1] * n.y + e[2] * n.z;
+    return {2.0 * dot * n.x - e[0], 2.0 * dot * n.y - e[1], 2.0 * dot * n.z - e[2]};
+}
+
+PolarizationDecomposition decompose_polarization(
+    const std::array<std::complex<double>, 3>& e_in,
+    const geom::Vec3d& dir,
+    const geom::Vec3d& normal) {
+    PolarizationDecomposition result;
+    geom::Vec3d te = geom::cross(dir, normal);
+    const double te_len = te.length();
+    if (te_len > 1e-12) {
+        te = te * (1.0 / te_len);
+    } else {
+        geom::Vec3d arb = (std::abs(dir.z) < 0.9) ? geom::Vec3d(0, 0, 1) : geom::Vec3d(1, 0, 0);
+        te = geom::cross(dir, arb);
+        te.normalize();
+    }
+    geom::Vec3d tm = geom::cross(te, dir);
+    tm.normalize();
+
+    result.te_hat = te;
+    result.tm_hat = tm;
+    result.e_te = e_in[0] * te.x + e_in[1] * te.y + e_in[2] * te.z;
+    result.e_tm = e_in[0] * tm.x + e_in[1] * tm.y + e_in[2] * tm.z;
+    return result;
+}
+
+SbrRayPath trace_sbr_path(
+    const Bvh& bvh, const NormalizedMesh& mesh,
+    uint32_t first_triangle,
+    const geom::Vec3d& initial_k,
+    const std::array<std::complex<double>, 3>& initial_e,
+    const geom::Vec3d& obs_r,
+    double k_wave,
+    const geom::Vec3d& phase_ref,
+    int max_bounces) {
+    SbrRayPath path;
+    if (first_triangle >= mesh.triangles.size() || max_bounces < 2) return path;
+
+    const geom::Vec3d diag = mesh.report.bbox_max - mesh.report.bbox_min;
+    const double scene = 2.0 * diag.length();
+    const double tmin = 1e-9 * diag.length();
+
+    const uint32_t ia = first_triangle;
+    const geom::Vec3d na = mesh.normals[ia];
+    if (!(geom::dot(na, obs_r) > 0.0)) return path;
+
+    const auto& ta = mesh.triangles[ia];
+    const geom::Vec3d ca =
+        (mesh.vertices[ta[0]] + mesh.vertices[ta[1]] + mesh.vertices[ta[2]]) * (1.0 / 3.0);
+    const geom::Vec3d d1 = reflect_direction(initial_k, na);
+    const auto e1 = reflect_electric_field(initial_e, na);
+
+    // Hop 0
+    path.hops.push_back({ia, ca, na, initial_k, d1, 0.0,
+                         std::exp(std::complex<double>(0.0, -k_wave * geom::dot(initial_k, ca - phase_ref))),
+                         e1});
+
+    // Hop 1 (Second bounce)
+    const auto hit1 = ray_bvh(bvh, mesh, ca, d1, tmin, ia);
+    if (!hit1) return path;
+    const uint32_t ib = hit1->tri;
+    if (ib == ia) return path;
+    const geom::Vec3d nb = mesh.normals[ib];
+    if (!(geom::dot(nb, d1) < 0.0)) return path;
+
+    const auto& tb = mesh.triangles[ib];
+    const geom::Vec3d cb =
+        (mesh.vertices[tb[0]] + mesh.vertices[tb[1]] + mesh.vertices[tb[2]]) * (1.0 / 3.0);
+    const geom::Vec3d d2 = reflect_direction(d1, nb);
+    const auto e2 = reflect_electric_field(e1, nb);
+    const double seg1 = (cb - ca).length();
+    const auto phase1 = std::exp(std::complex<double>(0.0, -k_wave * geom::dot(d1, cb - ca)));
+    path.hops.push_back({ib, cb, nb, d1, d2, seg1, phase1, e2});
+
+    if (geom::dot(d2, obs_r) > 1.0 - 1e-9) {
+        const auto exit = ray_bvh(bvh, mesh, cb, obs_r, tmin, ib);
+        path.exit_occluded = (exit && exit->t < scene);
+        path.is_retroreflective = !path.exit_occluded;
+        if (path.is_retroreflective) {
+            path.total_phase = path.hops[0].phase_factor * phase1 *
+                std::exp(std::complex<double>(0.0, k_wave * geom::dot(obs_r, cb - phase_ref)));
+            return path;
+        }
+    }
+
+    // Hop 2 (Third bounce)
+    if (max_bounces >= 3) {
+        const auto hit2 = ray_bvh(bvh, mesh, cb, d2, tmin, ib);
+        if (!hit2) return path;
+        const uint32_t ic = hit2->tri;
+        if (ic == ib) return path;
+        const geom::Vec3d nc = mesh.normals[ic];
+        if (!(geom::dot(nc, d2) < 0.0)) return path;
+
+        const auto& tc = mesh.triangles[ic];
+        const geom::Vec3d cc =
+            (mesh.vertices[tc[0]] + mesh.vertices[tc[1]] + mesh.vertices[tc[2]]) * (1.0 / 3.0);
+        const geom::Vec3d d3 = reflect_direction(d2, nc);
+        const auto e3 = reflect_electric_field(e2, nc);
+        const double seg2 = (cc - cb).length();
+        const auto phase2 = std::exp(std::complex<double>(0.0, -k_wave * geom::dot(d2, cc - cb)));
+        path.hops.push_back({ic, cc, nc, d2, d3, seg2, phase2, e3});
+
+        if (geom::dot(d3, obs_r) > 1.0 - 1e-9) {
+            const auto exit = ray_bvh(bvh, mesh, cc, obs_r, tmin, ic);
+            path.exit_occluded = (exit && exit->t < scene);
+            path.is_retroreflective = !path.exit_occluded;
+            if (path.is_retroreflective) {
+                path.total_phase = path.hops[0].phase_factor * phase1 * phase2 *
+                    std::exp(std::complex<double>(0.0, k_wave * geom::dot(obs_r, cc - phase_ref)));
+            }
+        }
+    }
+    return path;
 }
 
 }
