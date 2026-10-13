@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include "strikecem/solvers/Projection.hpp"
+#include "strikecem/geometry/Symmetry.hpp"
 
 namespace strikecem::cuda {
 namespace {
@@ -238,24 +239,54 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             phase_ref = {pr[0].get<double>(), pr[1].get<double>(), pr[2].get<double>()};
         }
     }
-    const size_t ntris = mesh.triangles.size();
-    std::vector<Real> h_cent(3 * ntris), h_norm(3 * ntris), h_area(ntris);
-    for (size_t t = 0; t < ntris; ++t) {
-        const auto& tri = mesh.triangles[t];
-        h_cent[3 * t] = static_cast<Real>(((mesh.vertices[tri[0]].x + mesh.vertices[tri[1]].x +
-                                            mesh.vertices[tri[2]].x) /
-                                           3.0) - phase_ref.x);
-        h_cent[3 * t + 1] = static_cast<Real>(((mesh.vertices[tri[0]].y + mesh.vertices[tri[1]].y +
-                                               mesh.vertices[tri[2]].y) /
-                                              3.0) - phase_ref.y);
-        h_cent[3 * t + 2] = static_cast<Real>(((mesh.vertices[tri[0]].z + mesh.vertices[tri[1]].z +
-                                               mesh.vertices[tri[2]].z) /
-                                              3.0) - phase_ref.z);
-        h_norm[3 * t] = static_cast<Real>(mesh.normals[t].x);
-        h_norm[3 * t + 1] = static_cast<Real>(mesh.normals[t].y);
-        h_norm[3 * t + 2] = static_cast<Real>(mesh.normals[t].z);
-        h_area[t] = static_cast<Real>(mesh.areas[t]);
+    bool use_symmetry = false;
+    std::string sym_plane = "xz";
+    double sym_tol = 1e-4;
+    if (resolved.contains("mesh") && resolved["mesh"].contains("symmetry")) {
+        const auto& sym = resolved["mesh"]["symmetry"];
+        use_symmetry = sym.value("enabled", false);
+        sym_plane = sym.value("plane", "xz");
+        sym_tol = sym.value("tolerance_m", 1e-4);
     }
+    const SymmetryOptions sym_opts{use_symmetry, sym_plane, sym_tol};
+    const HalfMeshResult half_result = use_symmetry ? extract_half_mesh(mesh, sym_opts) : HalfMeshResult{mesh, {}, {}};
+    const NormalizedMesh& eff_mesh = use_symmetry ? half_result.mesh : mesh;
+
+    std::vector<Real> h_cent, h_norm, h_area;
+    h_cent.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
+    h_norm.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
+    h_area.reserve(eff_mesh.triangles.size() * (use_symmetry ? 2 : 1));
+
+    for (size_t t = 0; t < eff_mesh.triangles.size(); ++t) {
+        const auto& tri = eff_mesh.triangles[t];
+        const geom::Vec3d c = (eff_mesh.vertices[tri[0]] + eff_mesh.vertices[tri[1]] + eff_mesh.vertices[tri[2]]) * (1.0 / 3.0);
+        const geom::Vec3d n = eff_mesh.normals[t];
+        const double a = eff_mesh.areas[t];
+
+        h_cent.push_back(static_cast<Real>(c.x - phase_ref.x));
+        h_cent.push_back(static_cast<Real>(c.y - phase_ref.y));
+        h_cent.push_back(static_cast<Real>(c.z - phase_ref.z));
+        h_norm.push_back(static_cast<Real>(n.x));
+        h_norm.push_back(static_cast<Real>(n.y));
+        h_norm.push_back(static_cast<Real>(n.z));
+        h_area.push_back(static_cast<Real>(a));
+
+        if (use_symmetry) {
+            const double coord = get_symmetry_coord(c, sym_plane);
+            if (std::abs(coord) > sym_tol) {
+                const geom::Vec3d c_refl = reflect_point(c, sym_plane);
+                const geom::Vec3d n_refl = reflect_normal(n, sym_plane);
+                h_cent.push_back(static_cast<Real>(c_refl.x - phase_ref.x));
+                h_cent.push_back(static_cast<Real>(c_refl.y - phase_ref.y));
+                h_cent.push_back(static_cast<Real>(c_refl.z - phase_ref.z));
+                h_norm.push_back(static_cast<Real>(n_refl.x));
+                h_norm.push_back(static_cast<Real>(n_refl.y));
+                h_norm.push_back(static_cast<Real>(n_refl.z));
+                h_area.push_back(static_cast<Real>(a));
+            }
+        }
+    }
+    const size_t ntris = h_area.size();
     DeviceBuffer<Real> d_cent(h_cent.size());
     DeviceBuffer<Real> d_norm(h_norm.size());
     DeviceBuffer<Real> d_area(h_area.size());

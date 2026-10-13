@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "strikecem/solvers/Projection.hpp"
+#include "strikecem/geometry/Symmetry.hpp"
 
 #include "strikecem/solvers/GpuPO.hpp"
 
@@ -124,6 +125,18 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
             phase_ref = {pr[0].get<double>(), pr[1].get<double>(), pr[2].get<double>()};
         }
     }
+    bool use_symmetry = false;
+    std::string sym_plane = "xz";
+    double sym_tol = 1e-4;
+    if (resolved.contains("mesh") && resolved["mesh"].contains("symmetry")) {
+        const auto& sym = resolved["mesh"]["symmetry"];
+        use_symmetry = sym.value("enabled", false);
+        sym_plane = sym.value("plane", "xz");
+        sym_tol = sym.value("tolerance_m", 1e-4);
+    }
+    const SymmetryOptions sym_opts{use_symmetry, sym_plane, sym_tol};
+    const HalfMeshResult half_result = use_symmetry ? extract_half_mesh(mesh, sym_opts) : HalfMeshResult{mesh, {}, {}};
+    const NormalizedMesh& effective_mesh = use_symmetry ? half_result.mesh : mesh;
 
     const size_t nfreq = plan.frequencies_hz.size();
     const size_t ndir = plan.directions.size();
@@ -188,22 +201,10 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         const CVec3<Real> k_hat_c = to_complex<Real>(k_hat);
         CVec3<Real> f_tx[2] = {};
         size_t lit = 0;
-        for (size_t t = 0; t < mesh.triangles.size(); ++t) {
-            const auto& tri = mesh.triangles[t];
-            const Vec3<Real> world_centroid{
-                static_cast<Real>((mesh.vertices[tri[0]].x + mesh.vertices[tri[1]].x +
-                                   mesh.vertices[tri[2]].x) /
-                                  3.0),
-                static_cast<Real>((mesh.vertices[tri[0]].y + mesh.vertices[tri[1]].y +
-                                   mesh.vertices[tri[2]].y) /
-                                  3.0),
-                static_cast<Real>((mesh.vertices[tri[0]].z + mesh.vertices[tri[1]].z +
-                                   mesh.vertices[tri[2]].z) /
-                                  3.0)};
-            const Vec3<Real> n{static_cast<Real>(mesh.normals[t].x),
-                               static_cast<Real>(mesh.normals[t].y),
-                               static_cast<Real>(mesh.normals[t].z)};
-            if (!(dot(n, to_inc) > Real(0))) continue; // hard shadow: n.(-k_inc)
+
+        auto accumulate_facet = [&](const Vec3<Real>& world_centroid, const Vec3<Real>& n,
+                                    Real area, uint32_t self_tri, size_t mat_t) {
+            if (!(dot(n, to_inc) > Real(0))) return; // hard shadow: n.(-k_inc)
             if (go.shadowing) {
                 const geom::Vec3d center_d{static_cast<double>(world_centroid.x),
                                            static_cast<double>(world_centroid.y),
@@ -212,16 +213,14 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                           static_cast<double>(r_hat.y),
                                           static_cast<double>(r_hat.z)};
                 const geom::Vec3d diag = mesh.report.bbox_max - mesh.report.bbox_min;
-                if (occluded_bvh(bvh, mesh, center_d, r_hat_d, 2.0 * diag.length(),
-                                 static_cast<uint32_t>(t)))
-                    continue;
+                if (occluded_bvh(bvh, mesh, center_d, r_hat_d, 2.0 * diag.length(), self_tri))
+                    return;
             }
             ++lit;
             const Vec3<Real> centroid{
                 world_centroid.x - static_cast<Real>(phase_ref.x),
                 world_centroid.y - static_cast<Real>(phase_ref.y),
                 world_centroid.z - static_cast<Real>(phase_ref.z)};
-            const Real area = static_cast<Real>(mesh.areas[t]);
             const C ein_phase = std::exp(C(0, -k * dot(k_hat, centroid)));
             const C eout_phase = std::exp(C(0, k * dot(r_hat, centroid)));
             const C coeff = coeff_jk * area * eout_phase;
@@ -230,8 +229,8 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
             const MaterialModel* facet_model = nullptr;
             if (material.enabled) {
                 if (has_multi_material) {
-                    if (t < material.facet_material_indices.size()) {
-                        uint32_t midx = material.facet_material_indices[t];
+                    if (mat_t < material.facet_material_indices.size()) {
+                        uint32_t midx = material.facet_material_indices[mat_t];
                         if (midx < material.models.size()) {
                             facet_model = &material.models[midx];
                             facet_wall = facet_model->type;
@@ -263,7 +262,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                 if (facet_wall == WallType::Dielectric) {
                     ComplexMedium wmed;
                     if (has_multi_material) {
-                        uint32_t midx = material.facet_material_indices[t];
+                        uint32_t midx = material.facet_material_indices[mat_t];
                         wmed = models_wall_per_freq[midx][fi];
                     } else {
                         wmed = wall_per_freq[fi];
@@ -304,7 +303,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                 const geom::Vec3d tm_ref = geom::cross(k_ref, e_te);
                 const double kd_d = static_cast<double>(k);
                 const double eta_d = static_cast<double>(eta_r);
-                const double area_d = mesh.areas[t];
+                const double area_d = static_cast<double>(area);
                 const std::complex<double> ein_d =
                     std::exp(std::complex<double>(0.0, -kd_d * geom::dot(kd, cd)));
                 for (int tx = 0; tx < 2; ++tx) {
@@ -316,6 +315,46 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                     for (int i = 0; i < 3; ++i)
                         f_tx[tx][i] += C(static_cast<Real>(df[i].real()),
                                          static_cast<Real>(df[i].imag()));
+                }
+            }
+        };
+
+        for (size_t t = 0; t < effective_mesh.triangles.size(); ++t) {
+            const auto& tri = effective_mesh.triangles[t];
+            const Vec3<Real> world_centroid{
+                static_cast<Real>((effective_mesh.vertices[tri[0]].x + effective_mesh.vertices[tri[1]].x +
+                                   effective_mesh.vertices[tri[2]].x) /
+                                  3.0),
+                static_cast<Real>((effective_mesh.vertices[tri[0]].y + effective_mesh.vertices[tri[1]].y +
+                                   effective_mesh.vertices[tri[2]].y) /
+                                  3.0),
+                static_cast<Real>((effective_mesh.vertices[tri[0]].z + effective_mesh.vertices[tri[1]].z +
+                                   effective_mesh.vertices[tri[2]].z) /
+                                  3.0)};
+            const Vec3<Real> n{static_cast<Real>(effective_mesh.normals[t].x),
+                               static_cast<Real>(effective_mesh.normals[t].y),
+                               static_cast<Real>(effective_mesh.normals[t].z)};
+            const Real area = static_cast<Real>(effective_mesh.areas[t]);
+            const uint32_t orig_idx = use_symmetry ? half_result.original_indices[t] : static_cast<uint32_t>(t);
+            accumulate_facet(world_centroid, n, area, orig_idx, orig_idx);
+
+            if (use_symmetry) {
+                const geom::Vec3d center_d{static_cast<double>(world_centroid.x),
+                                           static_cast<double>(world_centroid.y),
+                                           static_cast<double>(world_centroid.z)};
+                const double coord = get_symmetry_coord(center_d, sym_plane);
+                if (std::abs(coord) > sym_tol) {
+                    const geom::Vec3d c_refl_d = reflect_point(center_d, sym_plane);
+                    const geom::Vec3d n_refl_d = reflect_normal({n.x, n.y, n.z}, sym_plane);
+                    const Vec3<Real> world_centroid_refl{static_cast<Real>(c_refl_d.x),
+                                                         static_cast<Real>(c_refl_d.y),
+                                                         static_cast<Real>(c_refl_d.z)};
+                    const Vec3<Real> n_refl{static_cast<Real>(n_refl_d.x),
+                                            static_cast<Real>(n_refl_d.y),
+                                            static_cast<Real>(n_refl_d.z)};
+                    const uint32_t refl_idx = half_result.reflected_indices[t];
+                    const uint32_t refl_mat = (refl_idx != UINT32_MAX) ? refl_idx : orig_idx;
+                    accumulate_facet(world_centroid_refl, n_refl, area, refl_idx, refl_mat);
                 }
             }
         }

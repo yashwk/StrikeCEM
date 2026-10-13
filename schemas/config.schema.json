@@ -221,7 +221,16 @@
         "mode": {"const": "input", "default": "input"},
         "validate_orientation": {"const": true, "default": true, "description": "Winding diagnostics are always computed and reported in v1."},
         "max_aspect_ratio": {"type": "number", "exclusiveMinimum": 1, "default": 20.0},
-        "cache_dir": {"type": "string", "minLength": 1}
+        "cache_dir": {"type": "string", "minLength": 1},
+        "symmetry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "plane": {"type": "string", "enum": ["xz", "yz", "xy"], "default": "xz"},
+            "tolerance_m": {"type": "number", "exclusiveMinimum": 0, "default": 1e-4}
+          }
+        }
       }
     },
     "execution": {

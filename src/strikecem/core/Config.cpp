@@ -90,6 +90,11 @@ json resolve_defaults(const json& raw) {
     if (!mesh.contains("mode")) mesh["mode"] = "input";
     if (!mesh.contains("validate_orientation")) mesh["validate_orientation"] = true;
     if (!mesh.contains("max_aspect_ratio")) mesh["max_aspect_ratio"] = 20.0;
+    if (!mesh.contains("symmetry")) mesh["symmetry"] = json::object();
+    auto& sym = mesh["symmetry"];
+    if (!sym.contains("enabled")) sym["enabled"] = false;
+    if (!sym.contains("plane")) sym["plane"] = "xz";
+    if (!sym.contains("tolerance_m")) sym["tolerance_m"] = 1e-4;
 
     if (!r.contains("execution")) r["execution"] = json::object();
     auto& exec = r["execution"];
@@ -168,6 +173,18 @@ void validate_semantics(const json& r, const fs::path& config_dir) {
             if (r["model"]["transform"].contains(key))
                 for (const auto& v : r["model"]["transform"][key])
                     require_finite(v.get<double>(), "model.transform value");
+    }
+    if (r["mesh"]["symmetry"].value("enabled", false)) {
+        const std::string plane = r["mesh"]["symmetry"].value("plane", "xz");
+        const double tol = r["mesh"]["symmetry"].value("tolerance_m", 1e-4);
+        const auto& pr = r["physics"]["phase_reference"];
+        double coord = 0.0;
+        if (plane == "xz") coord = pr[1].get<double>();
+        else if (plane == "yz") coord = pr[0].get<double>();
+        else if (plane == "xy") coord = pr[2].get<double>();
+        if (std::abs(coord) > tol) {
+            throw ConfigError("mesh.symmetry requires physics.phase_reference to lie on the symmetry plane");
+        }
     }
 
     const auto& angles = r["angles"];
