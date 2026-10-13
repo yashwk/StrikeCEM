@@ -39,6 +39,8 @@ struct Hdf5Database {
     std::string scem_schema_version;
     std::string config_hash;
     std::string solver_precision;
+    std::string design_id;
+    std::string design_revision;
 };
 
 Hdf5Database read_hdf5_database(const std::string& path);

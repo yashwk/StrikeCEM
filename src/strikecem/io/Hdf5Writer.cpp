@@ -540,9 +540,17 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         write_u64_attr(file, "bounce_chains", result.chains_fired);
         write_u64_attr(file, "materials_enabled", material.enabled ? 1 : 0);
         write_u64_attr(file, "material_models_count", material.models.size());
-        write_str_attr(file, "design_id", designer.design_id);
-        write_str_attr(file, "design_revision", designer.revision);
-        write_str_attr(file, "export_id", designer.export_id);
+        std::string d_id = designer.design_id;
+        std::string d_rev = designer.revision;
+        std::string d_exp = designer.export_id;
+        if (d_id.empty() && rc.value.contains("integration") && rc.value["integration"].contains("designer")) {
+            d_id = rc.value["integration"]["designer"].value("design_id", "");
+            d_rev = rc.value["integration"]["designer"].value("revision", "");
+            d_exp = rc.value["integration"]["designer"].value("export_id", "");
+        }
+        write_str_attr(file, "design_id", d_id);
+        write_str_attr(file, "design_revision", d_rev);
+        write_str_attr(file, "export_id", d_exp);
         write_str_attr(file, "export_manifest_hash", designer.manifest_hash);
         write_str_attr(file, "tool_version", SCEM_VERSION);
         write_str_attr(file, "git_revision", SCEM_GIT_REVISION);

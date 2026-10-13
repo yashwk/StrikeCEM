@@ -346,6 +346,12 @@ Hdf5Database read_hdf5_database(const std::string& path) {
         db.scem_schema_version = read_str_attr(file, "scem_schema_version");
         db.config_hash = read_str_attr(file, "config_hash");
         db.solver_precision = read_str_attr(file, "solver_precision");
+        if (file.attrExists("design_id")) {
+            db.design_id = read_str_attr(file, "design_id");
+        }
+        if (file.attrExists("design_revision")) {
+            db.design_revision = read_str_attr(file, "design_revision");
+        }
         if ((db.solver_precision == "float32" && float_width != sizeof(float)) ||
             (db.solver_precision == "float64" && float_width != sizeof(double)) ||
             (db.solver_precision != "float32" && db.solver_precision != "float64"))

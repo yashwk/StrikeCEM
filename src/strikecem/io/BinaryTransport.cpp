@@ -42,7 +42,7 @@ std::string hostname() {
 
 void write_scem_output(const ResolvedConfig& rc, const SamplePlan& plan,
                        const NormalizedMesh& mesh, const PoResult& result,
-                       const DesignerIdentity& /*designer*/,
+                       const DesignerIdentity& designer,
                        const FringeOptions& fringe,
                        const MaterialOptions& material) {
     const auto& output = rc.value["output"];
@@ -70,6 +70,15 @@ void write_scem_output(const ResolvedConfig& rc, const SamplePlan& plan,
     if (is_shard) {
         metadata["shard_config_hash"] = rc.hash;
         metadata["shard"] = rc.value["run"]["shard"];
+    }
+    if (designer.packaged && !designer.design_id.empty()) {
+        metadata["design_id"] = designer.design_id;
+        metadata["design_revision"] = designer.revision;
+        metadata["export_id"] = designer.export_id;
+    } else if (rc.value.contains("integration") && rc.value["integration"].contains("designer")) {
+        metadata["design_id"] = rc.value["integration"]["designer"].value("design_id", "");
+        metadata["design_revision"] = rc.value["integration"]["designer"].value("revision", "");
+        metadata["export_id"] = rc.value["integration"]["designer"].value("export_id", "");
     }
     metadata["geometry_hash"] = mesh.geometry_hash;
     metadata["normalized_mesh_hash"] = mesh.normalized_mesh_hash;
