@@ -13,6 +13,7 @@
 #include "strikecem/core/Conventions.hpp"
 #include "strikecem/core/Config.hpp" // sha256_hex, canonical_json
 #include "strikecem/geometry/AnalyticGeometry.hpp"
+#include "strikecem/geometry/Remesh.hpp"
 
 namespace strikecem {
 namespace {
@@ -560,6 +561,26 @@ ObjMesh parse_obj(const fs::path& path) {
     return mesh;
 }
 
+std::vector<double> extract_config_frequencies(const nlohmann::json& resolved) {
+    std::vector<double> plan_freqs;
+    if (resolved.contains("frequency") && resolved["frequency"].contains("frequency_hz")) {
+        plan_freqs.push_back(resolved["frequency"]["frequency_hz"].get<double>());
+    } else if (resolved.contains("simulation") && resolved["simulation"].contains("frequency_ghz")) {
+        const auto& fg = resolved["simulation"]["frequency_ghz"];
+        if (fg.contains("start") && fg.contains("stop") && fg.contains("points")) {
+            double start = fg["start"].get<double>() * 1e9;
+            double stop = fg["stop"].get<double>() * 1e9;
+            int pts = fg["points"].get<int>();
+            if (pts <= 1) plan_freqs.push_back(start);
+            else {
+                double step = (stop - start) / (pts - 1);
+                for (int i = 0; i < pts; ++i) plan_freqs.push_back(start + i * step);
+            }
+        }
+    }
+    return plan_freqs;
+}
+
 NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::path& config_dir,
                                     const std::string& schema_version) {
     const auto& model = resolved["model"];
@@ -605,7 +626,8 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
                 }
             }
         }
-        return mesh;
+        const auto plan_freqs = extract_config_frequencies(resolved);
+        return remesh_wavelength(mesh, resolved, plan_freqs);
     }
     const std::string rel = model["path"].get<std::string>();
     const fs::path mesh_path =
@@ -629,7 +651,10 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
     NormalizedMesh mesh;
     mesh.geometry_hash = geometry_hash;
     const double max_ar = resolved["mesh"]["max_aspect_ratio"].get<double>();
-    if (try_load_cache(geometry_hash, key_echo, cache_dir, max_ar, mesh)) return mesh;
+    const auto plan_freqs = extract_config_frequencies(resolved);
+    if (try_load_cache(geometry_hash, key_echo, cache_dir, max_ar, mesh)) {
+        return remesh_wavelength(mesh, resolved, plan_freqs);
+    }
 
     const std::string lower = rel;
     std::vector<RawTriangle> raw;
@@ -720,7 +745,7 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
     check.triangles = mesh.triangles;
     mesh.normalized_mesh_hash = hash_normalized(check);
     store_cache(geometry_hash, key_echo, cache_dir, mesh);
-    return mesh;
+    return remesh_wavelength(mesh, resolved, plan_freqs);
 }
 
 void export_mesh_obj(const NormalizedMesh& mesh, const fs::path& path) {

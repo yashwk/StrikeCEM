@@ -95,6 +95,12 @@ json resolve_defaults(const json& raw) {
     if (!sym.contains("enabled")) sym["enabled"] = false;
     if (!sym.contains("plane")) sym["plane"] = "xz";
     if (!sym.contains("tolerance_m")) sym["tolerance_m"] = 1e-4;
+    if (!mesh.contains("frequency_policy")) mesh["frequency_policy"] = "user_mesh";
+    if (!mesh.contains("wavelength_adaptive")) mesh["wavelength_adaptive"] = json::object();
+    auto& wa = mesh["wavelength_adaptive"];
+    if (!wa.contains("alpha_smooth")) wa["alpha_smooth"] = 1.0 / 6.0;
+    if (!wa.contains("alpha_edge")) wa["alpha_edge"] = 1.0 / 20.0;
+    if (!wa.contains("curvature_factor")) wa["curvature_factor"] = 0.1;
 
     if (!r.contains("execution")) r["execution"] = json::object();
     auto& exec = r["execution"];

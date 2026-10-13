@@ -230,6 +230,20 @@
             "plane": {"type": "string", "enum": ["xz", "yz", "xy"], "default": "xz"},
             "tolerance_m": {"type": "number", "exclusiveMinimum": 0, "default": 1e-4}
           }
+        },
+        "frequency_policy": {
+          "type": "string",
+          "enum": ["user_mesh", "mesh_at_max_frequency", "mesh_per_frequency"],
+          "default": "user_mesh"
+        },
+        "wavelength_adaptive": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "alpha_smooth": {"type": "number", "exclusiveMinimum": 0, "default": 0.16666666666666666},
+            "alpha_edge": {"type": "number", "exclusiveMinimum": 0, "default": 0.05},
+            "curvature_factor": {"type": "number", "exclusiveMinimum": 0, "default": 0.1}
+          }
         }
       }
     },
