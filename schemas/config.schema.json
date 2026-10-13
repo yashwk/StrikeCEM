@@ -235,6 +235,15 @@
             "export_material_ids": {"type": "boolean", "default": true},
             "sample_index": {"type": "integer", "minimum": 0, "default": 0}
           }
+        },
+        "telemetry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean", "default": false},
+            "path": {"type": "string", "minLength": 1},
+            "record_memory": {"type": "boolean", "default": true}
+          }
         }
       }
     },

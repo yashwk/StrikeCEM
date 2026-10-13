@@ -24,6 +24,7 @@
 #include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/Material.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
+#include "strikecem/telemetry/Telemetry.hpp"
 
 namespace strikecem::cli {
 namespace {
@@ -452,6 +453,24 @@ int run(int argc, char** argv) {
             const VtkMeshDiagnostics diag = compute_facet_diagnostics(mesh, dir, freq, pol, go, material);
             write_vtu(vtu_file, mesh, diag);
             std::cout << "vtk_diagnostics: " << vtu_file << "\n";
+        }
+        if (rc.value["output"].contains("telemetry") &&
+            rc.value["output"]["telemetry"].value("enabled", false)) {
+            const std::string telem_path = rc.value["output"]["telemetry"].value("path", "telemetry.json");
+            telemetry::TelemetryCollector tc;
+            tc.record_metadata("config_hash", rc.hash);
+            tc.record_metadata("solver", rc.value["solver"]["type"].get<std::string>());
+            tc.record_metadata("format", format);
+            tc.record_counter("samples_computed", result.samples.size());
+            tc.record_counter("facets_count", mesh.report.triangle_count);
+            tc.record_metric("solve_wall_seconds", solve_seconds);
+            if (solve_seconds > 0.0) {
+                tc.record_metric("samples_per_second", static_cast<double>(result.samples.size()) / solve_seconds);
+                tc.record_metric("facet_evaluations_per_second",
+                                 (static_cast<double>(result.samples.size()) * mesh.report.triangle_count) / solve_seconds);
+            }
+            tc.write_json_report(telem_path);
+            std::cout << "telemetry: " << telem_path << "\n";
         }
         std::cout << "samples: " << result.samples.size() << "\n";
         std::cout << "status: ok\n";
