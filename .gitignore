@@ -20,3 +20,12 @@ build/
 # editor / IDE
 .idea/
 *.swp
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+

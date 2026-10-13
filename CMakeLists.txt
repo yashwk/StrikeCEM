@@ -123,9 +123,9 @@ target_link_libraries(scem_quicklook PRIVATE scem_core)
 add_executable(scem_compare tools/scem_compare/main.cpp)
 target_link_libraries(scem_compare PRIVATE scem_core)
 
-# Shared library target for later StrikeEngine integration
+# Shared library target for later StrikeEngine and Python SDK integration
 add_library(strikecem_lib SHARED src/strikecem/app/CLI.cpp)
-target_link_libraries(strikecem_lib PUBLIC scem_core)
+target_link_libraries(strikecem_lib PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,scem_core>")
 set_target_properties(strikecem_lib PROPERTIES OUTPUT_NAME "StrikeCEM")
 
 # Tests
@@ -195,3 +195,11 @@ add_test(NAME install_smoke
                 "-DSCEM_INCLUDEDIR=${CMAKE_INSTALL_INCLUDEDIR}"
                 "-DSCEM_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/install_smoke.cmake")
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME python_bindings
+            COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/tests/python" -v)
+    set_tests_properties(python_bindings PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python;STRIKECEM_LIB_PATH=$<TARGET_FILE:strikecem_lib>")
+endif()
