@@ -271,9 +271,9 @@ void ImageBuffer::draw_text(int x, int y, const std::string& text, Rgba color, i
     }
 }
 
-void ImageBuffer::write_png(const std::string& path) const {
+std::vector<uint8_t> ImageBuffer::encode_png() const {
     if (width_ == 0 || height_ == 0) {
-        throw std::runtime_error("Cannot write empty PNG image");
+        throw std::runtime_error("Cannot encode empty PNG image");
     }
 
     // 1. Raw scanlines buffer with filter byte 0 (None) per row
@@ -325,7 +325,11 @@ void ImageBuffer::write_png(const std::string& path) const {
     // IEND Chunk
     append_png_chunk(png, "IEND", nullptr, 0);
 
-    // Write to file
+    return png;
+}
+
+void ImageBuffer::write_png(const std::string& path) const {
+    auto png = encode_png();
     std::ofstream out(path, std::ios::binary);
     if (!out) {
         throw std::runtime_error("Cannot open PNG file for writing: " + path);

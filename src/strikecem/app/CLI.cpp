@@ -24,6 +24,7 @@
 #include "strikecem/analysis/IsarImaging.hpp"
 #include "strikecem/rendering/Image.hpp"
 #include "strikecem/rendering/ModelRenderer.hpp"
+#include "strikecem/analysis/SignatureReport.hpp"
 #include "strikecem/io/AssetBundle.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
@@ -82,6 +83,10 @@ constexpr const char* kUsage =
     "               options: <config.json|mesh> [--output PATH] [--mode currents|lit_shadow|shaded]\n"
     "                        [--az DEG] [--el DEG] [--freq HZ] [--pol HH|VV] [--camera radar|isometric]\n"
     "                        [--colormap turbo|jet|viridis] [--width W] [--height H]\n"
+    "  report       generate standalone HTML radar signature diagnostic report\n"
+    "               options: <database.h5|config.json> [-o report.html] [--config CFG] [--mesh MESH]\n"
+    "                        [--title \"...\"] [--vehicle \"...\"] [--image img.png] [--isar isar.png]\n"
+    "                        [--mode currents|lit_shadow|shaded] [--colormap turbo|jet|viridis]\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -592,6 +597,58 @@ int cmd_render(const std::string& input_path, const std::string& output_path,
     return 0;
 }
 
+int cmd_report(const std::string& input_path, const std::string& output_html,
+               const std::string& config_or_mesh, const std::string& title,
+               const std::string& vehicle_name, const std::string& isar_img,
+               const std::string& model_img, const std::string& mode_str,
+               const std::string& colormap_str) {
+    if (input_path.empty()) {
+        std::cerr << "strikecem: error: report requires an input database (.h5) or config\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+
+    std::string hdf5_path = input_path;
+    std::string companion = config_or_mesh;
+
+    if (input_path.rfind(".json") != std::string::npos) {
+        companion = input_path;
+        try {
+            std::ifstream f(input_path);
+            nlohmann::json j = nlohmann::json::parse(f);
+            if (j.contains("output") && j["output"].contains("path")) {
+                std::string rel_p = j["output"]["path"].get<std::string>();
+                fs::path p(rel_p);
+                if (p.is_relative()) {
+                    hdf5_path = (fs::path(input_path).parent_path() / p).string();
+                } else {
+                    hdf5_path = rel_p;
+                }
+            }
+        } catch (...) {
+            // fallback
+        }
+    }
+
+    std::string out_file = output_html.empty() ? "signature_report.html" : output_html;
+    analysis::SignatureReportConfig cfg;
+    if (!title.empty()) cfg.title = title;
+    if (!vehicle_name.empty()) cfg.vehicle_name = vehicle_name;
+    if (!isar_img.empty()) cfg.custom_isar_path = isar_img;
+    if (!model_img.empty()) cfg.custom_image_path = model_img;
+    if (!mode_str.empty()) cfg.render_mode = mode_str;
+    if (!colormap_str.empty()) cfg.colormap = colormap_str;
+
+    try {
+        analysis::SignatureReportGenerator::write_report(hdf5_path, out_file, cfg, companion);
+        std::cout << "signature_report: " << out_file << "\n";
+        std::cout << "status: ok\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "strikecem: error: report generation failed: " << e.what() << "\n";
+        return static_cast<int>(ExitCode::Output);
+    }
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -657,6 +714,12 @@ int run(int argc, char** argv) {
     double render_az = 0.0;
     double render_el = 0.0;
     double render_freq = 10.0e9;
+
+    // Report parameters
+    std::string report_config;
+    std::string report_title;
+    std::string report_vehicle;
+    std::string report_isar;
 
     std::vector<std::string> positional;
 
@@ -748,6 +811,14 @@ int run(int argc, char** argv) {
             prescan_report = args[++i];
         } else if (args[i] == "--auto-tune-config" && i + 1 < args.size()) {
             auto_tune_config_out = args[++i];
+        } else if (args[i] == "--config" && i + 1 < args.size()) {
+            report_config = args[++i];
+        } else if (args[i] == "--title" && i + 1 < args.size()) {
+            report_title = args[++i];
+        } else if (args[i] == "--vehicle" && i + 1 < args.size()) {
+            report_vehicle = args[++i];
+        } else if (args[i] == "--isar" && i + 1 < args.size()) {
+            report_isar = args[++i];
         } else if (args[i] == "--ascii") {
             isar_ascii = true;
         } else if (args[i] == "--pol" && i + 1 < args.size()) {
@@ -806,7 +877,7 @@ int run(int argc, char** argv) {
         command != "export-mesh" && command != "bundle" && command != "run-parallel" &&
         command != "coordinate" && command != "worker" && command != "cluster" &&
         command != "cluster-slurm" && command != "cluster-k8s" && command != "prescan" &&
-        command != "isar" && command != "render") {
+        command != "isar" && command != "render" && command != "report") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -870,6 +941,13 @@ int run(int argc, char** argv) {
             return cmd_render(input, output_path, render_mode, render_az, render_el,
                               render_freq, isar_pol, render_camera, render_colormap,
                               render_width, render_height, schema_path);
+        }
+        if (command == "report") {
+            const std::string& input = positional.empty() ? "" : positional[0];
+            std::string companion = !report_config.empty() ? report_config : bundle_mesh;
+            return cmd_report(input, output_path, companion, report_title,
+                              report_vehicle, report_isar, isar_image_out,
+                              render_mode, render_colormap);
         }
 
         if (positional.size() != 1) {
