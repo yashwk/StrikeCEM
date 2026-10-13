@@ -45,6 +45,7 @@ set(JSON_VALIDATOR_INSTALL OFF)
 FetchContent_MakeAvailable(json_schema_validator)
 
 find_package(OpenSSL REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(HDF5 COMPONENTS C CXX)
 if(NOT HDF5_FOUND)
     message(FATAL_ERROR "HDF5 with C++ bindings is required for the v1 HDF5 writer/reader")
@@ -88,7 +89,9 @@ add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/Mesh
         src/strikecem/distributed/ClusterScheduler.cpp
         src/strikecem/solvers/Similitude.cpp
         src/strikecem/analysis/VehiclePreScan.cpp
-        src/strikecem/analysis/IsarImaging.cpp)
+        src/strikecem/analysis/IsarImaging.cpp
+        src/strikecem/rendering/Image.cpp
+        src/strikecem/rendering/ModelRenderer.cpp)
 if(SCEM_HAVE_CUDA)
     target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO.cu)
     target_compile_definitions(scem_core PUBLIC SCEM_ENABLE_CUDA)
@@ -98,7 +101,8 @@ endif()
 target_link_libraries(scem_core PUBLIC
         nlohmann_json::nlohmann_json
         nlohmann_json_schema_validator
-        OpenSSL::Crypto)
+        OpenSSL::Crypto
+        ZLIB::ZLIB)
 if(TARGET hdf5::hdf5_cpp)
     target_link_libraries(scem_core PUBLIC hdf5::hdf5_cpp)
 elseif(TARGET hdf5::hdf5_cpp-shared)
@@ -161,7 +165,7 @@ add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests
         tests/test_analysis.cpp tests/test_bistatic.cpp tests/test_symmetry.cpp
         tests/test_remesh.cpp tests/test_curvature.cpp tests/test_bundle.cpp
         tests/test_cluster.cpp tests/test_similitude.cpp tests/test_prescan.cpp
-        tests/test_isar.cpp
+        tests/test_isar.cpp tests/test_render.cpp
         src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE

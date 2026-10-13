@@ -284,9 +284,25 @@
           "additionalProperties": false,
           "properties": {
             "vtk_export_path": {"type": "string", "minLength": 1},
+            "image_export_path": {"type": "string", "minLength": 1},
+            "image_mode": {"type": "string", "enum": ["currents", "lit_shadow", "shaded"], "default": "currents"},
+            "image_colormap": {"type": "string", "enum": ["turbo", "jet", "viridis", "inferno", "grayscale"], "default": "turbo"},
             "export_facet_currents": {"type": "boolean", "default": true},
             "export_lit_status": {"type": "boolean", "default": true},
             "export_material_ids": {"type": "boolean", "default": true},
+            "sample_index": {"type": "integer", "minimum": 0, "default": 0}
+          }
+        },
+        "render": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean", "default": true},
+            "path": {"type": "string", "minLength": 1},
+            "mode": {"type": "string", "enum": ["currents", "lit_shadow", "shaded"], "default": "currents"},
+            "colormap": {"type": "string", "enum": ["turbo", "jet", "viridis", "inferno", "grayscale"], "default": "turbo"},
+            "width": {"type": "integer", "minimum": 64, "default": 1024},
+            "height": {"type": "integer", "minimum": 64, "default": 768},
             "sample_index": {"type": "integer", "minimum": 0, "default": 0}
           }
         },

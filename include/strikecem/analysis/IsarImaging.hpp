@@ -8,8 +8,18 @@
 #include <nlohmann/json.hpp>
 
 #include "strikecem/io/Hdf5Reader.hpp"
+#include "strikecem/rendering/Image.hpp"
 
 namespace strikecem::analysis {
+
+struct IsarRenderOptions {
+    size_t width = 800;
+    size_t height = 800;
+    rendering::ColormapType colormap = rendering::ColormapType::Turbo;
+    bool show_axes = true;
+    bool show_colorbar = true;
+    bool show_peak_marker = true;
+};
 
 struct IsarConfig {
     std::string polarization = "HH";
@@ -73,6 +83,10 @@ struct IsarImage {
     std::string to_ascii_heatmap(size_t max_rows = 25, size_t max_cols = 50) const;
     nlohmann::json to_json() const;
     void write_json(const std::string& path) const;
+
+    // 2D Image rendering (PNG/BMP/PPM heatmap)
+    rendering::ImageBuffer render_image(const IsarRenderOptions& opts = {}) const;
+    void write_image(const std::string& path, const IsarRenderOptions& opts = {}) const;
 };
 
 class IsarProcessor {

@@ -442,4 +442,181 @@ void IsarImage::write_json(const std::string& path) const {
     out << to_json().dump(2) << "\n";
 }
 
+rendering::ImageBuffer IsarImage::render_image(const IsarRenderOptions& opts) const {
+    const size_t W = opts.width > 0 ? opts.width : 800;
+    const size_t H = opts.height > 0 ? opts.height : 800;
+    rendering::ImageBuffer img(W, H, {16, 20, 28, 255});
+
+    if (range_samples == 0 || cross_range_samples == 0) return img;
+
+    const int ML = 70; // Margin left
+    const int MR = 90; // Margin right (for colorbar)
+    const int MT = 55; // Margin top (for title)
+    const int MB = 60; // Margin bottom (for axis label)
+
+    const int plot_x0 = ML;
+    const int plot_y0 = MT;
+    const int plot_w = static_cast<int>(W) - ML - MR;
+    const int plot_h = static_cast<int>(H) - MT - MB;
+
+    if (plot_w <= 0 || plot_h <= 0) return img;
+
+    // Render 2D heatmap with bilinear interpolation
+    const double r_min = range_axis_m.front();
+    const double r_max = range_axis_m.back();
+    const double cr_min = cross_range_axis_m.front();
+    const double cr_max = cross_range_axis_m.back();
+
+    for (int py = 0; py < plot_h; ++py) {
+        // py = 0 is top (max range), py = plot_h - 1 is bottom (min range)
+        const double v = (plot_h > 1) ? (1.0 - static_cast<double>(py) / static_cast<double>(plot_h - 1)) : 0.5;
+        const double p_cont = v * static_cast<double>(range_samples - 1);
+        const size_t p0 = std::clamp(static_cast<size_t>(p_cont), size_t{0}, range_samples - 1);
+        const size_t p1 = std::min(p0 + 1, range_samples - 1);
+        const double fp = p_cont - static_cast<double>(p0);
+
+        for (int px = 0; px < plot_w; ++px) {
+            // px = 0 is left (min cross-range), px = plot_w - 1 is right (max cross-range)
+            const double u = (plot_w > 1) ? (static_cast<double>(px) / static_cast<double>(plot_w - 1)) : 0.5;
+            const double q_cont = u * static_cast<double>(cross_range_samples - 1);
+            const size_t q0 = std::clamp(static_cast<size_t>(q_cont), size_t{0}, cross_range_samples - 1);
+            const size_t q1 = std::min(q0 + 1, cross_range_samples - 1);
+            const double fq = q_cont - static_cast<double>(q0);
+
+            const double v00 = intensity_db[p0][q0];
+            const double v01 = intensity_db[p0][q1];
+            const double v10 = intensity_db[p1][q0];
+            const double v11 = intensity_db[p1][q1];
+
+            const double val_db = (1.0 - fp) * (1.0 - fq) * v00 +
+                                  (1.0 - fp) * fq * v01 +
+                                  fp * (1.0 - fq) * v10 +
+                                  fp * fq * v11;
+
+            const double norm_val = std::clamp((val_db + dynamic_range_db) / dynamic_range_db, 0.0, 1.0);
+            const rendering::Rgba color = rendering::evaluate_colormap(opts.colormap, norm_val);
+
+            img.set_pixel(plot_x0 + px, plot_y0 + py, color);
+        }
+    }
+
+    // Grid lines and Axis borders
+    if (opts.show_axes) {
+        img.draw_rect(plot_x0, plot_y0, plot_w, plot_h, {70, 90, 120, 255}, false);
+
+        // Down-range ticks (vertical axis)
+        const int num_ticks = 5;
+        for (int i = 0; i < num_ticks; ++i) {
+            const double frac = static_cast<double>(i) / static_cast<double>(num_ticks - 1);
+            const int ty = plot_y0 + static_cast<int>((1.0 - frac) * (plot_h - 1));
+            const double r_val = r_min + frac * (r_max - r_min);
+
+            // Subtle grid line
+            if (i > 0 && i < num_ticks - 1) {
+                for (int x = plot_x0 + 1; x < plot_x0 + plot_w - 1; x += 4) {
+                    img.set_pixel(x, ty, {40, 50, 70, 160});
+                }
+            }
+
+            img.draw_line(plot_x0 - 5, ty, plot_x0, ty, {180, 190, 210, 255});
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2) << (r_val >= 0 ? "+" : "") << r_val << "m";
+            img.draw_text(plot_x0 - 64, ty - 4, ss.str(), {190, 205, 225, 255}, 1);
+        }
+
+        // Cross-range ticks (horizontal axis)
+        for (int i = 0; i < num_ticks; ++i) {
+            const double frac = static_cast<double>(i) / static_cast<double>(num_ticks - 1);
+            const int tx = plot_x0 + static_cast<int>(frac * (plot_w - 1));
+            const double cr_val = cr_min + frac * (cr_max - cr_min);
+
+            // Subtle grid line
+            if (i > 0 && i < num_ticks - 1) {
+                for (int y = plot_y0 + 1; y < plot_y0 + plot_h - 1; y += 4) {
+                    img.set_pixel(tx, y, {40, 50, 70, 160});
+                }
+            }
+
+            img.draw_line(tx, plot_y0 + plot_h, tx, plot_y0 + plot_h + 5, {180, 190, 210, 255});
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2) << (cr_val >= 0 ? "+" : "") << cr_val << "m";
+            img.draw_text(tx - 24, plot_y0 + plot_h + 10, ss.str(), {190, 205, 225, 255}, 1);
+        }
+
+        // Axis Titles
+        img.draw_text(plot_x0 + plot_w / 2 - 64, plot_y0 + plot_h + 36, "CROSS-RANGE (m)", {220, 230, 245, 255}, 1);
+        img.draw_text(10, MT - 18, "DOWN-RANGE (m)", {220, 230, 245, 255}, 1);
+    }
+
+    // Peak scatterer reticle marker
+    if (opts.show_peak_marker && peak_magnitude > 0.0) {
+        const double r_span = r_max - r_min > 1e-9 ? (r_max - r_min) : 1.0;
+        const double cr_span = cr_max - cr_min > 1e-9 ? (cr_max - cr_min) : 1.0;
+
+        const double u_pk = std::clamp((peak_cross_range_m - cr_min) / cr_span, 0.0, 1.0);
+        const double v_pk = std::clamp((peak_range_m - r_min) / r_span, 0.0, 1.0);
+
+        const int pk_x = plot_x0 + static_cast<int>(u_pk * (plot_w - 1));
+        const int pk_y = plot_y0 + static_cast<int>((1.0 - v_pk) * (plot_h - 1));
+
+        // Bright white reticle circle and crosshairs
+        img.draw_circle(pk_x, pk_y, 7, {255, 255, 255, 255}, false);
+        img.draw_circle(pk_x, pk_y, 8, {0, 0, 0, 180}, false);
+        img.draw_line(pk_x - 12, pk_y, pk_x - 9, pk_y, {255, 255, 255, 255});
+        img.draw_line(pk_x + 9, pk_y, pk_x + 12, pk_y, {255, 255, 255, 255});
+        img.draw_line(pk_x, pk_y - 12, pk_x, pk_y - 9, {255, 255, 255, 255});
+        img.draw_line(pk_x, pk_y + 9, pk_x, pk_y + 12, {255, 255, 255, 255});
+    }
+
+    // Colorbar on right
+    if (opts.show_colorbar) {
+        const int cb_x = static_cast<int>(W) - 65;
+        const int cb_y = plot_y0;
+        const int cb_w = 16;
+        const int cb_h = plot_h;
+
+        img.draw_rect(cb_x - 1, cb_y - 1, cb_w + 2, cb_h + 2, {70, 90, 120, 255}, false);
+
+        for (int j = 0; j < cb_h; ++j) {
+            const double t_val = 1.0 - (static_cast<double>(j) / static_cast<double>(cb_h - 1));
+            const rendering::Rgba c = rendering::evaluate_colormap(opts.colormap, t_val);
+            for (int i = 0; i < cb_w; ++i) {
+                img.set_pixel(cb_x + i, cb_y + j, c);
+            }
+        }
+
+        // dB labels
+        const int num_cb_labels = 5;
+        for (int i = 0; i < num_cb_labels; ++i) {
+            const double frac = static_cast<double>(i) / static_cast<double>(num_cb_labels - 1);
+            const int ly = cb_y + static_cast<int>(frac * (cb_h - 1));
+            const double db_val = -frac * dynamic_range_db;
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(0) << db_val << "dB";
+            img.draw_line(cb_x + cb_w, ly, cb_x + cb_w + 4, ly, {180, 190, 210, 255});
+            img.draw_text(cb_x + cb_w + 6, ly - 4, ss.str(), {190, 205, 225, 255}, 1);
+        }
+    }
+
+    // Title banner
+    img.draw_rect(0, 0, static_cast<int>(W), 40, {10, 14, 22, 240}, true);
+    img.draw_line(0, 40, static_cast<int>(W), 40, {45, 65, 95, 255});
+
+    img.draw_text(16, 10, "STRIKECEM 2D ISAR RADAR HEATMAP", {255, 255, 255, 255}, 1);
+
+    std::ostringstream sub_oss;
+    sub_oss << "Band: [" << std::fixed << std::setprecision(2) << (f_min_hz * 1e-9) << "-"
+            << (f_max_hz * 1e-9) << "] GHz (B=" << (bandwidth_hz * 1e-9) << " GHz) | Pol: "
+            << polarization << " | Res: dR=" << std::setprecision(3) << range_resolution_m
+            << "m, dCR=" << cross_range_resolution_m << "m";
+    img.draw_text(16, 24, sub_oss.str(), {160, 200, 245, 255}, 1);
+
+    return img;
+}
+
+void IsarImage::write_image(const std::string& path, const IsarRenderOptions& opts) const {
+    const rendering::ImageBuffer img = render_image(opts);
+    img.write_image(path);
+}
+
 } // namespace strikecem::analysis

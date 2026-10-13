@@ -22,6 +22,8 @@
 #include "strikecem/solvers/Similitude.hpp"
 #include "strikecem/analysis/VehiclePreScan.hpp"
 #include "strikecem/analysis/IsarImaging.hpp"
+#include "strikecem/rendering/Image.hpp"
+#include "strikecem/rendering/ModelRenderer.hpp"
 #include "strikecem/io/AssetBundle.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
@@ -73,8 +75,13 @@ constexpr const char* kUsage =
     "               generate-slurm --manifest PATH --output PATH [--partition P] [--cpus N] [--time T]\n"
     "               generate-k8s   --manifest PATH --output PATH [--image IMG] [--coordinator URL] [--parallelism N]\n"
     "  isar         generate 2D ISAR radar image (range-Doppler) from frequency-azimuth sweep\n"
-    "               options: <database.h5> [--output isar.json] [--ascii] [--pol POL] [--dyn-range DB]\n"
+    "               options: <database.h5> [--output isar.json] [--image isar.png] [--ascii]\n"
+    "                        [--pol POL] [--dyn-range DB] [--colormap turbo|jet|viridis]\n"
     "                        [--range-samples N] [--cross-range-samples M] [--no-window] [--elevation DEG]\n"
+    "  render       render 3D vehicle snapshot (surface currents, lit/shadow, or shaded CAD)\n"
+    "               options: <config.json|mesh> [--output PATH] [--mode currents|lit_shadow|shaded]\n"
+    "                        [--az DEG] [--el DEG] [--freq HZ] [--pol HH|VV] [--camera radar|isometric]\n"
+    "                        [--colormap turbo|jet|viridis] [--width W] [--height H]\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -467,6 +474,8 @@ int cmd_prescan(const std::string& input_path, const std::string& report_out,
 }
 
 int cmd_isar(const std::string& input_path, const std::string& output_json,
+             const std::string& image_out, const std::string& colormap_name,
+             size_t img_width, size_t img_height,
              bool print_ascii, const std::string& pol, double dyn_range,
              size_t range_samples, size_t cross_range_samples, bool windowing,
              double elevation) {
@@ -485,7 +494,7 @@ int cmd_isar(const std::string& input_path, const std::string& output_json,
 
         const analysis::IsarImage img = analysis::IsarProcessor::compute_from_file(input_path, cfg);
 
-        if (print_ascii || output_json.empty()) {
+        if (print_ascii || (output_json.empty() && image_out.empty())) {
             std::cout << img.to_ascii_heatmap();
         }
 
@@ -493,12 +502,94 @@ int cmd_isar(const std::string& input_path, const std::string& output_json,
             img.write_json(output_json);
             std::cout << "isar_output: " << output_json << "\n";
         }
+
+        if (!image_out.empty()) {
+            analysis::IsarRenderOptions ropts;
+            ropts.width = img_width > 0 ? img_width : 800;
+            ropts.height = img_height > 0 ? img_height : 800;
+            ropts.colormap = rendering::parse_colormap(colormap_name);
+            img.write_image(image_out, ropts);
+            std::cout << "isar_image: " << image_out << "\n";
+        }
+
         std::cout << "status: ok\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "strikecem: error: ISAR processing failed: " << e.what() << "\n";
         return static_cast<int>(ExitCode::Output);
     }
+}
+
+int cmd_render(const std::string& input_path, const std::string& output_path,
+               const std::string& mode_str, double az, double el,
+               double freq_hz, const std::string& pol,
+               const std::string& camera_type, const std::string& colormap_name,
+               size_t width, size_t height, const std::string& schema_path) {
+    if (input_path.empty()) {
+        std::cerr << "strikecem: error: render requires input config or mesh path\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+
+    NormalizedMesh mesh;
+    GoOptions go;
+    MaterialOptions material;
+    Direction dir;
+    dir.azimuth_deg = az;
+    dir.elevation_deg = el;
+    dir.k_hat = direction_from_az_el(az, el);
+    double freq = freq_hz > 0.0 ? freq_hz : 10.0e9;
+    std::string polarization = pol.empty() ? "HH" : pol;
+
+    if (input_path.rfind(".json") != std::string::npos) {
+        ResolvedConfig rc = load_config(input_path, schema_path);
+        mesh = load_normalized_mesh(rc.value, config_dir_of(input_path), rc.schema_version);
+        SamplePlan plan = build_sample_plan(rc.value);
+        if (!plan.directions.empty()) dir = plan.directions.front();
+        if (!plan.frequencies_hz.empty()) freq = plan.frequencies_hz.front();
+        if (!plan.polarizations.empty()) polarization = plan.polarizations.front();
+        go.shadowing = rc.value["solver"]["go"]["shadowing"].get<bool>();
+    } else {
+        const fs::path abs_path = fs::absolute(input_path);
+        nlohmann::json dummy_cfg = {
+            {"model", {
+                {"path", abs_path.string()},
+                {"units", "m"},
+                {"mesh_repair", "report"}
+            }},
+            {"mesh", {{"max_aspect_ratio", 100.0}}},
+            {"scem_schema_version", "1.0"}
+        };
+        mesh = load_normalized_mesh(dummy_cfg, abs_path.parent_path(), "1.0");
+    }
+
+    rendering::ModelRenderConfig rcfg;
+    rcfg.width = width > 0 ? width : 1024;
+    rcfg.height = height > 0 ? height : 768;
+    rcfg.colormap = rendering::parse_colormap(colormap_name);
+
+    if (mode_str == "lit_shadow") rcfg.mode = rendering::RenderShadingMode::LitShadow;
+    else if (mode_str == "shaded") rcfg.mode = rendering::RenderShadingMode::ShadedCad;
+    else rcfg.mode = rendering::RenderShadingMode::SurfaceCurrents;
+
+    if (camera_type == "isometric") {
+        rcfg.camera_radar_aligned = false;
+        rcfg.camera = rendering::RenderCamera::isometric_view(mesh, 45.0, 25.0);
+    } else {
+        rcfg.camera_radar_aligned = true;
+    }
+
+    VtkMeshDiagnostics diag;
+    if (rcfg.mode != rendering::RenderShadingMode::ShadedCad) {
+        diag = compute_facet_diagnostics(mesh, dir, freq, polarization, go, material);
+    } else {
+        diag.facets.resize(mesh.triangles.size());
+    }
+
+    std::string out_file = output_path.empty() ? "model_render.png" : output_path;
+    rendering::ModelRenderer::render_and_save(out_file, mesh, diag, dir, freq, polarization, rcfg);
+    std::cout << "model_render: " << out_file << "\n";
+    std::cout << "status: ok\n";
+    return 0;
 }
 
 } // namespace
@@ -555,6 +646,17 @@ int run(int argc, char** argv) {
     size_t isar_cross_range_samples = 64;
     bool isar_windowing = true;
     double isar_elevation = 0.0;
+
+    // Rendering parameters
+    std::string isar_image_out;
+    std::string render_mode = "currents";
+    std::string render_camera = "radar";
+    std::string render_colormap = "turbo";
+    size_t render_width = 1024;
+    size_t render_height = 768;
+    double render_az = 0.0;
+    double render_el = 0.0;
+    double render_freq = 10.0e9;
 
     std::vector<std::string> positional;
 
@@ -627,7 +729,15 @@ int run(int argc, char** argv) {
         } else if (args[i] == "--job-name" && i + 1 < args.size()) {
             job_name = args[++i];
         } else if (args[i] == "--image" && i + 1 < args.size()) {
-            image_name = args[++i];
+            ++i;
+            if (command == "cluster" || command == "cluster-k8s" || command == "k8s") {
+                image_name = args[i];
+            } else if (command == "isar") {
+                isar_image_out = args[i];
+            } else {
+                image_name = args[i];
+                isar_image_out = args[i];
+            }
         } else if (args[i] == "--parallelism" && i + 1 < args.size()) {
             parallelism = std::stoi(args[++i]);
         } else if (args[i] == "--completions" && i + 1 < args.size()) {
@@ -652,6 +762,24 @@ int run(int argc, char** argv) {
             isar_windowing = false;
         } else if (args[i] == "--elevation" && i + 1 < args.size()) {
             isar_elevation = std::stod(args[++i]);
+        } else if (args[i] == "-i" && i + 1 < args.size()) {
+            isar_image_out = args[++i];
+        } else if (args[i] == "--colormap" && i + 1 < args.size()) {
+            render_colormap = args[++i];
+        } else if (args[i] == "--width" && i + 1 < args.size()) {
+            render_width = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--height" && i + 1 < args.size()) {
+            render_height = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--mode" && i + 1 < args.size()) {
+            render_mode = args[++i];
+        } else if (args[i] == "--camera" && i + 1 < args.size()) {
+            render_camera = args[++i];
+        } else if (args[i] == "--az" && i + 1 < args.size()) {
+            render_az = std::stod(args[++i]);
+        } else if (args[i] == "--el" && i + 1 < args.size()) {
+            render_el = std::stod(args[++i]);
+        } else if (args[i] == "--freq" && i + 1 < args.size()) {
+            render_freq = std::stod(args[++i]);
         } else if (args[i] == "--format" && i + 1 < args.size()) {
             mesh_format = args[++i];
         } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
@@ -678,7 +806,7 @@ int run(int argc, char** argv) {
         command != "export-mesh" && command != "bundle" && command != "run-parallel" &&
         command != "coordinate" && command != "worker" && command != "cluster" &&
         command != "cluster-slurm" && command != "cluster-k8s" && command != "prescan" &&
-        command != "isar") {
+        command != "isar" && command != "render") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -731,9 +859,17 @@ int run(int argc, char** argv) {
         }
         if (command == "isar") {
             const std::string& input = positional.empty() ? "" : positional[0];
-            return cmd_isar(input, output_path, isar_ascii, isar_pol, isar_dyn_range,
+            return cmd_isar(input, output_path, isar_image_out, render_colormap,
+                            render_width, render_height,
+                            isar_ascii, isar_pol, isar_dyn_range,
                             isar_range_samples, isar_cross_range_samples, isar_windowing,
                             isar_elevation);
+        }
+        if (command == "render") {
+            const std::string& input = positional.empty() ? "" : positional[0];
+            return cmd_render(input, output_path, render_mode, render_az, render_el,
+                              render_freq, isar_pol, render_camera, render_colormap,
+                              render_width, render_height, schema_path);
         }
 
         if (positional.size() != 1) {
@@ -923,6 +1059,48 @@ int run(int argc, char** argv) {
             const VtkMeshDiagnostics diag = compute_facet_diagnostics(mesh, dir, freq, pol, go, material);
             write_vtu(vtu_file, mesh, diag);
             std::cout << "vtk_diagnostics: " << vtu_file << "\n";
+        }
+        if (rc.value["output"].contains("render") ||
+            (rc.value["output"].contains("diagnostics") &&
+             rc.value["output"]["diagnostics"].contains("image_export_path"))) {
+            std::string render_path = "model_render.png";
+            std::string mode_str = "currents";
+            std::string colormap_str = "turbo";
+            size_t r_width = 1024, r_height = 768;
+            size_t s_idx = 0;
+
+            if (rc.value["output"].contains("render")) {
+                const auto& r_cfg = rc.value["output"]["render"];
+                render_path = r_cfg.value("path", "model_render.png");
+                mode_str = r_cfg.value("mode", "currents");
+                colormap_str = r_cfg.value("colormap", "turbo");
+                r_width = r_cfg.value("width", 1024);
+                r_height = r_cfg.value("height", 768);
+                s_idx = r_cfg.value("sample_index", 0);
+            } else {
+                const auto& d_cfg = rc.value["output"]["diagnostics"];
+                render_path = d_cfg["image_export_path"].get<std::string>();
+                mode_str = d_cfg.value("image_mode", "currents");
+                colormap_str = d_cfg.value("image_colormap", "turbo");
+                s_idx = d_cfg.value("sample_index", 0);
+            }
+
+            const size_t dir_idx = std::min(s_idx, execution_plan.directions.size() - 1);
+            const Direction& dir = execution_plan.directions[dir_idx];
+            const double freq = execution_plan.frequencies_hz.front();
+            const std::string pol = execution_plan.polarizations.front();
+
+            const VtkMeshDiagnostics diag = compute_facet_diagnostics(mesh, dir, freq, pol, go, material);
+            rendering::ModelRenderConfig mrc;
+            mrc.width = r_width;
+            mrc.height = r_height;
+            mrc.colormap = rendering::parse_colormap(colormap_str);
+            if (mode_str == "lit_shadow") mrc.mode = rendering::RenderShadingMode::LitShadow;
+            else if (mode_str == "shaded") mrc.mode = rendering::RenderShadingMode::ShadedCad;
+            else mrc.mode = rendering::RenderShadingMode::SurfaceCurrents;
+
+            rendering::ModelRenderer::render_and_save(render_path, mesh, diag, dir, freq, pol, mrc);
+            std::cout << "model_render: " << render_path << "\n";
         }
         if (rc.value["output"].contains("telemetry") &&
             rc.value["output"]["telemetry"].value("enabled", false)) {
