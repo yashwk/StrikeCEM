@@ -8,6 +8,7 @@
 #include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/Material.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
+#include "strikecem/analysis/BenchmarkReport.hpp"
 
 namespace {
 
@@ -455,6 +456,80 @@ TEST(MaterialSolver, NonPecGuards) {
     const strikecem::MaterialOptions future{true, strikecem::WallType::Coated, tabled_coat};
     EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, {}, future),
                  std::invalid_argument);
+}
+
+TEST(BenchmarkReport, AggregateEmpty) {
+    const auto agg = strikecem::analysis::aggregate_profiles({});
+    EXPECT_TRUE(agg.entries.empty());
+    EXPECT_DOUBLE_EQ(agg.cpu_avg_throughput, 0.0);
+    EXPECT_DOUBLE_EQ(agg.cuda_avg_throughput, 0.0);
+    EXPECT_DOUBLE_EQ(agg.max_throughput, 0.0);
+    const auto ascii = strikecem::analysis::render_benchmark_ascii(agg);
+    EXPECT_NE(ascii.find("no benchmark profiles"), std::string::npos);
+}
+
+TEST(BenchmarkReport, AggregateMetrics) {
+    strikecem::BenchmarkProfile p1;
+    p1.id = "cpu_run_1";
+    p1.backend = "cpu";
+    p1.precision = "float64";
+    p1.triangles = 10000;
+    p1.samples = 10;
+    p1.wall_seconds = 0.01; // 10000 * 10 / (0.01 * 1e6) = 10.0 M-Eval/s
+
+    strikecem::BenchmarkProfile p2;
+    p2.id = "cpu_run_2";
+    p2.backend = "cpu";
+    p2.precision = "float64";
+    p2.triangles = 20000;
+    p2.samples = 10;
+    p2.wall_seconds = 0.01; // 20000 * 10 / (0.01 * 1e6) = 20.0 M-Eval/s
+
+    strikecem::BenchmarkProfile p3;
+    p3.id = "cuda_run_1";
+    p3.backend = "cuda";
+    p3.precision = "float32";
+    p3.triangles = 50000;
+    p3.samples = 10;
+    p3.wall_seconds = 0.005; // 50000 * 10 / (0.005 * 1e6) = 100.0 M-Eval/s
+
+    const auto agg = strikecem::analysis::aggregate_profiles({p1, p2, p3});
+    ASSERT_EQ(agg.entries.size(), 3u);
+    EXPECT_NEAR(agg.entries[0].throughput_meval_per_sec, 10.0, 1e-6);
+    EXPECT_NEAR(agg.entries[1].throughput_meval_per_sec, 20.0, 1e-6);
+    EXPECT_NEAR(agg.entries[2].throughput_meval_per_sec, 100.0, 1e-6);
+
+    EXPECT_NEAR(agg.cpu_avg_throughput, 15.0, 1e-6);
+    EXPECT_NEAR(agg.cuda_avg_throughput, 100.0, 1e-6);
+    EXPECT_NEAR(agg.max_throughput, 100.0, 1e-6);
+    EXPECT_NEAR(agg.speedup_ratio, 100.0 / 15.0, 1e-4);
+}
+
+TEST(BenchmarkReport, RenderAsciiAndJson) {
+    strikecem::BenchmarkProfile p;
+    p.id = "test_run";
+    p.backend = "cpu";
+    p.precision = "float64";
+    p.triangles = 10000;
+    p.samples = 5;
+    p.wall_seconds = 0.005; // 10.0 M-Eval/s
+
+    const auto agg = strikecem::analysis::aggregate_profiles({p});
+    const auto ascii = strikecem::analysis::render_benchmark_ascii(agg);
+    EXPECT_NE(ascii.find("test_run"), std::string::npos);
+    EXPECT_NE(ascii.find("10.00"), std::string::npos);
+
+    const auto j = strikecem::analysis::benchmark_aggregation_to_json(agg);
+    EXPECT_EQ(j["profile_count"], 1u);
+    EXPECT_NEAR(j["cpu_avg_meval_per_sec"].get<double>(), 10.0, 1e-6);
+    EXPECT_EQ(j["profiles"][0]["id"], "test_run");
+}
+
+TEST(BenchmarkReport, LoadFromDirectory) {
+    const auto agg = strikecem::analysis::load_and_aggregate({"tools/benchmark_report/profiles"});
+    EXPECT_GE(agg.entries.size(), 2u);
+    EXPECT_GT(agg.cpu_avg_throughput, 0.0);
+    EXPECT_GT(agg.cuda_avg_throughput, 0.0);
 }
 
 }

@@ -79,7 +79,8 @@ add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/Mesh
         src/strikecem/api/RcsQueryEngine.cpp src/strikecem/sampling/SphericalSampling.cpp
         src/strikecem/geometry/AnalyticGeometry.cpp src/strikecem/telemetry/Telemetry.cpp
         src/strikecem/analysis/Comparison.cpp src/strikecem/geometry/Symmetry.cpp
-        src/strikecem/geometry/Remesh.cpp src/strikecem/solvers/Curvature.cpp)
+        src/strikecem/geometry/Remesh.cpp src/strikecem/solvers/Curvature.cpp
+        src/strikecem/analysis/BenchmarkReport.cpp)
 if(SCEM_HAVE_CUDA)
     target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO.cu)
     target_compile_definitions(scem_core PUBLIC SCEM_ENABLE_CUDA)
@@ -123,6 +124,9 @@ target_link_libraries(scem_quicklook PRIVATE scem_core)
 
 add_executable(scem_compare tools/scem_compare/main.cpp)
 target_link_libraries(scem_compare PRIVATE scem_core)
+
+add_executable(scem_benchreport tools/benchmark_report/main.cpp)
+target_link_libraries(scem_benchreport PRIVATE scem_core)
 
 # Shared library target for later StrikeEngine and Python SDK integration
 add_library(strikecem_lib SHARED src/strikecem/app/CLI.cpp)
@@ -180,7 +184,7 @@ target_compile_definitions(scem_tests PRIVATE
         SCEM_SCHEMA_INSTALL_RELATIVE_PATH="${SCEM_SCHEMA_INSTALL_RELATIVE_PATH}"
         SCEM_SOURCE_SCHEMA_PATH="${SCEM_SOURCE_SCHEMA_PATH}")
 
-install(TARGETS strikecem scem_quicklook scem_compare strikecem_lib
+install(TARGETS strikecem scem_quicklook scem_compare scem_benchreport strikecem_lib
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
