@@ -27,9 +27,42 @@
     "model": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path"],
+      "oneOf": [
+        {"required": ["path"], "not": {"required": ["primitives"]}},
+        {"required": ["primitives"], "not": {"required": ["path"]}}
+      ],
       "properties": {
         "path": {"type": "string", "minLength": 1},
+        "primitives": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {"type": "string", "enum": ["sphere", "cylinder", "ogive", "fin"]},
+              "name": {"type": "string"},
+              "material_tag": {"type": "string"},
+              "radius": {"type": "number", "exclusiveMinimum": 0},
+              "base_radius": {"type": "number", "exclusiveMinimum": 0},
+              "length": {"type": "number", "exclusiveMinimum": 0},
+              "root_chord": {"type": "number", "exclusiveMinimum": 0},
+              "tip_chord": {"type": "number", "exclusiveMinimum": 0},
+              "span": {"type": "number", "exclusiveMinimum": 0},
+              "sweep_angle_deg": {"type": "number"},
+              "thickness": {"type": "number", "minimum": 0},
+              "cap_start": {"type": "boolean"},
+              "cap_end": {"type": "boolean"},
+              "base_cap": {"type": "boolean"},
+              "center": {"$ref": "#/definitions/vector3"},
+              "origin": {"$ref": "#/definitions/vector3"},
+              "axis": {"$ref": "#/definitions/vector3"},
+              "chord_dir": {"$ref": "#/definitions/vector3"},
+              "span_dir": {"$ref": "#/definitions/vector3"}
+            }
+          }
+        },
+        "max_edge_length": {"type": "number", "exclusiveMinimum": 0, "default": 0.05},
         "format": {"type": "string", "enum": ["mesh"], "default": "mesh"},
         "units": {"type": "string", "enum": ["m", "mm", "in"], "default": "m"},
         "transform": {

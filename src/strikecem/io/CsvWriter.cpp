@@ -108,7 +108,7 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                          {"deterministic", rc.value["execution"]["deterministic"]},
                          {"backend", rc.value["execution"].value("accelerator", "cpu")},
                          {"device", cuda::active_device_name(rc.value)}};
-    sidecar["mesh"] = {{"path", rc.value["model"]["path"]},
+    sidecar["mesh"] = {{"path", rc.value["model"].value("path", "analytic_assembly")},
                        {"units", rc.value["model"]["units"]},
                        {"vertices", mesh.report.vertex_count},
                        {"triangles", mesh.report.triangle_count},

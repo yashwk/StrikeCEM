@@ -12,6 +12,7 @@
 
 #include "strikecem/core/Conventions.hpp"
 #include "strikecem/core/Config.hpp" // sha256_hex, canonical_json
+#include "strikecem/geometry/AnalyticGeometry.hpp"
 
 namespace strikecem {
 namespace {
@@ -562,6 +563,35 @@ ObjMesh parse_obj(const fs::path& path) {
 NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::path& config_dir,
                                     const std::string& schema_version) {
     const auto& model = resolved["model"];
+    if (model.contains("primitives")) {
+        const double max_edge = model.value("max_edge_length", 0.05);
+        NormalizedMesh mesh = tessellate_aerospace_assembly(model["primitives"], max_edge);
+        if (model.contains("transform")) {
+            const auto& t = model["transform"];
+            geom::Vec3d euler{0, 0, 0}, translate{0, 0, 0};
+            double scale = 1.0;
+            if (t.contains("rotate_euler_deg"))
+                euler = {t["rotate_euler_deg"][0], t["rotate_euler_deg"][1], t["rotate_euler_deg"][2]};
+            if (t.contains("translate"))
+                translate = {t["translate"][0], t["translate"][1], t["translate"][2]};
+            if (t.contains("scale"))
+                scale = t["scale"].get<double>();
+            for (auto& v : mesh.vertices) {
+                v = apply_transform(v, scale, euler, translate);
+            }
+            for (size_t i = 0; i < mesh.triangles.size(); ++i) {
+                const auto& tri = mesh.triangles[i];
+                geom::Vec3d e0 = mesh.vertices[tri[1]] - mesh.vertices[tri[0]];
+                geom::Vec3d e1 = mesh.vertices[tri[2]] - mesh.vertices[tri[0]];
+                geom::Vec3d n = geom::cross(e0, e1);
+                double len = n.length();
+                mesh.areas[i] = 0.5 * len;
+                if (len > 1e-12) n.normalize(); else n = {0, 0, 1};
+                mesh.normals[i] = n;
+            }
+        }
+        return mesh;
+    }
     const std::string rel = model["path"].get<std::string>();
     const fs::path mesh_path =
         fs::path(rel).is_absolute() ? fs::path(rel) : config_dir / rel;

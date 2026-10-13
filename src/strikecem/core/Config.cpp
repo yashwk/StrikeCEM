@@ -128,14 +128,16 @@ bool has_extension_ci(const std::string& path, const char* ext) {
 
 // Cross-field rules not expressible in JSON Schema.
 void validate_semantics(const json& r, const fs::path& config_dir) {
-    const std::string model_path = r["model"]["path"].get<std::string>();
-    if (!has_extension_ci(model_path, ".stl") && !has_extension_ci(model_path, ".obj"))
-        throw MeshError("unsupported mesh extension (v1 accepts .stl/.obj): " + model_path);
-    const fs::path mesh = model_path.empty() ? fs::path{}
-                                             : (fs::path(model_path).is_absolute()
-                                                    ? fs::path(model_path)
-                                                    : config_dir / model_path);
-    if (!fs::exists(mesh)) throw MeshError("mesh file not found: " + mesh.string());
+    if (r["model"].contains("path")) {
+        const std::string model_path = r["model"]["path"].get<std::string>();
+        if (!has_extension_ci(model_path, ".stl") && !has_extension_ci(model_path, ".obj"))
+            throw MeshError("unsupported mesh extension (v1 accepts .stl/.obj): " + model_path);
+        const fs::path mesh = model_path.empty() ? fs::path{}
+                                                 : (fs::path(model_path).is_absolute()
+                                                        ? fs::path(model_path)
+                                                        : config_dir / model_path);
+        if (!fs::exists(mesh)) throw MeshError("mesh file not found: " + mesh.string());
+    }
 
     if (r["frequency"].contains("sweep")) {
         const auto& s = r["frequency"]["sweep"];
