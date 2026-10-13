@@ -80,7 +80,8 @@ add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/Mesh
         src/strikecem/geometry/AnalyticGeometry.cpp src/strikecem/telemetry/Telemetry.cpp
         src/strikecem/analysis/Comparison.cpp src/strikecem/geometry/Symmetry.cpp
         src/strikecem/geometry/Remesh.cpp src/strikecem/solvers/Curvature.cpp
-        src/strikecem/analysis/BenchmarkReport.cpp)
+        src/strikecem/analysis/BenchmarkReport.cpp
+        src/strikecem/io/AssetBundle.cpp)
 if(SCEM_HAVE_CUDA)
     target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO.cu)
     target_compile_definitions(scem_core PUBLIC SCEM_ENABLE_CUDA)
@@ -151,7 +152,7 @@ add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests
         tests/test_adaptive.cpp tests/test_vtk.cpp tests/test_binary.cpp tests/test_c_api.cpp
         tests/test_spherical.cpp tests/test_analytic.cpp tests/test_telemetry.cpp
         tests/test_analysis.cpp tests/test_bistatic.cpp tests/test_symmetry.cpp
-        tests/test_remesh.cpp tests/test_curvature.cpp
+        tests/test_remesh.cpp tests/test_curvature.cpp tests/test_bundle.cpp
         src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE

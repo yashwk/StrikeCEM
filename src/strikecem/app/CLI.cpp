@@ -15,6 +15,7 @@
 #include "strikecem/core/Config.hpp"
 #include "strikecem/diagnostics/VtkWriter.hpp"
 #include "strikecem/distributed/Shard.hpp"
+#include "strikecem/io/AssetBundle.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
 #include "strikecem/io/DesignerPackage.hpp"
@@ -51,6 +52,8 @@ constexpr const char* kUsage =
     "               options: --output PATH, --direction-id N (default 0)\n"
     "  export-mesh  export procedural or normalized mesh to standalone format\n"
     "               options: --output PATH (-o), --format <obj|stl|vtu>\n"
+    "  bundle       package RCS database and geometry into StrikeEngine bundle (.scempack)\n"
+    "               options: --rcs PATH, --mesh PATH, --output PATH (-o), --lod NAME=PATH\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -251,6 +254,19 @@ int cmd_export_mesh(const ResolvedConfig& rc, const std::string& config_path,
     return 0;
 }
 
+int cmd_bundle(const std::string& rcs_path, const std::string& mesh_path,
+               const std::string& output_path,
+               const std::vector<std::pair<std::string, std::string>>& lod_meshes) {
+    if (rcs_path.empty() || mesh_path.empty() || output_path.empty()) {
+        std::cerr << "strikecem: error: bundle requires --rcs, --mesh, and --output\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+    create_strikeengine_package(output_path, rcs_path, mesh_path, lod_meshes);
+    std::cout << "bundle: " << output_path << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -262,6 +278,9 @@ int run(int argc, char** argv) {
     std::string mesh_format;
     std::string out_dir = "shards";
     std::string run_id;
+    std::string bundle_rcs;
+    std::string bundle_mesh;
+    std::vector<std::pair<std::string, std::string>> lod_meshes;
     size_t num_shards = 2;
     size_t direction_id = 0;
     std::vector<std::string> positional;
@@ -279,6 +298,18 @@ int run(int argc, char** argv) {
             out_dir = args[++i];
         } else if (args[i] == "--run-id" && i + 1 < args.size()) {
             run_id = args[++i];
+        } else if (args[i] == "--rcs" && i + 1 < args.size()) {
+            bundle_rcs = args[++i];
+        } else if (args[i] == "--mesh" && i + 1 < args.size()) {
+            bundle_mesh = args[++i];
+        } else if (args[i] == "--lod" && i + 1 < args.size()) {
+            std::string lod_spec = args[++i];
+            size_t eq = lod_spec.find('=');
+            if (eq != std::string::npos) {
+                lod_meshes.emplace_back(lod_spec.substr(0, eq), lod_spec.substr(eq + 1));
+            } else {
+                lod_meshes.emplace_back("lod", lod_spec);
+            }
         } else if (args[i] == "--format" && i + 1 < args.size()) {
             mesh_format = args[++i];
         } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
@@ -293,18 +324,21 @@ int run(int argc, char** argv) {
         }
     }
 
-    if (command.empty() || positional.empty()) {
+    if (command.empty() || (positional.empty() && command != "bundle")) {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
     if (command != "validate" && command != "estimate" && command != "run" &&
         command != "shard" && command != "merge" && command != "vtk" &&
-        command != "export-mesh") {
+        command != "export-mesh" && command != "bundle") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
 
     try {
+        if (command == "bundle") {
+            return cmd_bundle(bundle_rcs, bundle_mesh, output_path, lod_meshes);
+        }
         if (command == "merge") {
             std::vector<std::string> additional(positional.begin() + 1, positional.end());
             return cmd_merge(positional[0], additional, output_path, schema_path);
