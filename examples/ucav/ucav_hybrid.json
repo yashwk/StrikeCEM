@@ -1,0 +1,97 @@
+{
+  "angles": {
+    "azimuth": {
+      "start": 0,
+      "step": 1,
+      "stop": 360
+    },
+    "deduplicate_periodic_endpoints": true,
+    "elevation": {
+      "start": 0,
+      "step": 1,
+      "stop": 0
+    }
+  },
+  "execution": {
+    "accelerator": "cpu",
+    "batch_samples": 4096,
+    "cpu_threads": 1,
+    "cuda_batch_units": 0,
+    "cuda_device_id": 0,
+    "deterministic": true,
+    "max_memory_mb": 16384
+  },
+  "frequency": {
+    "frequency_hz": 10000000000,
+    "medium": {
+      "epsilon_r": 1.0,
+      "mu_r": 1.0,
+      "sigma": 0.0
+    }
+  },
+  "mesh": {
+    "frequency_policy": "user_mesh",
+    "max_aspect_ratio": 20.0,
+    "mode": "input",
+    "symmetry": {
+      "enabled": false,
+      "plane": "xz",
+      "tolerance_m": 0.0001
+    },
+    "validate_orientation": true,
+    "wavelength_adaptive": {
+      "alpha_edge": 0.05,
+      "alpha_smooth": 0.16666666666666666,
+      "curvature_factor": 0.1
+    }
+  },
+  "model": {
+    "format": "mesh",
+    "mesh_repair": "report",
+    "path": "ucav.obj",
+    "units": "m"
+  },
+  "output": {
+    "compression": false,
+    "format": "hdf5",
+    "include_metadata": true,
+    "path": "ucav_hybrid.h5",
+    "precision": 6
+  },
+  "physics": {
+    "incident_amplitude": 1.0,
+    "monostatic": true,
+    "phase_reference": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "polarization_basis": "linear"
+  },
+  "polarization": [
+    "HH",
+    "VV"
+  ],
+  "run": {
+    "checkpoint_every_n_samples": 1000,
+    "log_level": "info"
+  },
+  "scem_schema_version": "1.0",
+  "solver": {
+    "edge_correction": "ptd_full",
+    "po_options": {
+      "curvature_correction": true,
+      "edge_correction": "ptd_full",
+      "illumination_model": "hard",
+      "max_bounces": 3,
+      "shadowing": true
+    },
+    "precision": "float64",
+    "rcs_units": "dBsm",
+    "sbr": {
+      "max_bounces": 3
+    },
+    "shadowing": true,
+    "type": "SBR"
+  }
+}

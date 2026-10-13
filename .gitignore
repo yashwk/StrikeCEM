@@ -16,6 +16,8 @@ build/
 .scem_cache/
 *.csv
 *.h5
+*.scempack
+*.vtu
 
 # editor / IDE
 .idea/

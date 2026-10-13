@@ -198,9 +198,18 @@
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
-        "type": {"const": "PO", "default": "PO"},
+        "type": {"type": "string", "enum": ["PO", "SBR"], "default": "PO"},
         "precision": {"type": "string", "enum": ["float32", "float64", "mixed"], "default": "float64"},
         "rcs_units": {"const": "dBsm", "default": "dBsm", "description": "Compatibility field; v1 output always contains both square metres and dBsm."},
+        "edge_correction": {"type": "string", "enum": ["none", "fringe", "ptd_lite", "ptd_full"], "default": "none"},
+        "shadowing": {"type": "boolean", "default": false},
+        "sbr": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_bounces": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1}
+          }
+        },
         "po_options": {
           "type": "object",
           "additionalProperties": false,
