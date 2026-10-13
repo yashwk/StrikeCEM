@@ -11,6 +11,7 @@
 
 #include <H5Cpp.h>
 
+#include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
 #include "strikecem/io/Hdf5Reader.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
@@ -166,6 +167,47 @@ ShardData read_hdf5_shard(const fs::path& h5_path) {
     return sd;
 }
 
+ShardData read_scem_shard(const fs::path& scem_path) {
+    ShardData sd;
+    try {
+        const ScemDatabase db = read_scem_database(scem_path.string());
+        if (db.metadata.contains("config_hash")) {
+            sd.config_hash = db.metadata["config_hash"].get<std::string>();
+        }
+        if (db.metadata.contains("geometry_hash")) {
+            sd.geometry_hash = db.metadata["geometry_hash"].get<std::string>();
+        }
+        if (db.metadata.contains("normalized_mesh_hash")) {
+            sd.normalized_mesh_hash = db.metadata["normalized_mesh_hash"].get<std::string>();
+        }
+        if (db.metadata.contains("sample_plan") && db.metadata["sample_plan"].contains("hash")) {
+            sd.sample_plan_hash = db.metadata["sample_plan"]["hash"].get<std::string>();
+        }
+        if (db.metadata.contains("shard") && db.metadata["shard"].contains("run_id")) {
+            sd.run_id = db.metadata["shard"]["run_id"].get<std::string>();
+        } else if (db.metadata.contains("run_id")) {
+            sd.run_id = db.metadata["run_id"].get<std::string>();
+        }
+        if (db.metadata.contains("resolved_config")) {
+            sd.config_json = db.metadata["resolved_config"];
+        }
+        sd.samples.reserve(db.rows.size());
+        for (const auto& r : db.rows) {
+            PoSampleResult psr;
+            psr.sample_id = r.sample_id;
+            psr.direction_id = r.direction_index;
+            psr.frequency_id = r.frequency_index;
+            psr.pol_id = r.polarization_index;
+            psr.scattering = {r.scattering_real, r.scattering_imag};
+            psr.rcs_sqm = r.rcs_sqm;
+            sd.samples.push_back(psr);
+        }
+    } catch (const std::exception& e) {
+        throw OutputError("cannot read SCEM shard " + scem_path.string() + ": " + e.what());
+    }
+    return sd;
+}
+
 } // namespace
 
 ShardManifest create_shards(const ResolvedConfig& rc, const SamplePlan& plan,
@@ -188,7 +230,7 @@ ShardManifest create_shards(const ResolvedConfig& rc, const SamplePlan& plan,
     const size_t rem_units = total_units % num_shards;
 
     const std::string format = rc.value["output"].value("format", "hdf5");
-    const std::string ext = (format == "csv") ? ".csv" : ".h5";
+    const std::string ext = (format == "csv") ? ".csv" : ((format == "scem") ? ".scem" : ".h5");
 
     ShardManifest manifest;
     manifest.version = "1.0";
@@ -323,6 +365,8 @@ void merge_shards(const std::string& manifest_or_shard_path,
         ShardData sd;
         if (sp.extension() == ".csv") {
             sd = read_csv_shard(sp);
+        } else if (sp.extension() == ".scem") {
+            sd = read_scem_shard(sp);
         } else {
             sd = read_hdf5_shard(sp);
         }
@@ -420,6 +464,9 @@ void merge_shards(const std::string& manifest_or_shard_path,
     if (out_fmt == "csv" || fs::path(output_path).extension() == ".csv") {
         rc.value["output"]["format"] = "csv";
         write_csv_and_sidecar(rc, plan, mesh, merged_result, designer, fringe, material);
+    } else if (out_fmt == "scem" || fs::path(output_path).extension() == ".scem") {
+        rc.value["output"]["format"] = "scem";
+        write_scem_output(rc, plan, mesh, merged_result, designer, fringe, material);
     } else {
         rc.value["output"]["format"] = "hdf5";
         write_hdf5_output(rc, plan, mesh, merged_result, designer, fringe, material);

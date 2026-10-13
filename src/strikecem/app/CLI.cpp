@@ -15,6 +15,7 @@
 #include "strikecem/core/Config.hpp"
 #include "strikecem/diagnostics/VtkWriter.hpp"
 #include "strikecem/distributed/Shard.hpp"
+#include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
 #include "strikecem/io/DesignerPackage.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
@@ -375,12 +376,21 @@ int run(int argc, char** argv) {
                     fs::remove(out_path.string() + ".json");
                 }
             } else {
-                if (format != "hdf5")
+                if (format == "hdf5") {
+                    if (check_existing_hdf5(rc, plan, mesh, out_path.string())) {
+                        std::cout << "status: already complete\n";
+                        return 0;
+                    }
+                } else if (format == "scem") {
+                    if (check_existing_scem(rc, plan, mesh, out_path.string())) {
+                        std::cout << "status: already complete\n";
+                        return 0;
+                    }
                     throw OutputError("output file exists; remove it to regenerate: " +
                                       out_path.string());
-                if (check_existing_hdf5(rc, plan, mesh, out_path.string())) {
-                    std::cout << "status: already complete\n";
-                    return 0;
+                } else {
+                    throw OutputError("output file exists; remove it to regenerate: " +
+                                      out_path.string());
                 }
             }
         }
@@ -422,6 +432,8 @@ int run(int argc, char** argv) {
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         if (format == "csv")
             write_csv_and_sidecar(rc, execution_plan, mesh, result, designer, fringe, material);
+        else if (format == "scem")
+            write_scem_output(rc, execution_plan, mesh, result, designer, fringe, material);
         else
             write_hdf5_output(rc, execution_plan, mesh, result, designer, fringe, material);
         if (!bench_profile.empty())

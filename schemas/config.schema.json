@@ -176,7 +176,7 @@
       "required": ["path"],
       "properties": {
         "path": {"type": "string", "minLength": 1},
-        "format": {"type": "string", "enum": ["csv", "hdf5"], "default": "hdf5"},
+        "format": {"type": "string", "enum": ["csv", "hdf5", "scem"], "default": "hdf5"},
         "precision": {"type": "integer", "minimum": 1, "maximum": 17, "default": 6},
         "compression": {"const": false, "default": false, "description": "Compression is not supported in v1."},
         "include_metadata": {"const": true, "default": true, "description": "Provenance metadata is always written in v1."},
