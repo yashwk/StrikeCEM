@@ -159,14 +159,24 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         const C coeff_jk = C(0, 1) * k * eta_r / static_cast<Real>(4.0 * std::numbers::pi);
         const Vec3<Real> k_hat{static_cast<Real>(dir.k_hat.x), static_cast<Real>(dir.k_hat.y),
                                static_cast<Real>(dir.k_hat.z)};
-        const Vec3<Real> r_hat{-k_hat.x, -k_hat.y, -k_hat.z};
-        const auto basis = polarization_basis(dir.k_hat);
-        const Vec3<Real> eh{static_cast<Real>(basis.h.x), static_cast<Real>(basis.h.y),
-                            static_cast<Real>(basis.h.z)};
-        const Vec3<Real> ev{static_cast<Real>(basis.v.x), static_cast<Real>(basis.v.y),
-                            static_cast<Real>(basis.v.z)};
-        const Vec3<Real> tx_e[2] = {{eh.x * e0_r, eh.y * e0_r, eh.z * e0_r},
-                                    {ev.x * e0_r, ev.y * e0_r, ev.z * e0_r}};
+        const Vec3<Real> to_inc{-k_hat.x, -k_hat.y, -k_hat.z};
+        const Vec3<Real> r_hat = dir.is_bistatic
+            ? Vec3<Real>{static_cast<Real>(dir.r_obs_hat.x), static_cast<Real>(dir.r_obs_hat.y),
+                         static_cast<Real>(dir.r_obs_hat.z)}
+            : to_inc;
+        const auto tx_basis = polarization_basis(dir.k_hat);
+        const Vec3<Real> tx_eh{static_cast<Real>(tx_basis.h.x), static_cast<Real>(tx_basis.h.y),
+                               static_cast<Real>(tx_basis.h.z)};
+        const Vec3<Real> tx_ev{static_cast<Real>(tx_basis.v.x), static_cast<Real>(tx_basis.v.y),
+                               static_cast<Real>(tx_basis.v.z)};
+        const Vec3<Real> tx_e[2] = {{tx_eh.x * e0_r, tx_eh.y * e0_r, tx_eh.z * e0_r},
+                                    {tx_ev.x * e0_r, tx_ev.y * e0_r, tx_ev.z * e0_r}};
+
+        const auto rx_basis = dir.is_bistatic ? polarization_basis(dir.r_obs_hat) : tx_basis;
+        const Vec3<Real> rx_eh{static_cast<Real>(rx_basis.h.x), static_cast<Real>(rx_basis.h.y),
+                               static_cast<Real>(rx_basis.h.z)};
+        const Vec3<Real> rx_ev{static_cast<Real>(rx_basis.v.x), static_cast<Real>(rx_basis.v.y),
+                               static_cast<Real>(rx_basis.v.z)};
         const CVec3<Real> r_hat_c = to_complex<Real>(r_hat);
         const CVec3<Real> k_hat_c = to_complex<Real>(k_hat);
         CVec3<Real> f_tx[2] = {};
@@ -186,7 +196,7 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
             const Vec3<Real> n{static_cast<Real>(mesh.normals[t].x),
                                static_cast<Real>(mesh.normals[t].y),
                                static_cast<Real>(mesh.normals[t].z)};
-            if (!(dot(n, r_hat) > Real(0))) continue; // hard shadow: n.(-k_hat)
+            if (!(dot(n, to_inc) > Real(0))) continue; // hard shadow: n.(-k_inc)
             if (go.shadowing) {
                 const geom::Vec3d center_d{static_cast<double>(centroid.x),
                                            static_cast<double>(centroid.y),
@@ -462,16 +472,16 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
             }
         }
         // Linear scattering matrix S[rx][tx], rows/cols (H, V).
-        const Vec3<Real> rx_e[2] = {eh, ev};
+        const Vec3<Real> rx_e[2] = {rx_eh, rx_ev};
         std::complex<double> f_tx_d[2][3];
         for (int tx = 0; tx < 2; ++tx)
             for (int i = 0; i < 3; ++i)
                 f_tx_d[tx][i] = {static_cast<double>(f_tx[tx][i].real()),
                                  static_cast<double>(f_tx[tx][i].imag())};
-        const double eh_d[3] = {static_cast<double>(eh.x), static_cast<double>(eh.y),
-                                static_cast<double>(eh.z)};
-        const double ev_d[3] = {static_cast<double>(ev.x), static_cast<double>(ev.y),
-                                static_cast<double>(ev.z)};
+        const double eh_d[3] = {static_cast<double>(rx_eh.x), static_cast<double>(rx_eh.y),
+                                static_cast<double>(rx_eh.z)};
+        const double ev_d[3] = {static_cast<double>(rx_ev.x), static_cast<double>(rx_ev.y),
+                                static_cast<double>(rx_ev.z)};
         const auto channels = project_unit_channels(
             f_tx_d, eh_d, ev_d, static_cast<double>(e0_r), plan.polarizations);
         for (size_t pi = 0; pi < npol; ++pi) {

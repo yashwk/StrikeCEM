@@ -145,7 +145,7 @@ add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests
         tests/test_ray.cpp tests/test_fresnel.cpp tests/test_material.cpp tests/test_distributed.cpp
         tests/test_adaptive.cpp tests/test_vtk.cpp tests/test_binary.cpp tests/test_c_api.cpp
         tests/test_spherical.cpp tests/test_analytic.cpp tests/test_telemetry.cpp
-        tests/test_analysis.cpp
+        tests/test_analysis.cpp tests/test_bistatic.cpp
         src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE

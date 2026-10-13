@@ -189,12 +189,37 @@ void validate_semantics(const json& r, const fs::path& config_dir) {
         if (el_min < -90.0 || el_max > 90.0 || el_min > el_max)
             throw ConfigError("angles.spherical invalid elevation range");
     } else {
-        for (const auto& pair : angles["list"]) {
-            require_finite(pair[0].get<double>(), "angles.list azimuth");
-            require_finite(pair[1].get<double>(), "angles.list elevation");
-            const double el = pair[1].get<double>();
+        for (const auto& entry : angles["list"]) {
+            require_finite(entry[0].get<double>(), "angles.list azimuth");
+            require_finite(entry[1].get<double>(), "angles.list elevation");
+            const double el = entry[1].get<double>();
             if (el < -90.0 || el > 90.0)
                 throw ConfigError("angles.list elevation out of [-90, 90]");
+            if (entry.size() >= 4) {
+                require_finite(entry[2].get<double>(), "angles.list obs azimuth");
+                require_finite(entry[3].get<double>(), "angles.list obs elevation");
+                const double obs_el = entry[3].get<double>();
+                if (obs_el < -90.0 || obs_el > 90.0)
+                    throw ConfigError("angles.list obs elevation out of [-90, 90]");
+            }
+        }
+    }
+
+    if (angles.contains("bistatic")) {
+        const auto& bi = angles["bistatic"];
+        const std::string mode = bi.value("mode", "fixed_offset");
+        if (mode == "fixed_receiver") {
+            if (!bi.contains("receiver_azimuth_deg") || !bi.contains("receiver_elevation_deg")) {
+                throw ConfigError("angles.bistatic mode 'fixed_receiver' requires receiver_azimuth_deg and receiver_elevation_deg");
+            }
+        } else if (mode == "fixed_transmitter") {
+            if (!bi.contains("transmitter_azimuth_deg") || !bi.contains("transmitter_elevation_deg")) {
+                throw ConfigError("angles.bistatic mode 'fixed_transmitter' requires transmitter_azimuth_deg and transmitter_elevation_deg");
+            }
+        } else if (mode == "bistatic_angle") {
+            if (!bi.contains("bistatic_angle_deg")) {
+                throw ConfigError("angles.bistatic mode 'bistatic_angle' requires bistatic_angle_deg");
+            }
         }
     }
 
@@ -308,7 +333,65 @@ SamplePlan build_sample_plan(const json& resolved) {
         plan.frequencies_hz.push_back(resolved["frequency"]["frequency_hz"].get<double>());
     }
 
-    std::vector<std::pair<double, double>> pairs;
+    const bool monostatic = resolved.contains("physics") && resolved["physics"].contains("monostatic")
+                                ? resolved["physics"]["monostatic"].get<bool>()
+                                : true;
+    const bool has_bistatic_config = resolved["angles"].contains("bistatic") || !monostatic;
+
+    struct DirCandidate {
+        double tx_az = 0.0;
+        double tx_el = 0.0;
+        double rx_az = 0.0;
+        double rx_el = 0.0;
+        bool is_bistatic = false;
+
+        bool operator<(const DirCandidate& o) const {
+            if (std::abs(tx_az - o.tx_az) > 1e-9) return tx_az < o.tx_az;
+            if (std::abs(tx_el - o.tx_el) > 1e-9) return tx_el < o.tx_el;
+            if (std::abs(rx_az - o.rx_az) > 1e-9) return rx_az < o.rx_az;
+            return rx_el < o.rx_el;
+        }
+        bool operator==(const DirCandidate& o) const {
+            return std::abs(tx_az - o.tx_az) < 1e-9 &&
+                   std::abs(tx_el - o.tx_el) < 1e-9 &&
+                   std::abs(rx_az - o.rx_az) < 1e-9 &&
+                   std::abs(rx_el - o.rx_el) < 1e-9;
+        }
+    };
+
+    auto map_bistatic = [&](double in_az, double in_el) -> DirCandidate {
+        const double mono_rx_az = normalize_azimuth(in_az + 180.0);
+        const double mono_rx_el = -in_el;
+        DirCandidate c;
+        c.tx_az = in_az;
+        c.tx_el = in_el;
+        c.rx_az = mono_rx_az;
+        c.rx_el = mono_rx_el;
+        c.is_bistatic = has_bistatic_config;
+        if (!resolved["angles"].contains("bistatic")) {
+            return c;
+        }
+        const auto& bi = resolved["angles"]["bistatic"];
+        const std::string mode = bi.value("mode", "fixed_offset");
+        if (mode == "fixed_receiver") {
+            c.rx_az = normalize_azimuth(bi.value("receiver_azimuth_deg", 0.0));
+            c.rx_el = bi.value("receiver_elevation_deg", 0.0);
+        } else if (mode == "fixed_transmitter") {
+            c.tx_az = normalize_azimuth(bi.value("transmitter_azimuth_deg", 0.0));
+            c.tx_el = bi.value("transmitter_elevation_deg", 0.0);
+            c.rx_az = in_az;
+            c.rx_el = in_el;
+        } else if (mode == "bistatic_angle") {
+            const double beta = bi.value("bistatic_angle_deg", 0.0);
+            c.rx_az = normalize_azimuth(mono_rx_az + beta);
+            c.rx_el = mono_rx_el;
+        } else { // fixed_offset
+            c.rx_az = normalize_azimuth(mono_rx_az + bi.value("azimuth_offset_deg", 0.0));
+            c.rx_el = std::clamp(mono_rx_el + bi.value("elevation_offset_deg", 0.0), -90.0, 90.0);
+        }
+        return c;
+    };
+
     const auto& angles = resolved["angles"];
     if (angles.contains("spherical")) {
         const auto& sph = angles["spherical"];
@@ -316,7 +399,19 @@ SamplePlan build_sample_plan(const json& resolved) {
         const double el_min = sph.value("elevation_min_deg", -90.0);
         const double el_max = sph.value("elevation_max_deg", 90.0);
         plan.directions = generate_fibonacci_sphere(num_pts, el_min, el_max);
+        if (has_bistatic_config) {
+            for (auto& d : plan.directions) {
+                DirCandidate c = map_bistatic(d.azimuth_deg, d.elevation_deg);
+                d.is_bistatic = true;
+                d.bistatic_azimuth_deg = c.rx_az;
+                d.bistatic_elevation_deg = c.rx_el;
+                d.r_obs_hat = direction_from_az_el(c.rx_az, c.rx_el);
+                const double cos_beta = std::clamp(-geom::dot(d.k_hat, d.r_obs_hat), -1.0, 1.0);
+                d.bistatic_angle_deg = rad_to_deg(std::acos(cos_beta));
+            }
+        }
     } else {
+        std::vector<DirCandidate> candidates;
         if (angles.contains("azimuth")) {
             const auto& az = angles["azimuth"], el = angles["elevation"];
             const double az_step = angles.contains("adaptive")
@@ -329,26 +424,56 @@ SamplePlan build_sample_plan(const json& resolved) {
             std::sort(az_values.begin(), az_values.end());
             std::sort(el_values.begin(), el_values.end());
             for (double a : az_values)
-                for (double e : el_values) pairs.emplace_back(a, e);
+                for (double e : el_values) candidates.push_back(map_bistatic(a, e));
         } else {
-            for (const auto& p : angles["list"])
-                pairs.emplace_back(normalize_azimuth(p[0].get<double>()), p[1].get<double>());
-            std::sort(pairs.begin(), pairs.end());
+            for (const auto& p : angles["list"]) {
+                if (p.size() >= 4) {
+                    DirCandidate c;
+                    c.tx_az = normalize_azimuth(p[0].get<double>());
+                    c.tx_el = p[1].get<double>();
+                    c.rx_az = normalize_azimuth(p[2].get<double>());
+                    c.rx_el = p[3].get<double>();
+                    c.is_bistatic = true;
+                    candidates.push_back(c);
+                } else {
+                    candidates.push_back(map_bistatic(normalize_azimuth(p[0].get<double>()), p[1].get<double>()));
+                }
+            }
         }
         // Canonical order, stable IDs, duplicate removal with warning (FR-4).
-        std::vector<std::pair<double, double>> unique;
-        for (const auto& p : pairs) {
-            if (!unique.empty() && std::abs(unique.back().first - p.first) < 1e-9 &&
-                std::abs(unique.back().second - p.second) < 1e-9)
+        std::sort(candidates.begin(), candidates.end());
+        std::vector<DirCandidate> unique;
+        for (const auto& c : candidates) {
+            if (!unique.empty() && unique.back() == c)
                 continue;
-            unique.push_back(p);
+            unique.push_back(c);
         }
-        if (unique.size() != pairs.size())
-            plan.warnings.push_back("removed " + std::to_string(pairs.size() - unique.size()) +
+        if (unique.size() != candidates.size())
+            plan.warnings.push_back("removed " + std::to_string(candidates.size() - unique.size()) +
                                     " duplicate direction(s)");
         uint32_t id = 0;
-        for (const auto& [az, el] : unique)
-            plan.directions.push_back({id++, az, el, direction_from_az_el(az, el)});
+        for (const auto& c : unique) {
+            Direction d;
+            d.id = id++;
+            d.azimuth_deg = c.tx_az;
+            d.elevation_deg = c.tx_el;
+            d.k_hat = direction_from_az_el(c.tx_az, c.tx_el);
+            if (c.is_bistatic) {
+                d.is_bistatic = true;
+                d.bistatic_azimuth_deg = c.rx_az;
+                d.bistatic_elevation_deg = c.rx_el;
+                d.r_obs_hat = direction_from_az_el(c.rx_az, c.rx_el);
+                const double cos_beta = std::clamp(-geom::dot(d.k_hat, d.r_obs_hat), -1.0, 1.0);
+                d.bistatic_angle_deg = rad_to_deg(std::acos(cos_beta));
+            } else {
+                d.is_bistatic = false;
+                d.bistatic_azimuth_deg = c.tx_az;
+                d.bistatic_elevation_deg = c.tx_el;
+                d.r_obs_hat = -d.k_hat;
+                d.bistatic_angle_deg = 0.0;
+            }
+            plan.directions.push_back(d);
+        }
     }
 
     for (const auto& p : resolved["polarization"]) plan.polarizations.push_back(p.get<std::string>());
@@ -357,8 +482,13 @@ SamplePlan build_sample_plan(const json& resolved) {
     std::ostringstream plan_bytes;
     plan_bytes << std::setprecision(std::numeric_limits<double>::max_digits10);
     for (double f : plan.frequencies_hz) plan_bytes << "f" << f << ";";
-    for (const auto& d : plan.directions)
-        plan_bytes << "d" << d.azimuth_deg << "," << d.elevation_deg << ";";
+    for (const auto& d : plan.directions) {
+        plan_bytes << "d" << d.azimuth_deg << "," << d.elevation_deg;
+        if (d.is_bistatic) {
+            plan_bytes << ":b" << d.bistatic_azimuth_deg << "," << d.bistatic_elevation_deg;
+        }
+        plan_bytes << ";";
+    }
     for (const auto& p : plan.polarizations) plan_bytes << "p" << p << ";";
     plan.hash = sha256_hex(plan_bytes.str());
     return plan;

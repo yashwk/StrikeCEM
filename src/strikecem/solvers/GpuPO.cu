@@ -285,9 +285,15 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             p.kx = static_cast<Real>(dir.k_hat.x);
             p.ky = static_cast<Real>(dir.k_hat.y);
             p.kz = static_cast<Real>(dir.k_hat.z);
-            p.rx = -p.kx;
-            p.ry = -p.ky;
-            p.rz = -p.kz;
+            if (dir.is_bistatic) {
+                p.rx = static_cast<Real>(dir.r_obs_hat.x);
+                p.ry = static_cast<Real>(dir.r_obs_hat.y);
+                p.rz = static_cast<Real>(dir.r_obs_hat.z);
+            } else {
+                p.rx = -p.kx;
+                p.ry = -p.ky;
+                p.rz = -p.kz;
+            }
             const auto basis = polarization_basis(dir.k_hat);
             p.ehx = static_cast<Real>(basis.h.x * e0);
             p.ehy = static_cast<Real>(basis.h.y * e0);
@@ -319,8 +325,9 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             const uint32_t di = units[b + i].second;
             const Direction& dir = plan.directions[di];
             const auto basis = polarization_basis(dir.k_hat);
-            const double eh[3] = {basis.h.x, basis.h.y, basis.h.z};
-            const double ev[3] = {basis.v.x, basis.v.y, basis.v.z};
+            const auto rx_basis = dir.is_bistatic ? polarization_basis(dir.r_obs_hat) : basis;
+            const double eh[3] = {rx_basis.h.x, rx_basis.h.y, rx_basis.h.z};
+            const double ev[3] = {rx_basis.v.x, rx_basis.v.y, rx_basis.v.z};
             std::complex<double> ftx[2][3];
             for (int tx = 0; tx < 2; ++tx)
                 for (int c = 0; c < 3; ++c)

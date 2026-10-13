@@ -33,6 +33,19 @@ struct Direction {
     double elevation_deg = 0.0;
     geom::Vec3d k_hat;
     double weight = 0.0; // Spherical quadrature weight in steradians
+
+    // Bistatic radar scattering extensions
+    bool is_bistatic = false;
+    double bistatic_azimuth_deg = 0.0;
+    double bistatic_elevation_deg = 0.0;
+    geom::Vec3d r_obs_hat; // observation unit vector
+    double bistatic_angle_deg = 0.0; // angle between -k_hat and r_obs_hat
+
+    Direction() = default;
+    Direction(uint32_t id_, double az, double el, const geom::Vec3d& k, double w = 0.0)
+        : id(id_), azimuth_deg(az), elevation_deg(el), k_hat(k), weight(w),
+          is_bistatic(false), bistatic_azimuth_deg(az), bistatic_elevation_deg(el),
+          r_obs_hat(-k), bistatic_angle_deg(0.0) {}
 };
 
 struct SamplePlan {

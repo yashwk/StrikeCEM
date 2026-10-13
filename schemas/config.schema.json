@@ -111,7 +111,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "monostatic": {"const": true, "default": true},
+        "monostatic": {"type": "boolean", "default": true},
         "polarization_basis": {"const": "linear", "default": "linear", "description": "The v1 incidence basis is fixed to linear; circular output channels are selected through polarization."},
         "incident_amplitude": {"type": "number", "exclusiveMinimum": 0, "default": 1.0}
       }
@@ -133,8 +133,22 @@
           "items": {
             "type": "array",
             "minItems": 2,
-            "maxItems": 2,
-            "items": [{"type": "number"}, {"type": "number"}]
+            "maxItems": 4,
+            "items": {"type": "number"}
+          }
+        },
+        "bistatic": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "enum": ["fixed_offset", "fixed_receiver", "fixed_transmitter", "bistatic_angle"], "default": "fixed_offset"},
+            "azimuth_offset_deg": {"type": "number", "default": 0.0},
+            "elevation_offset_deg": {"type": "number", "default": 0.0},
+            "receiver_azimuth_deg": {"type": "number"},
+            "receiver_elevation_deg": {"type": "number"},
+            "transmitter_azimuth_deg": {"type": "number"},
+            "transmitter_elevation_deg": {"type": "number"},
+            "bistatic_angle_deg": {"type": "number", "minimum": 0, "maximum": 180}
           }
         },
         "spherical": {
