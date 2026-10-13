@@ -39,16 +39,18 @@ namespace fs = std::filesystem;
 #endif
 
 constexpr const char* kUsage =
-    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run|shard|merge|vtk> [options...] <args...>\n"
-    "  validate  resolve config, inspect mesh, print hashes\n"
-    "  estimate  validate plus plan counts and resource estimates\n"
-    "  run       full pipeline (PO solver, CSV/HDF5 output)\n"
-    "  shard     partition sample plan across N shards and write shard configs + manifest\n"
-    "            options: --num-shards N (default 2), --out-dir DIR (default ./shards), --run-id ID\n"
-    "  merge     merge completed shard outputs into a unified database\n"
-    "            options: --output PATH <manifest.json | shard1 shard2 ...>\n"
-    "  vtk       export 3D per-facet currents and lit/shadow diagnostics to VTK (.vtu)\n"
-    "            options: --output PATH, --direction-id N (default 0)\n"
+    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run|shard|merge|vtk|export-mesh> [options...] <args...>\n"
+    "  validate     resolve config, inspect mesh, print hashes\n"
+    "  estimate     validate plus plan counts and resource estimates\n"
+    "  run          full pipeline (PO solver, CSV/HDF5 output)\n"
+    "  shard        partition sample plan across N shards and write shard configs + manifest\n"
+    "               options: --num-shards N (default 2), --out-dir DIR (default ./shards), --run-id ID\n"
+    "  merge        merge completed shard outputs into a unified database\n"
+    "               options: --output PATH <manifest.json | shard1 shard2 ...>\n"
+    "  vtk          export 3D per-facet currents and lit/shadow diagnostics to VTK (.vtu)\n"
+    "               options: --output PATH, --direction-id N (default 0)\n"
+    "  export-mesh  export procedural or normalized mesh to standalone format\n"
+    "               options: --output PATH (-o), --format <obj|stl|vtu>\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -230,6 +232,25 @@ int cmd_vtk(const ResolvedConfig& rc, const SamplePlan& plan,
     return 0;
 }
 
+int cmd_export_mesh(const ResolvedConfig& rc, const std::string& config_path,
+                    const std::string& output_path, const std::string& format) {
+    NormalizedMesh mesh =
+        load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+    std::string out_mesh = output_path;
+    if (out_mesh.empty()) {
+        std::string ext = format.empty() ? "obj" : format;
+        if (!ext.empty() && ext.front() == '.') ext = ext.substr(1);
+        out_mesh = "exported_mesh." + ext;
+    }
+    export_mesh(mesh, out_mesh, format);
+    std::cout << "exported_mesh: " << out_mesh << "\n";
+    std::cout << "vertices: " << mesh.vertices.size() << "\n";
+    std::cout << "triangles: " << mesh.triangles.size() << "\n";
+    std::cout << "surface_area: " << mesh.report.total_area_m2 << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -238,6 +259,7 @@ int run(int argc, char** argv) {
     std::string bench_profile;
     std::string command;
     std::string output_path;
+    std::string mesh_format;
     std::string out_dir = "shards";
     std::string run_id;
     size_t num_shards = 2;
@@ -257,6 +279,8 @@ int run(int argc, char** argv) {
             out_dir = args[++i];
         } else if (args[i] == "--run-id" && i + 1 < args.size()) {
             run_id = args[++i];
+        } else if (args[i] == "--format" && i + 1 < args.size()) {
+            mesh_format = args[++i];
         } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
             output_path = args[++i];
         } else if (args[i] == "--help" || args[i] == "-h") {
@@ -274,7 +298,8 @@ int run(int argc, char** argv) {
         return static_cast<int>(ExitCode::Config);
     }
     if (command != "validate" && command != "estimate" && command != "run" &&
-        command != "shard" && command != "merge" && command != "vtk") {
+        command != "shard" && command != "merge" && command != "vtk" &&
+        command != "export-mesh") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -298,6 +323,7 @@ int run(int argc, char** argv) {
         const std::vector<BenchmarkProfile> profiles = load_benchmark_profiles();
         if (command == "validate") return cmd_validate(rc, config_path);
         if (command == "estimate") return cmd_estimate(rc, config_path, profiles);
+        if (command == "export-mesh") return cmd_export_mesh(rc, config_path, output_path, mesh_format);
 
         SamplePlan plan = build_sample_plan(rc.value);
         print_warnings(plan);

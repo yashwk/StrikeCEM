@@ -7,6 +7,7 @@
 #include <iterator>
 #include <gtest/gtest.h>
 
+#include "strikecem/app/CLI.hpp"
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/MeshLoader.hpp"
 
@@ -265,6 +266,164 @@ TEST(Mesh, LoadNormalizedMeshPreservesTagsAndCache) {
     ASSERT_EQ(cached.triangle_tags.size(), 2u);
     EXPECT_EQ(cached.triangle_tags[0], "fin_left");
     EXPECT_EQ(cached.triangle_tags[1], "fin_right");
+}
+
+int call_cli(const std::vector<std::string>& arg_list) {
+    std::vector<std::string> storage = {"strikecem"};
+    for (const auto& a : arg_list) storage.push_back(a);
+    std::vector<char*> argv;
+    for (auto& s : storage) argv.push_back(s.data());
+    return strikecem::cli::run(static_cast<int>(argv.size()), argv.data());
+}
+
+TEST(MeshExport, ObjRoundTrip) {
+    const fs::path tmp = fs::temp_directory_path() / "scem_export_test.obj";
+    std::error_code ec;
+    fs::remove(tmp, ec);
+
+    const auto mesh = load_fixture_mesh("valid_minimal.json");
+    strikecem::export_mesh_obj(mesh, tmp);
+    ASSERT_TRUE(fs::exists(tmp));
+
+    const auto obj = strikecem::parse_obj(tmp);
+    EXPECT_EQ(obj.triangles.size(), mesh.triangles.size());
+
+    fs::remove(tmp, ec);
+}
+
+TEST(MeshExport, StlRoundTrip) {
+    const fs::path tmp = fs::temp_directory_path() / "scem_export_test.stl";
+    std::error_code ec;
+    fs::remove(tmp, ec);
+
+    const auto mesh = load_fixture_mesh("valid_minimal.json");
+    strikecem::export_mesh_stl(mesh, tmp);
+    ASSERT_TRUE(fs::exists(tmp));
+
+    const auto tris = strikecem::parse_stl(tmp);
+    EXPECT_EQ(tris.size(), mesh.triangles.size());
+
+    fs::remove(tmp, ec);
+}
+
+TEST(MeshExport, VtuStructure) {
+    const fs::path tmp = fs::temp_directory_path() / "scem_export_test.vtu";
+    std::error_code ec;
+    fs::remove(tmp, ec);
+
+    const auto mesh = load_fixture_mesh("valid_minimal.json");
+    strikecem::export_mesh_vtu(mesh, tmp);
+    ASSERT_TRUE(fs::exists(tmp));
+
+    std::ifstream in(tmp);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("<VTKFile type=\"UnstructuredGrid\""), std::string::npos);
+    EXPECT_NE(content.find("NumberOfPoints=\"4\""), std::string::npos);
+    EXPECT_NE(content.find("NumberOfCells=\"2\""), std::string::npos);
+    EXPECT_NE(content.find("Name=\"Points\""), std::string::npos);
+    EXPECT_NE(content.find("Name=\"Normals\""), std::string::npos);
+    EXPECT_NE(content.find("Name=\"Area_m2\""), std::string::npos);
+
+    fs::remove(tmp, ec);
+}
+
+TEST(MeshExport, AutoDetectAndExplicitFormat) {
+    const fs::path dir = fs::temp_directory_path() / "scem_export_dispatcher";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    const auto mesh = load_fixture_mesh("valid_minimal.json");
+
+    // Auto-detect obj
+    const fs::path p_obj = dir / "test.obj";
+    strikecem::export_mesh(mesh, p_obj);
+    EXPECT_TRUE(fs::exists(p_obj));
+
+    // Auto-detect stl
+    const fs::path p_stl = dir / "test.stl";
+    strikecem::export_mesh(mesh, p_stl);
+    EXPECT_TRUE(fs::exists(p_stl));
+
+    // Auto-detect vtu
+    const fs::path p_vtu = dir / "test.vtu";
+    strikecem::export_mesh(mesh, p_vtu);
+    EXPECT_TRUE(fs::exists(p_vtu));
+
+    // Explicit format override
+    const fs::path p_custom = dir / "test.custom";
+    strikecem::export_mesh(mesh, p_custom, "stl");
+    EXPECT_TRUE(fs::exists(p_custom));
+    const auto tris = strikecem::parse_stl(p_custom);
+    EXPECT_EQ(tris.size(), mesh.triangles.size());
+
+    // Invalid format throws MeshLoadError
+    EXPECT_THROW(strikecem::export_mesh(mesh, p_custom, "invalid_fmt"), strikecem::MeshLoadError);
+
+    fs::remove_all(dir, ec);
+}
+
+TEST(MeshExport, ProceduralAssemblyExport) {
+    const fs::path dir = fs::temp_directory_path() / "scem_export_procedural";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    nlohmann::json cfg;
+    cfg["scem_schema_version"] = "1.0";
+    cfg["model"] = {
+        {"primitives", {
+            {{"type", "ogive"}, {"name", "nose"}, {"base_radius", 0.2}, {"length", 0.6}},
+            {{"type", "cylinder"}, {"name", "fuselage"}, {"radius", 0.2}, {"length", 1.2}, {"origin", {0.6, 0.0, 0.0}}}
+        }},
+        {"max_edge_length", 0.1}
+    };
+    cfg["frequency"] = {{"frequency_hz", 10e9}};
+    cfg["angles"]["azimuth"] = {{"start", 0}, {"stop", 0}, {"step", 1}};
+    cfg["angles"]["elevation"] = {{"start", 0}, {"stop", 0}, {"step", 1}};
+    cfg["polarization"] = {"HH"};
+    cfg["solver"] = {{"type", "PO"}};
+    cfg["output"] = {{"path", (dir / "out.h5").string()}, {"format", "hdf5"}};
+
+    const fs::path cfg_file = dir / "config.json";
+    {
+        std::ofstream out(cfg_file);
+        out << cfg.dump(2);
+    }
+
+    const auto rc = strikecem::load_config(cfg_file.string(), SCEM_SCHEMA_PATH);
+    const auto mesh = strikecem::load_normalized_mesh(rc.value, dir, rc.schema_version);
+    EXPECT_GT(mesh.vertices.size(), 50u);
+    EXPECT_GT(mesh.triangles.size(), 50u);
+
+    const fs::path out_obj = dir / "missile.obj";
+    strikecem::export_mesh(mesh, out_obj);
+    ASSERT_TRUE(fs::exists(out_obj));
+
+    const auto obj = strikecem::parse_obj(out_obj);
+    EXPECT_EQ(obj.triangles.size(), mesh.triangles.size());
+
+    // CLI export-mesh test
+    const fs::path cli_stl = dir / "cli_missile.stl";
+    int ret = call_cli({"export-mesh", cfg_file.string(), "-o", cli_stl.string(), "--format", "stl"});
+    EXPECT_EQ(ret, 0);
+    ASSERT_TRUE(fs::exists(cli_stl));
+    const auto stl_tris = strikecem::parse_stl(cli_stl);
+    EXPECT_EQ(stl_tris.size(), mesh.triangles.size());
+
+    fs::remove_all(dir, ec);
+}
+
+TEST(MeshExport, CLIInvalidFormatFails) {
+    const fs::path dir = fs::temp_directory_path() / "scem_export_invalid";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    int ret = call_cli({"export-mesh", fixture("valid_minimal.json"), "-o", (dir / "bad.xyz").string(), "--format", "unsupported_xyz"});
+    EXPECT_NE(ret, 0);
+
+    fs::remove_all(dir, ec);
 }
 
 } // namespace

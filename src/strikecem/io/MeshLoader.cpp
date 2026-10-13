@@ -579,6 +579,7 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
             for (auto& v : mesh.vertices) {
                 v = apply_transform(v, scale, euler, translate);
             }
+            double total_area = 0.0;
             for (size_t i = 0; i < mesh.triangles.size(); ++i) {
                 const auto& tri = mesh.triangles[i];
                 geom::Vec3d e0 = mesh.vertices[tri[1]] - mesh.vertices[tri[0]];
@@ -586,8 +587,22 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
                 geom::Vec3d n = geom::cross(e0, e1);
                 double len = n.length();
                 mesh.areas[i] = 0.5 * len;
+                total_area += mesh.areas[i];
                 if (len > 1e-12) n.normalize(); else n = {0, 0, 1};
                 mesh.normals[i] = n;
+            }
+            mesh.report.total_area_m2 = total_area;
+            if (!mesh.vertices.empty()) {
+                mesh.report.bbox_min = mesh.vertices.front();
+                mesh.report.bbox_max = mesh.vertices.front();
+                for (const auto& v : mesh.vertices) {
+                    mesh.report.bbox_min.x = std::min(mesh.report.bbox_min.x, v.x);
+                    mesh.report.bbox_min.y = std::min(mesh.report.bbox_min.y, v.y);
+                    mesh.report.bbox_min.z = std::min(mesh.report.bbox_min.z, v.z);
+                    mesh.report.bbox_max.x = std::max(mesh.report.bbox_max.x, v.x);
+                    mesh.report.bbox_max.y = std::max(mesh.report.bbox_max.y, v.y);
+                    mesh.report.bbox_max.z = std::max(mesh.report.bbox_max.z, v.z);
+                }
             }
         }
         return mesh;
@@ -706,6 +721,164 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved, const fs::pa
     mesh.normalized_mesh_hash = hash_normalized(check);
     store_cache(geometry_hash, key_echo, cache_dir, mesh);
     return mesh;
+}
+
+void export_mesh_obj(const NormalizedMesh& mesh, const fs::path& path) {
+    const fs::path dir = path.parent_path();
+    if (!dir.empty()) {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+    }
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        throw MeshLoadError("cannot create OBJ file for writing: " + path.string());
+    }
+    out << "# StrikeCEM Wavefront OBJ Export\n";
+    out << "# Vertices: " << mesh.vertices.size() << "\n";
+    out << "# Faces: " << mesh.triangles.size() << "\n";
+    out << std::fixed << std::setprecision(8);
+    for (const auto& v : mesh.vertices) {
+        out << "v " << v.x << " " << v.y << " " << v.z << "\n";
+    }
+    for (const auto& n : mesh.normals) {
+        out << "vn " << n.x << " " << n.y << " " << n.z << "\n";
+    }
+    for (size_t i = 0; i < mesh.triangles.size(); ++i) {
+        const auto& t = mesh.triangles[i];
+        out << "f " << (t[0] + 1) << "//" << (i + 1) << " "
+            << (t[1] + 1) << "//" << (i + 1) << " "
+            << (t[2] + 1) << "//" << (i + 1) << "\n";
+    }
+}
+
+void export_mesh_stl(const NormalizedMesh& mesh, const fs::path& path) {
+    const fs::path dir = path.parent_path();
+    if (!dir.empty()) {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw MeshLoadError("cannot create STL file for writing: " + path.string());
+    }
+    char header[80] = {0};
+    std::strncpy(header, "StrikeCEM Exported Binary STL", sizeof(header) - 1);
+    out.write(header, sizeof(header));
+    const uint32_t count = static_cast<uint32_t>(mesh.triangles.size());
+    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+    for (size_t i = 0; i < mesh.triangles.size(); ++i) {
+        const auto& t = mesh.triangles[i];
+        const float n[3] = {static_cast<float>(mesh.normals[i].x),
+                            static_cast<float>(mesh.normals[i].y),
+                            static_cast<float>(mesh.normals[i].z)};
+        const float v1[3] = {static_cast<float>(mesh.vertices[t[0]].x),
+                             static_cast<float>(mesh.vertices[t[0]].y),
+                             static_cast<float>(mesh.vertices[t[0]].z)};
+        const float v2[3] = {static_cast<float>(mesh.vertices[t[1]].x),
+                             static_cast<float>(mesh.vertices[t[1]].y),
+                             static_cast<float>(mesh.vertices[t[1]].z)};
+        const float v3[3] = {static_cast<float>(mesh.vertices[t[2]].x),
+                             static_cast<float>(mesh.vertices[t[2]].y),
+                             static_cast<float>(mesh.vertices[t[2]].z)};
+        const uint16_t attr = 0;
+        out.write(reinterpret_cast<const char*>(n), sizeof(n));
+        out.write(reinterpret_cast<const char*>(v1), sizeof(v1));
+        out.write(reinterpret_cast<const char*>(v2), sizeof(v2));
+        out.write(reinterpret_cast<const char*>(v3), sizeof(v3));
+        out.write(reinterpret_cast<const char*>(&attr), sizeof(attr));
+    }
+}
+
+void export_mesh_vtu(const NormalizedMesh& mesh, const fs::path& path) {
+    const fs::path dir = path.parent_path();
+    if (!dir.empty()) {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+    }
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        throw MeshLoadError("cannot create VTU file for writing: " + path.string());
+    }
+    const size_t n_points = mesh.vertices.size();
+    const size_t n_cells = mesh.triangles.size();
+
+    out << "<?xml version=\"1.0\"?>\n";
+    out << "<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" byte_order=\"LittleEndian\">\n";
+    out << "  <UnstructuredGrid>\n";
+    out << "    <Piece NumberOfPoints=\"" << n_points << "\" NumberOfCells=\"" << n_cells << "\">\n";
+
+    // Points
+    out << "      <Points>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Points\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+    out << std::fixed << std::setprecision(8);
+    for (const auto& v : mesh.vertices) {
+        out << "          " << v.x << " " << v.y << " " << v.z << "\n";
+    }
+    out << "        </DataArray>\n";
+    out << "      </Points>\n";
+
+    // Cells
+    out << "      <Cells>\n";
+    out << "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n";
+    for (const auto& t : mesh.triangles) {
+        out << "          " << t[0] << " " << t[1] << " " << t[2] << "\n";
+    }
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n";
+    for (size_t i = 1; i <= n_cells; ++i) {
+        out << "          " << (i * 3) << "\n";
+    }
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n";
+    for (size_t i = 0; i < n_cells; ++i) {
+        out << "          5\n"; // VTK_TRIANGLE
+    }
+    out << "        </DataArray>\n";
+    out << "      </Cells>\n";
+
+    // CellData
+    out << "      <CellData>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Normals\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+    for (const auto& n : mesh.normals) {
+        out << "          " << n.x << " " << n.y << " " << n.z << "\n";
+    }
+    out << "        </DataArray>\n";
+    out << "        <DataArray type=\"Float64\" Name=\"Area_m2\" format=\"ascii\">\n";
+    for (double a : mesh.areas) {
+        out << "          " << a << "\n";
+    }
+    out << "        </DataArray>\n";
+    out << "      </CellData>\n";
+
+    out << "    </Piece>\n";
+    out << "  </UnstructuredGrid>\n";
+    out << "</VTKFile>\n";
+}
+
+void export_mesh(const NormalizedMesh& mesh, const fs::path& path,
+                 const std::string& format) {
+    std::string fmt = format;
+    if (fmt.empty()) {
+        std::string ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".obj") fmt = "obj";
+        else if (ext == ".stl") fmt = "stl";
+        else if (ext == ".vtu") fmt = "vtu";
+        else fmt = "obj";
+    } else {
+        std::transform(fmt.begin(), fmt.end(), fmt.begin(), ::tolower);
+    }
+
+    if (fmt == "obj") {
+        export_mesh_obj(mesh, path);
+    } else if (fmt == "stl") {
+        export_mesh_stl(mesh, path);
+    } else if (fmt == "vtu") {
+        export_mesh_vtu(mesh, path);
+    } else {
+        throw MeshLoadError("unsupported mesh export format: " + fmt + " (supported: obj, stl, vtu)");
+    }
 }
 
 } // namespace strikecem

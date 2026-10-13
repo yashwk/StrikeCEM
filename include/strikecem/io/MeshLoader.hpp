@@ -70,4 +70,11 @@ NormalizedMesh load_normalized_mesh(const nlohmann::json& resolved,
                                     const std::filesystem::path& config_dir,
                                     const std::string& schema_version);
 
+// Standalone mesh exporters: .obj, .stl, .vtu
+void export_mesh_obj(const NormalizedMesh& mesh, const std::filesystem::path& path);
+void export_mesh_stl(const NormalizedMesh& mesh, const std::filesystem::path& path);
+void export_mesh_vtu(const NormalizedMesh& mesh, const std::filesystem::path& path);
+void export_mesh(const NormalizedMesh& mesh, const std::filesystem::path& path,
+                 const std::string& format = "");
+
 } // namespace strikecem
