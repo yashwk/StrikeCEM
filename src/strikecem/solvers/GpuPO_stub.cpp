@@ -8,8 +8,9 @@ bool cuda_available() noexcept { return false; }
 CudaDeviceInfo cuda_device_info(int) { throw CudaError("built without CUDA support"); }
 
 uint64_t cuda_footprint_bytes(const nlohmann::json& resolved, size_t triangles) {
-    const bool float32 = resolved["solver"].value("precision", "float64") == "float32";
-    return triangles * (3 + 3 + 1) * (float32 ? 4 : 8);
+    const std::string precision = resolved["solver"].value("precision", "float64");
+    const bool float32_geom = (precision == "float32" || precision == "mixed");
+    return triangles * (3 + 3 + 1) * (float32_geom ? 4 : 8);
 }
 
 size_t cuda_select_batch_units(const nlohmann::json&, size_t, size_t, int, size_t) {

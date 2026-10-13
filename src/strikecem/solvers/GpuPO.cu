@@ -9,6 +9,7 @@
 #include <limits>
 
 #include <cuda_runtime.h>
+#include <nvtx3/nvToolsExt.h>
 
 #include "strikecem/solvers/Projection.hpp"
 #include "strikecem/geometry/Symmetry.hpp"
@@ -154,6 +155,104 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
     }
 }
 
+__global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
+                                const float* __restrict__ normals,   // [3N]
+                                const float* __restrict__ areas,     // [N]
+                                const UnitParams<double>* __restrict__ units, // [U]
+                                Cplx<double>* __restrict__ out,       // [6U] F per tx
+                                int* __restrict__ lit_out,          // [U] lit facets
+                                int ntris) {
+    const int u = static_cast<int>(blockIdx.x);
+    const UnitParams<double> p = units[u];
+    __shared__ double sh[2][3][2 * kBlock]; // [tx][xyz][re/im interleave]
+    __shared__ int lit_sh[kBlock];
+    Cplx<double> sum[2][3] = {};
+    int lit = 0;
+    for (int t = static_cast<int>(threadIdx.x); t < ntris; t += kBlock) {
+        const double nx = static_cast<double>(normals[3 * t]);
+        const double ny = static_cast<double>(normals[3 * t + 1]);
+        const double nz = static_cast<double>(normals[3 * t + 2]);
+        if (!(nx * -p.kx + ny * -p.ky + nz * -p.kz > 0.0)) continue; // hard shadow
+        ++lit;
+        const double cx = static_cast<double>(centroids[3 * t]);
+        const double cy = static_cast<double>(centroids[3 * t + 1]);
+        const double cz = static_cast<double>(centroids[3 * t + 2]);
+        double s_in, c_in, s_out, c_out;
+        fsincos(-p.k * (p.kx * cx + p.ky * cy + p.kz * cz), &s_in, &c_in);
+        fsincos(p.k * (p.rx * cx + p.ry * cy + p.rz * cz), &s_out, &c_out);
+        // Per-transmit incident H = (k x E0)/eta, phased at the centroid.
+        const double e0v[2][3] = {{p.ehx, p.ehy, p.ehz}, {p.evx, p.evy, p.evz}};
+        for (int tx = 0; tx < 2; ++tx) {
+            const double* e = e0v[tx];
+            // k x E0
+            const double kxx[3] = {p.ky * e[2] - p.kz * e[1], p.kz * e[0] - p.kx * e[2],
+                                   p.kx * e[1] - p.ky * e[0]};
+            // H complex = (k x E0)/eta * (c_in + j s_in)
+            double h_re[3], h_im[3];
+            for (int i = 0; i < 3; ++i) {
+                h_re[i] = kxx[i] / p.eta * c_in;
+                h_im[i] = kxx[i] / p.eta * s_in;
+            }
+            // J = 2 n x H
+            const double nrm[3] = {nx, ny, nz};
+            double j_re[3], j_im[3];
+            for (int i = 0; i < 3; ++i) {
+                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
+                j_re[i] = 2.0 * (nrm[j] * h_re[k3] - nrm[k3] * h_re[j]);
+                j_im[i] = 2.0 * (nrm[j] * h_im[k3] - nrm[k3] * h_im[j]);
+            }
+            // T = r x (r x J), ADR-0001 transverse projector.
+            const double rv[3] = {p.rx, p.ry, p.rz};
+            double t1_re[3], t1_im[3], t2_re[3], t2_im[3];
+            for (int i = 0; i < 3; ++i) {
+                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
+                t1_re[i] = rv[j] * j_re[k3] - rv[k3] * j_re[j];
+                t1_im[i] = rv[j] * j_im[k3] - rv[k3] * j_im[j];
+            }
+            for (int i = 0; i < 3; ++i) {
+                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
+                t2_re[i] = rv[j] * t1_re[k3] - rv[k3] * t1_re[j];
+                t2_im[i] = rv[j] * t1_im[k3] - rv[k3] * t1_im[j];
+            }
+            // coeff = j*k*eta/4pi * A, times output phase.
+            const double a = static_cast<double>(areas[t]);
+            const double ck_re = -p.k * p.eta / (4.0 * 3.141592653589793) * a * s_out;
+            const double ck_im = p.k * p.eta / (4.0 * 3.141592653589793) * a * c_out;
+            for (int i = 0; i < 3; ++i) {
+                sum[tx][i].re += ck_re * t2_re[i] - ck_im * t2_im[i];
+                sum[tx][i].im += ck_re * t2_im[i] + ck_im * t2_re[i];
+            }
+        }
+    }
+    const int lane = static_cast<int>(threadIdx.x);
+    for (int tx = 0; tx < 2; ++tx)
+        for (int i = 0; i < 3; ++i) {
+            sh[tx][i][2 * lane] = sum[tx][i].re;
+            sh[tx][i][2 * lane + 1] = sum[tx][i].im;
+        }
+    lit_sh[lane] = lit;
+    __syncthreads();
+    for (int stride = kBlock / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            for (int tx = 0; tx < 2; ++tx)
+                for (int i = 0; i < 3; ++i) {
+                    sh[tx][i][2 * lane] += sh[tx][i][2 * (lane + stride)];
+                    sh[tx][i][2 * lane + 1] += sh[tx][i][2 * (lane + stride) + 1];
+                }
+            lit_sh[lane] += lit_sh[lane + stride];
+        }
+        __syncthreads();
+    }
+    if (lane == 0) {
+        for (int tx = 0; tx < 2; ++tx)
+            for (int i = 0; i < 3; ++i) {
+                out[6 * u + 3 * tx + i].re = sh[tx][i][0];
+                out[6 * u + 3 * tx + i].im = sh[tx][i][1];
+            }
+        lit_out[u] = lit_sh[0];
+    }
+}
+
 } // namespace
 
 bool cuda_available() noexcept {
@@ -187,8 +286,9 @@ CudaDeviceInfo cuda_device_info(int device_id) {
 }
 
 uint64_t cuda_footprint_bytes(const nlohmann::json& resolved, size_t triangles) {
-    const bool float32 = resolved["solver"].value("precision", "float64") == "float32";
-    return triangles * (3 + 3 + 1) * (float32 ? 4 : 8);
+    const std::string precision = resolved["solver"].value("precision", "float64");
+    const bool float32_geom = (precision == "float32" || precision == "mixed");
+    return triangles * (3 + 3 + 1) * (float32_geom ? 4 : 8);
 }
 
 size_t cuda_select_batch_units(const nlohmann::json& resolved, size_t nunits, size_t triangles,
@@ -286,6 +386,7 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             }
         }
     }
+    nvtxRangePushA("po_gpu_facet_upload");
     const size_t ntris = h_area.size();
     DeviceBuffer<Real> d_cent(h_cent.size());
     DeviceBuffer<Real> d_norm(h_norm.size());
@@ -296,6 +397,7 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
                           cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_area.get(), h_area.data(), h_area.size() * sizeof(Real),
                           cudaMemcpyHostToDevice));
+    nvtxRangePop();
 
     const size_t override_units =
         static_cast<size_t>(resolved["execution"].value("cuda_batch_units", 0u));
@@ -311,6 +413,7 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     std::vector<int> h_lit(batch);
 
     for (size_t b = 0; b < units.size(); b += batch) {
+        nvtxRangePushA("po_gpu_batch");
         const size_t count = std::min(batch, units.size() - b);
         for (size_t i = 0; i < count; ++i) {
             const uint32_t fi = units[b + i].first;
@@ -345,12 +448,16 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
         }
         CUDA_CHECK(cudaMemcpy(d_units.get(), h_units.data(), count * sizeof(UnitParams<Real>),
                               cudaMemcpyHostToDevice));
+        nvtxRangePushA("po_gpu_kernel_launch");
         po_kernel<Real>
             <<<static_cast<unsigned>(count), kBlock>>>(d_cent.get(), d_norm.get(), d_area.get(),
                                                        d_units.get(), d_out.get(), d_lit.get(),
                                                        static_cast<int>(ntris));
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
+        nvtxRangePop();
+
+        nvtxRangePushA("po_gpu_download_project");
         CUDA_CHECK(cudaMemcpy(h_out.data(), d_out.get(), 6 * count * sizeof(Cplx<Real>),
                               cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(h_lit.data(), d_lit.get(), count * sizeof(int),
@@ -383,6 +490,190 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
                 sample.lit_facets = static_cast<size_t>(h_lit[i]);
             }
         }
+        nvtxRangePop();
+        nvtxRangePop(); // po_gpu_batch
+    }
+    return out;
+}
+
+PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
+                          const nlohmann::json& resolved, int device_id,
+                          const std::vector<std::pair<uint32_t, uint32_t>>& units) {
+    PoResult out;
+    const auto& medium = resolved["frequency"]["medium"];
+    const double eps_r = medium["epsilon_r"].get<double>();
+    const double mu_r = medium["mu_r"].get<double>();
+    if (medium["sigma"].get<double>() != 0.0)
+        out.warnings.push_back("medium conductivity is ignored in v1 PO");
+    const double eta = kEta0 * std::sqrt(mu_r / eps_r);
+    const double e0 = resolved["physics"]["incident_amplitude"].get<double>();
+    const size_t ndir = plan.directions.size();
+    const size_t npol = plan.polarizations.size();
+    out.samples.resize(units.size() * npol);
+    if (units.empty()) return out;
+
+    CUDA_CHECK(cudaSetDevice(device_id));
+    geom::Vec3d phase_ref{0.0, 0.0, 0.0};
+    if (resolved.contains("physics") && resolved["physics"].contains("phase_reference")) {
+        const auto& pr = resolved["physics"]["phase_reference"];
+        if (pr.is_array() && pr.size() == 3) {
+            phase_ref = {pr[0].get<double>(), pr[1].get<double>(), pr[2].get<double>()};
+        }
+    }
+    bool use_symmetry = false;
+    std::string sym_plane = "xz";
+    double sym_tol = 1e-4;
+    if (resolved.contains("mesh") && resolved["mesh"].contains("symmetry")) {
+        const auto& sym = resolved["mesh"]["symmetry"];
+        use_symmetry = sym.value("enabled", false);
+        sym_plane = sym.value("plane", "xz");
+        sym_tol = sym.value("tolerance_m", 1e-4);
+    }
+    const SymmetryOptions sym_opts{use_symmetry, sym_plane, sym_tol};
+    const HalfMeshResult half_result = use_symmetry ? extract_half_mesh(mesh, sym_opts) : HalfMeshResult{mesh, {}, {}};
+    const NormalizedMesh& eff_mesh = use_symmetry ? half_result.mesh : mesh;
+
+    std::vector<float> h_cent, h_norm, h_area;
+    h_cent.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
+    h_norm.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
+    h_area.reserve(eff_mesh.triangles.size() * (use_symmetry ? 2 : 1));
+
+    for (size_t t = 0; t < eff_mesh.triangles.size(); ++t) {
+        const auto& tri = eff_mesh.triangles[t];
+        const geom::Vec3d c = (eff_mesh.vertices[tri[0]] + eff_mesh.vertices[tri[1]] + eff_mesh.vertices[tri[2]]) * (1.0 / 3.0);
+        const geom::Vec3d n = eff_mesh.normals[t];
+        const double a = eff_mesh.areas[t];
+
+        h_cent.push_back(static_cast<float>(c.x - phase_ref.x));
+        h_cent.push_back(static_cast<float>(c.y - phase_ref.y));
+        h_cent.push_back(static_cast<float>(c.z - phase_ref.z));
+        h_norm.push_back(static_cast<float>(n.x));
+        h_norm.push_back(static_cast<float>(n.y));
+        h_norm.push_back(static_cast<float>(n.z));
+        h_area.push_back(static_cast<float>(a));
+
+        if (use_symmetry) {
+            const double coord = get_symmetry_coord(c, sym_plane);
+            if (std::abs(coord) > sym_tol) {
+                const geom::Vec3d c_refl = reflect_point(c, sym_plane);
+                const geom::Vec3d n_refl = reflect_normal(n, sym_plane);
+                h_cent.push_back(static_cast<float>(c_refl.x - phase_ref.x));
+                h_cent.push_back(static_cast<float>(c_refl.y - phase_ref.y));
+                h_cent.push_back(static_cast<float>(c_refl.z - phase_ref.z));
+                h_norm.push_back(static_cast<float>(n_refl.x));
+                h_norm.push_back(static_cast<float>(n_refl.y));
+                h_norm.push_back(static_cast<float>(n_refl.z));
+                h_area.push_back(static_cast<float>(a));
+            }
+        }
+    }
+
+    nvtxRangePushA("po_gpu_facet_upload");
+    const size_t ntris = h_area.size();
+    DeviceBuffer<float> d_cent(h_cent.size());
+    DeviceBuffer<float> d_norm(h_norm.size());
+    DeviceBuffer<float> d_area(h_area.size());
+    CUDA_CHECK(cudaMemcpy(d_cent.get(), h_cent.data(), h_cent.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_norm.get(), h_norm.data(), h_norm.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_area.get(), h_area.data(), h_area.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    nvtxRangePop();
+
+    const size_t override_units =
+        static_cast<size_t>(resolved["execution"].value("cuda_batch_units", 0u));
+    const size_t batch = cuda_select_batch_units(resolved, units.size(), ntris, device_id,
+                                                  override_units);
+    if (batch > std::numeric_limits<size_t>::max() / 6)
+        throw CudaError("CUDA output batch size overflow");
+    DeviceBuffer<UnitParams<double>> d_units(batch);
+    DeviceBuffer<Cplx<double>> d_out(6 * batch);
+    DeviceBuffer<int> d_lit(batch);
+    std::vector<UnitParams<double>> h_units(batch);
+    std::vector<Cplx<double>> h_out(6 * batch);
+    std::vector<int> h_lit(batch);
+
+    for (size_t b = 0; b < units.size(); b += batch) {
+        nvtxRangePushA("po_gpu_batch");
+        const size_t count = std::min(batch, units.size() - b);
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t fi = units[b + i].first;
+            const uint32_t di = units[b + i].second;
+            const double freq = plan.frequencies_hz[fi];
+            const Direction& dir = plan.directions[di];
+            const double k = 2.0 * 3.141592653589793 * freq *
+                             std::sqrt(eps_r * mu_r) / kSpeedOfLight;
+            UnitParams<double>& p = h_units[i];
+            p.kx = dir.k_hat.x;
+            p.ky = dir.k_hat.y;
+            p.kz = dir.k_hat.z;
+            if (dir.is_bistatic) {
+                p.rx = dir.r_obs_hat.x;
+                p.ry = dir.r_obs_hat.y;
+                p.rz = dir.r_obs_hat.z;
+            } else {
+                p.rx = -p.kx;
+                p.ry = -p.ky;
+                p.rz = -p.kz;
+            }
+            const auto basis = polarization_basis(dir.k_hat);
+            p.ehx = basis.h.x * e0;
+            p.ehy = basis.h.y * e0;
+            p.ehz = basis.h.z * e0;
+            p.evx = basis.v.x * e0;
+            p.evy = basis.v.y * e0;
+            p.evz = basis.v.z * e0;
+            p.k = k;
+            p.eta = eta;
+            p.e0 = e0;
+        }
+        CUDA_CHECK(cudaMemcpy(d_units.get(), h_units.data(), count * sizeof(UnitParams<double>),
+                              cudaMemcpyHostToDevice));
+        nvtxRangePushA("po_gpu_kernel_launch");
+        po_mixed_kernel
+            <<<static_cast<unsigned>(count), kBlock>>>(d_cent.get(), d_norm.get(), d_area.get(),
+                                                       d_units.get(), d_out.get(), d_lit.get(),
+                                                       static_cast<int>(ntris));
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        nvtxRangePop();
+
+        nvtxRangePushA("po_gpu_download_project");
+        CUDA_CHECK(cudaMemcpy(h_out.data(), d_out.get(), 6 * count * sizeof(Cplx<double>),
+                              cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_lit.data(), d_lit.get(), count * sizeof(int),
+                              cudaMemcpyDeviceToHost));
+        // Project on the host with the shared channel math.
+        const size_t npol = plan.polarizations.size();
+        const size_t ndir = plan.directions.size();
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t fi = units[b + i].first;
+            const uint32_t di = units[b + i].second;
+            const Direction& dir = plan.directions[di];
+            const auto basis = polarization_basis(dir.k_hat);
+            const auto rx_basis = dir.is_bistatic ? polarization_basis(dir.r_obs_hat) : basis;
+            const double eh[3] = {rx_basis.h.x, rx_basis.h.y, rx_basis.h.z};
+            const double ev[3] = {rx_basis.v.x, rx_basis.v.y, rx_basis.v.z};
+            std::complex<double> ftx[2][3];
+            for (int tx = 0; tx < 2; ++tx)
+                for (int c = 0; c < 3; ++c)
+                    ftx[tx][c] = {h_out[6 * i + 3 * tx + c].re,
+                                  h_out[6 * i + 3 * tx + c].im};
+            const auto channels = project_unit_channels(ftx, eh, ev, e0, plan.polarizations);
+            for (size_t pi = 0; pi < npol; ++pi) {
+                PoSampleResult& sample = out.samples[(b + i) * npol + pi];
+                sample.sample_id = (static_cast<uint64_t>(fi) * ndir + di) * npol + pi;
+                sample.frequency_id = fi;
+                sample.direction_id = di;
+                sample.pol_id = static_cast<uint32_t>(pi);
+                sample.scattering = channels[pi].first;
+                sample.rcs_sqm = channels[pi].second;
+                sample.lit_facets = static_cast<size_t>(h_lit[i]);
+            }
+        }
+        nvtxRangePop();
+        nvtxRangePop(); // po_gpu_batch
     }
     return out;
 }
@@ -403,6 +694,8 @@ PoResult solve_po_cuda_units(const NormalizedMesh& mesh, const SamplePlan& plan,
     const std::string precision = resolved["solver"].value("precision", "float64");
     if (precision == "float32")
         return solve_typed_cuda<float>(mesh, plan, resolved, device_id, units);
+    if (precision == "mixed")
+        return solve_mixed_cuda(mesh, plan, resolved, device_id, units);
     return solve_typed_cuda<double>(mesh, plan, resolved, device_id, units);
 }
 

@@ -199,7 +199,7 @@
       "required": ["type"],
       "properties": {
         "type": {"const": "PO", "default": "PO"},
-        "precision": {"type": "string", "enum": ["float32", "float64"], "default": "float64"},
+        "precision": {"type": "string", "enum": ["float32", "float64", "mixed"], "default": "float64"},
         "rcs_units": {"const": "dBsm", "default": "dBsm", "description": "Compatibility field; v1 output always contains both square metres and dBsm."},
         "po_options": {
           "type": "object",

@@ -88,6 +88,26 @@ TEST(Gpu, MatchesCpuFloat32) {
     expect_close(gpu, cpu, 1e-3, 1e-6);
 }
 
+TEST(Gpu, MatchesCpuMixedPrecision) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_sweep_grid.json");
+    const auto plan = make_plan({10e9}, {{30.0, 20.0}}, {"HH", "VV", "HV", "RHCP"});
+    const auto cpu = solve_backend(c, plan, "cpu", "float64");
+    const auto gpu = solve_backend(c, plan, "cuda", "mixed");
+    expect_close(gpu, cpu, 1e-4, 1e-6);
+}
+
+TEST(Gpu, MixedPrecisionFootprintReduction) {
+    nlohmann::json cfg_f64 = {{"solver", {{"precision", "float64"}}}};
+    nlohmann::json cfg_mixed = {{"solver", {{"precision", "mixed"}}}};
+    nlohmann::json cfg_f32 = {{"solver", {{"precision", "float32"}}}};
+
+    const size_t ntris = 1000;
+    EXPECT_EQ(strikecem::cuda::cuda_footprint_bytes(cfg_f64, ntris), ntris * 7 * 8);
+    EXPECT_EQ(strikecem::cuda::cuda_footprint_bytes(cfg_mixed, ntris), ntris * 7 * 4);
+    EXPECT_EQ(strikecem::cuda::cuda_footprint_bytes(cfg_f32, ntris), ntris * 7 * 4);
+}
+
 TEST(Gpu, SphereMatchesCpu) {
     if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
     const Case c = load_case("valid_sphere.json");
