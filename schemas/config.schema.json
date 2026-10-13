@@ -367,6 +367,17 @@
         }
       }
     },
+    "similitude": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "default": false},
+        "geometric_scale": {"type": "number", "exclusiveMinimum": 0.0, "default": 1.0},
+        "mode": {"type": "string", "enum": ["full_to_model", "model_to_full"], "default": "full_to_model"},
+        "direction": {"type": "string", "enum": ["full_to_model", "model_to_full"], "default": "full_to_model"},
+        "auto_rescale_rcs": {"type": "boolean", "default": true}
+      }
+    },
     "run": {
       "type": "object",
       "additionalProperties": false,

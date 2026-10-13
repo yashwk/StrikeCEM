@@ -19,6 +19,8 @@
 #include "strikecem/distributed/Coordinator.hpp"
 #include "strikecem/distributed/Worker.hpp"
 #include "strikecem/distributed/ClusterScheduler.hpp"
+#include "strikecem/solvers/Similitude.hpp"
+#include "strikecem/analysis/VehiclePreScan.hpp"
 #include "strikecem/io/AssetBundle.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
@@ -47,7 +49,7 @@ constexpr const char* kUsage =
     "usage: strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...>\n"
     "  validate     resolve config, inspect mesh, print hashes\n"
     "  estimate     validate plus plan counts and resource estimates\n"
-    "  run          full pipeline (PO solver, CSV/HDF5 output)\n"
+    "  run          full pipeline (PO solver, CSV/HDF5 output) [--scale S]\n"
     "  shard        partition sample plan across N shards and write shard configs + manifest\n"
     "               options: --num-shards N (default 2), --out-dir DIR (default ./shards), --run-id ID\n"
     "  merge        merge completed shard outputs into a unified database\n"
@@ -58,6 +60,8 @@ constexpr const char* kUsage =
     "               options: --output PATH (-o), --format <obj|stl|vtu>\n"
     "  bundle       package RCS database and geometry into StrikeEngine bundle (.scempack)\n"
     "               options: --rcs PATH, --mesh PATH, --output PATH (-o), --lod NAME=PATH\n"
+    "  prescan      analyze 3D geometry features and recommend/tune hybrid solver settings\n"
+    "               options: <config.json|mesh> [--report PATH] [--auto-tune-config PATH]\n"
     "  run-parallel execute local campaign across multiple CPU/GPU devices\n"
     "               options: <config.json> [-o PATH] [--workers N] [--devices d1,d2] [--work-dir DIR] [--keep-shards]\n"
     "  coordinate   run distributed cluster campaign coordinator HTTP REST broker\n"
@@ -401,6 +405,63 @@ int cmd_cluster_k8s(const std::string& manifest_path, const std::string& output_
     return 0;
 }
 
+int cmd_prescan(const std::string& input_path, const std::string& report_out,
+                const std::string& tuned_out, const std::string& schema_path) {
+    if (input_path.empty()) {
+        std::cerr << "strikecem: error: prescan requires input config or mesh path\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+
+    NormalizedMesh mesh;
+    nlohmann::json config_json;
+    bool is_config = false;
+
+    if (input_path.rfind(".json") != std::string::npos) {
+        is_config = true;
+        ResolvedConfig rc = load_config(input_path, schema_path);
+        config_json = rc.value;
+        mesh = load_normalized_mesh(rc.value, config_dir_of(input_path), rc.schema_version);
+    } else {
+        const fs::path abs_path = fs::absolute(input_path);
+        nlohmann::json dummy_cfg = {
+            {"model", {
+                {"path", abs_path.string()},
+                {"units", "m"},
+                {"mesh_repair", "report"}
+            }},
+            {"mesh", {
+                {"max_aspect_ratio", 100.0}
+            }},
+            {"scem_schema_version", "1.0"}
+        };
+        mesh = load_normalized_mesh(dummy_cfg, abs_path.parent_path(), "1.0");
+    }
+
+    const VehiclePreScanReport report = VehiclePreScan::analyze(mesh);
+    std::cout << report.to_text_summary();
+
+    if (!report_out.empty()) {
+        std::ofstream out(report_out);
+        if (!out) throw OutputError("Cannot write report file: " + report_out);
+        out << report.to_json().dump(2) << "\n";
+        std::cout << "prescan_report: " << report_out << "\n";
+    }
+
+    if (!tuned_out.empty()) {
+        if (!is_config) {
+            throw OutputError("--auto-tune-config requires a config JSON input file");
+        }
+        nlohmann::json tuned = VehiclePreScan::auto_tune_config(config_json, report);
+        std::ofstream out(tuned_out);
+        if (!out) throw OutputError("Cannot write tuned config file: " + tuned_out);
+        out << tuned.dump(2) << "\n";
+        std::cout << "tuned_config: " << tuned_out << "\n";
+    }
+
+    std::cout << "status: ok\n";
+    return 0;
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -441,6 +502,11 @@ int run(int argc, char** argv) {
     std::string image_name = "strikecem:latest";
     int parallelism = 4;
     int completions = 0;
+
+    // Similitude & Pre-Scan parameters
+    double scale_override = 0.0;
+    std::string prescan_report;
+    std::string auto_tune_config_out;
 
     std::vector<std::string> positional;
 
@@ -518,6 +584,12 @@ int run(int argc, char** argv) {
             parallelism = std::stoi(args[++i]);
         } else if (args[i] == "--completions" && i + 1 < args.size()) {
             completions = std::stoi(args[++i]);
+        } else if (args[i] == "--scale" && i + 1 < args.size()) {
+            scale_override = std::stod(args[++i]);
+        } else if (args[i] == "--report" && i + 1 < args.size()) {
+            prescan_report = args[++i];
+        } else if (args[i] == "--auto-tune-config" && i + 1 < args.size()) {
+            auto_tune_config_out = args[++i];
         } else if (args[i] == "--format" && i + 1 < args.size()) {
             mesh_format = args[++i];
         } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
@@ -543,7 +615,7 @@ int run(int argc, char** argv) {
         command != "shard" && command != "merge" && command != "vtk" &&
         command != "export-mesh" && command != "bundle" && command != "run-parallel" &&
         command != "coordinate" && command != "worker" && command != "cluster" &&
-        command != "cluster-slurm" && command != "cluster-k8s") {
+        command != "cluster-slurm" && command != "cluster-k8s" && command != "prescan") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -590,6 +662,10 @@ int run(int argc, char** argv) {
             std::cerr << "strikecem: error: unknown cluster subcommand: " << sub << "\n";
             return static_cast<int>(ExitCode::Config);
         }
+        if (command == "prescan") {
+            const std::string& input = positional.empty() ? "" : positional[0];
+            return cmd_prescan(input, prescan_report, auto_tune_config_out, schema_path);
+        }
 
         if (positional.size() != 1) {
             std::cerr << kUsage;
@@ -612,6 +688,18 @@ int run(int argc, char** argv) {
         for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         NormalizedMesh mesh =
             load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
+
+        SimilitudeConfig sim_cfg = parse_similitude_config(rc.value);
+        if (scale_override > 0.0) {
+            sim_cfg.enabled = true;
+            sim_cfg.geometric_scale = scale_override;
+        }
+        if (sim_cfg.enabled && sim_cfg.geometric_scale != 1.0) {
+            SimilitudeSummary sim_sum = apply_similitude(rc, plan, mesh, sim_cfg);
+            std::cout << "similitude_geometric_scale: " << sim_sum.geometric_scale << "\n";
+            std::cout << "similitude_frequency_scale: " << sim_sum.frequency_scale << "\n";
+            std::cout << "similitude_rcs_offset_dbsm: " << sim_sum.rcs_offset_dbsm << " dB\n";
+        }
 
         if (command == "shard") {
             return cmd_shard(rc, plan, mesh, config_path, num_shards, out_dir, run_id);
@@ -736,6 +824,11 @@ int run(int argc, char** argv) {
             }
             result = solve_po_units(mesh, plan, rc.value, shard_units, fringe, go, material);
         }
+
+        if (sim_cfg.enabled && sim_cfg.auto_rescale_rcs && sim_cfg.geometric_scale != 1.0) {
+            rescale_po_result(result, sim_cfg);
+        }
+
         const double solve_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         for (const auto& w : result.warnings) std::cerr << "strikecem: warning: " << w << "\n";
