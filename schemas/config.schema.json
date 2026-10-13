@@ -87,8 +87,9 @@
       "type": "object",
       "additionalProperties": false,
       "oneOf": [
-        {"required": ["azimuth", "elevation"], "not": {"required": ["list"]}},
-        {"required": ["list"], "not": {"anyOf": [{"required": ["azimuth"]}, {"required": ["elevation"]}]}}
+        {"required": ["azimuth", "elevation"], "not": {"anyOf": [{"required": ["list"]}, {"required": ["spherical"]}]}},
+        {"required": ["list"], "not": {"anyOf": [{"required": ["azimuth"]}, {"required": ["elevation"]}, {"required": ["spherical"]}]}},
+        {"required": ["spherical"], "not": {"anyOf": [{"required": ["azimuth"]}, {"required": ["elevation"]}, {"required": ["list"]}]}}
       ],
       "properties": {
         "azimuth": {"$ref": "#/definitions/angle_axis_azimuth"},
@@ -101,6 +102,17 @@
             "minItems": 2,
             "maxItems": 2,
             "items": [{"type": "number"}, {"type": "number"}]
+          }
+        },
+        "spherical": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["num_points"],
+          "properties": {
+            "type": {"type": "string", "enum": ["fibonacci"], "default": "fibonacci"},
+            "num_points": {"type": "integer", "minimum": 1},
+            "elevation_min_deg": {"type": "number", "minimum": -90, "maximum": 90, "default": -90},
+            "elevation_max_deg": {"type": "number", "minimum": -90, "maximum": 90, "default": 90}
           }
         },
         "deduplicate_periodic_endpoints": {"const": true, "default": true, "description": "Periodic endpoints and duplicate directions are always deduplicated in v1."},

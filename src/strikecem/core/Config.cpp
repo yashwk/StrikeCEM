@@ -15,6 +15,7 @@
 
 #include <nlohmann/json-schema.hpp>
 
+#include "strikecem/sampling/SphericalSampling.hpp"
 #include "strikecem/solvers/Material.hpp"
 
 namespace strikecem {
@@ -62,6 +63,12 @@ json resolve_defaults(const json& raw) {
     auto& angles = r["angles"];
     if (!angles.contains("deduplicate_periodic_endpoints"))
         angles["deduplicate_periodic_endpoints"] = true;
+    if (angles.contains("spherical")) {
+        auto& sph = angles["spherical"];
+        if (!sph.contains("type")) sph["type"] = "fibonacci";
+        if (!sph.contains("elevation_min_deg")) sph["elevation_min_deg"] = -90.0;
+        if (!sph.contains("elevation_max_deg")) sph["elevation_max_deg"] = 90.0;
+    }
 
     if (!r.contains("polarization")) r["polarization"] = json{"HH", "VV"};
 
@@ -168,6 +175,17 @@ void validate_semantics(const json& r, const fs::path& config_dir) {
         const auto& el = angles["elevation"];
         if (!(el["stop"].get<double>() >= el["start"].get<double>()))
             throw ConfigError("angles.elevation requires stop >= start");
+    } else if (angles.contains("spherical")) {
+        const auto& sph = angles["spherical"];
+        require_finite(sph["num_points"].get<double>(), "angles.spherical.num_points");
+        if (sph["num_points"].get<int>() <= 0)
+            throw ConfigError("angles.spherical num_points must be positive");
+        const double el_min = sph.value("elevation_min_deg", -90.0);
+        const double el_max = sph.value("elevation_max_deg", 90.0);
+        require_finite(el_min, "angles.spherical.elevation_min_deg");
+        require_finite(el_max, "angles.spherical.elevation_max_deg");
+        if (el_min < -90.0 || el_max > 90.0 || el_min > el_max)
+            throw ConfigError("angles.spherical invalid elevation range");
     } else {
         for (const auto& pair : angles["list"]) {
             require_finite(pair[0].get<double>(), "angles.list azimuth");
@@ -290,38 +308,46 @@ SamplePlan build_sample_plan(const json& resolved) {
 
     std::vector<std::pair<double, double>> pairs;
     const auto& angles = resolved["angles"];
-    if (angles.contains("azimuth")) {
-        const auto& az = angles["azimuth"], el = angles["elevation"];
-        const double az_step = angles.contains("adaptive")
-                                   ? angles["adaptive"]["coarse_step_deg"].get<double>()
-                                   : az["step"].get<double>();
-        auto az_values = expand_axis(az["start"].get<double>(), az["stop"].get<double>(), az_step);
-        auto el_values = expand_axis(el["start"].get<double>(), el["stop"].get<double>(),
-                                     el["step"].get<double>());
-        for (double& a : az_values) a = normalize_azimuth(a);
-        std::sort(az_values.begin(), az_values.end());
-        std::sort(el_values.begin(), el_values.end());
-        for (double a : az_values)
-            for (double e : el_values) pairs.emplace_back(a, e);
+    if (angles.contains("spherical")) {
+        const auto& sph = angles["spherical"];
+        const size_t num_pts = sph["num_points"].get<size_t>();
+        const double el_min = sph.value("elevation_min_deg", -90.0);
+        const double el_max = sph.value("elevation_max_deg", 90.0);
+        plan.directions = generate_fibonacci_sphere(num_pts, el_min, el_max);
     } else {
-        for (const auto& p : angles["list"])
-            pairs.emplace_back(normalize_azimuth(p[0].get<double>()), p[1].get<double>());
-        std::sort(pairs.begin(), pairs.end());
+        if (angles.contains("azimuth")) {
+            const auto& az = angles["azimuth"], el = angles["elevation"];
+            const double az_step = angles.contains("adaptive")
+                                       ? angles["adaptive"]["coarse_step_deg"].get<double>()
+                                       : az["step"].get<double>();
+            auto az_values = expand_axis(az["start"].get<double>(), az["stop"].get<double>(), az_step);
+            auto el_values = expand_axis(el["start"].get<double>(), el["stop"].get<double>(),
+                                         el["step"].get<double>());
+            for (double& a : az_values) a = normalize_azimuth(a);
+            std::sort(az_values.begin(), az_values.end());
+            std::sort(el_values.begin(), el_values.end());
+            for (double a : az_values)
+                for (double e : el_values) pairs.emplace_back(a, e);
+        } else {
+            for (const auto& p : angles["list"])
+                pairs.emplace_back(normalize_azimuth(p[0].get<double>()), p[1].get<double>());
+            std::sort(pairs.begin(), pairs.end());
+        }
+        // Canonical order, stable IDs, duplicate removal with warning (FR-4).
+        std::vector<std::pair<double, double>> unique;
+        for (const auto& p : pairs) {
+            if (!unique.empty() && std::abs(unique.back().first - p.first) < 1e-9 &&
+                std::abs(unique.back().second - p.second) < 1e-9)
+                continue;
+            unique.push_back(p);
+        }
+        if (unique.size() != pairs.size())
+            plan.warnings.push_back("removed " + std::to_string(pairs.size() - unique.size()) +
+                                    " duplicate direction(s)");
+        uint32_t id = 0;
+        for (const auto& [az, el] : unique)
+            plan.directions.push_back({id++, az, el, direction_from_az_el(az, el)});
     }
-    // Canonical order, stable IDs, duplicate removal with warning (FR-4).
-    std::vector<std::pair<double, double>> unique;
-    for (const auto& p : pairs) {
-        if (!unique.empty() && std::abs(unique.back().first - p.first) < 1e-9 &&
-            std::abs(unique.back().second - p.second) < 1e-9)
-            continue;
-        unique.push_back(p);
-    }
-    if (unique.size() != pairs.size())
-        plan.warnings.push_back("removed " + std::to_string(pairs.size() - unique.size()) +
-                                " duplicate direction(s)");
-    uint32_t id = 0;
-    for (const auto& [az, el] : unique)
-        plan.directions.push_back({id++, az, el, direction_from_az_el(az, el)});
 
     for (const auto& p : resolved["polarization"]) plan.polarizations.push_back(p.get<std::string>());
 

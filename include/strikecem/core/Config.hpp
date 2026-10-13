@@ -32,6 +32,7 @@ struct Direction {
     double azimuth_deg = 0.0;
     double elevation_deg = 0.0;
     geom::Vec3d k_hat;
+    double weight = 0.0; // Spherical quadrature weight in steradians
 };
 
 struct SamplePlan {
