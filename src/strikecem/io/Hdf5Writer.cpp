@@ -17,6 +17,7 @@
 
 #include "strikecem/io/Checksum.hpp"
 #include "strikecem/io/DesignerPackage.hpp"
+#include "strikecem/io/Hdf5Lock.hpp"
 #include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
 
@@ -442,6 +443,7 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
                        const NormalizedMesh& mesh, const PoResult& result,
                        const DesignerIdentity& designer, const FringeOptions& fringe,
                        const MaterialOptions& material) {
+    std::lock_guard<std::recursive_mutex> hdf5_lock_guard(hdf5_global_mutex());
     H5::Exception::dontPrint();
     const fs::path out_path(rc.value["output"]["path"].get<std::string>());
     const bool float32 = rc.value["solver"]["precision"].get<std::string>() == "float32";
@@ -672,6 +674,7 @@ size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
                           const NormalizedMesh& mesh, const std::string& path,
                           const FringeOptions& fringe, const GoOptions& go,
                           const MaterialOptions& material) {
+    std::lock_guard<std::recursive_mutex> hdf5_lock_guard(hdf5_global_mutex());
     H5::Exception::dontPrint();
     try {
         OpenDb db;
@@ -712,6 +715,7 @@ size_t resume_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
 
 bool check_existing_hdf5(const ResolvedConfig& rc, const SamplePlan& plan,
                          const NormalizedMesh& mesh, const std::string& path) {
+    std::lock_guard<std::recursive_mutex> hdf5_lock_guard(hdf5_global_mutex());
     H5::Exception::dontPrint();
     try {
         OpenDb db;

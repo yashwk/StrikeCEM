@@ -15,6 +15,10 @@
 #include "strikecem/core/Config.hpp"
 #include "strikecem/diagnostics/VtkWriter.hpp"
 #include "strikecem/distributed/Shard.hpp"
+#include "strikecem/distributed/LocalParallelRunner.hpp"
+#include "strikecem/distributed/Coordinator.hpp"
+#include "strikecem/distributed/Worker.hpp"
+#include "strikecem/distributed/ClusterScheduler.hpp"
 #include "strikecem/io/AssetBundle.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
@@ -40,7 +44,7 @@ namespace fs = std::filesystem;
 #endif
 
 constexpr const char* kUsage =
-    "usage: strikecem [--schema PATH] [--bench-profile PATH] <validate|estimate|run|shard|merge|vtk|export-mesh> [options...] <args...>\n"
+    "usage: strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...>\n"
     "  validate     resolve config, inspect mesh, print hashes\n"
     "  estimate     validate plus plan counts and resource estimates\n"
     "  run          full pipeline (PO solver, CSV/HDF5 output)\n"
@@ -54,6 +58,15 @@ constexpr const char* kUsage =
     "               options: --output PATH (-o), --format <obj|stl|vtu>\n"
     "  bundle       package RCS database and geometry into StrikeEngine bundle (.scempack)\n"
     "               options: --rcs PATH, --mesh PATH, --output PATH (-o), --lod NAME=PATH\n"
+    "  run-parallel execute local campaign across multiple CPU/GPU devices\n"
+    "               options: <config.json> [-o PATH] [--workers N] [--devices d1,d2] [--work-dir DIR] [--keep-shards]\n"
+    "  coordinate   run distributed cluster campaign coordinator HTTP REST broker\n"
+    "               options: --manifest PATH [-o PATH] [--port P] [--host H] [--lease SEC] [--auto-exit]\n"
+    "  worker       run headless cluster worker daemon connecting to coordinator\n"
+    "               options: --coordinator URL [--device DEV] [--worker-id ID] [--poll-ms MS] [--max-tasks N]\n"
+    "  cluster      generate HPC/cloud job scripts:\n"
+    "               generate-slurm --manifest PATH --output PATH [--partition P] [--cpus N] [--time T]\n"
+    "               generate-k8s   --manifest PATH --output PATH [--image IMG] [--coordinator URL] [--parallelism N]\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -267,6 +280,127 @@ int cmd_bundle(const std::string& rcs_path, const std::string& mesh_path,
     return 0;
 }
 
+int cmd_run_parallel(const std::string& config_path, const std::string& output_path,
+                     size_t workers, const std::vector<std::string>& devices,
+                     const std::string& work_dir, bool keep_shards,
+                     const std::string& schema_path) {
+    LocalParallelOptions opts;
+    opts.config_path = config_path;
+    opts.output_path = output_path;
+    opts.num_workers = workers;
+    opts.devices = devices;
+    opts.work_dir = work_dir;
+    opts.keep_shards = keep_shards;
+
+    const LocalParallelResult res = run_local_parallel(opts, schema_path);
+    if (!res.success) {
+        throw OutputError("run-parallel failed: " + res.error_message);
+    }
+    std::cout << "shards_completed: " << res.completed_shards << "/" << res.num_shards << "\n";
+    std::cout << "wall_time_s: " << res.wall_time_seconds << "\n";
+    std::cout << "output: " << res.final_output_path << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
+int cmd_coordinate(const std::string& manifest_path, const std::string& output_path,
+                   const std::string& host, int port, int lease_sec, bool auto_exit_on_complete,
+                   const std::string& schema_path) {
+    if (manifest_path.empty()) {
+        std::cerr << "strikecem: error: coordinate requires --manifest PATH\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+    CoordinatorOptions opts;
+    opts.manifest_path = manifest_path;
+    opts.output_path = output_path;
+    opts.host = host.empty() ? "127.0.0.1" : host;
+    opts.port = port;
+    opts.lease_duration_seconds = lease_sec > 0 ? lease_sec : 30;
+    opts.schema_path = schema_path;
+    opts.auto_merge = true;
+
+    CoordinatorServer server(opts);
+    server.start(true);
+    std::cout << "coordinator_port: " << server.bound_port() << "\n";
+    std::cout << "coordinator_url: http://" << opts.host << ":" << server.bound_port() << "\n";
+    std::cout << "run_id: " << server.run_id() << "\n";
+    std::cout << "status: running\n";
+    std::cout.flush();
+
+    while (server.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (auto_exit_on_complete && server.is_campaign_complete()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            std::cout << "status: ok\n";
+            std::cout << "campaign: complete\n";
+            server.stop();
+            break;
+        }
+    }
+    return 0;
+}
+
+int cmd_worker(const std::string& coord_url, const std::string& device,
+               const std::string& worker_id, int poll_ms, size_t max_tasks,
+               const std::string& schema_path) {
+    if (coord_url.empty()) {
+        std::cerr << "strikecem: error: worker requires --coordinator URL\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+    WorkerOptions opts;
+    opts.coordinator_url = coord_url;
+    opts.device = device.empty() ? "cpu" : device;
+    opts.worker_id = worker_id;
+    opts.poll_interval_ms = poll_ms > 0 ? poll_ms : 200;
+    opts.max_tasks = max_tasks;
+    opts.schema_path = schema_path;
+
+    WorkerDaemon daemon(opts);
+    const WorkerResult res = daemon.run();
+    if (!res.success) {
+        throw OutputError("Worker run failed: " + res.error_message);
+    }
+    std::cout << "tasks_completed: " << res.tasks_completed << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
+int cmd_cluster_slurm(const std::string& manifest_path, const std::string& output_path,
+                      const std::string& partition, int cpus, const std::string& gpus,
+                      const std::string& time_limit, const std::string& job_name) {
+    SlurmOptions opts;
+    opts.manifest_path = manifest_path;
+    opts.output_path = output_path;
+    if (!partition.empty()) opts.partition = partition;
+    if (cpus > 0) opts.cpus_per_task = cpus;
+    opts.gpus_per_task = gpus;
+    if (!time_limit.empty()) opts.time_limit = time_limit;
+    if (!job_name.empty()) opts.job_name = job_name;
+
+    generate_slurm_script(opts);
+    std::cout << "slurm_script: " << output_path << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
+int cmd_cluster_k8s(const std::string& manifest_path, const std::string& output_path,
+                    const std::string& image, const std::string& coordinator_url,
+                    int parallelism, int completions, const std::string& job_name) {
+    K8sOptions opts;
+    opts.manifest_path = manifest_path;
+    opts.output_path = output_path;
+    if (!image.empty()) opts.image_name = image;
+    if (!coordinator_url.empty()) opts.coordinator_url = coordinator_url;
+    if (parallelism > 0) opts.parallelism = parallelism;
+    if (completions > 0) opts.completions = completions;
+    if (!job_name.empty()) opts.job_name = job_name;
+
+    generate_k8s_manifest(opts);
+    std::cout << "k8s_manifest: " << output_path << "\n";
+    std::cout << "status: ok\n";
+    return 0;
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -283,6 +417,31 @@ int run(int argc, char** argv) {
     std::vector<std::pair<std::string, std::string>> lod_meshes;
     size_t num_shards = 2;
     size_t direction_id = 0;
+
+    // Domain 4 parameters
+    size_t workers = 0;
+    std::vector<std::string> devices;
+    std::string work_dir;
+    bool keep_shards = false;
+    std::string manifest_path;
+    std::string host = "127.0.0.1";
+    int port = 0;
+    int lease_sec = 30;
+    bool auto_exit = false;
+    std::string coordinator_url;
+    std::string worker_device = "cpu";
+    std::string worker_id;
+    int poll_ms = 200;
+    size_t max_tasks = 0;
+    std::string partition = "compute";
+    int cpus_per_task = 4;
+    std::string gpus_per_task;
+    std::string time_limit = "04:00:00";
+    std::string job_name;
+    std::string image_name = "strikecem:latest";
+    int parallelism = 4;
+    int completions = 0;
+
     std::vector<std::string> positional;
 
     for (size_t i = 0; i < args.size(); ++i) {
@@ -310,6 +469,55 @@ int run(int argc, char** argv) {
             } else {
                 lod_meshes.emplace_back("lod", lod_spec);
             }
+        } else if (args[i] == "--workers" && i + 1 < args.size()) {
+            workers = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--devices" && i + 1 < args.size()) {
+            std::string d_str = args[++i];
+            std::stringstream ss(d_str);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                if (!item.empty()) devices.push_back(item);
+            }
+        } else if (args[i] == "--work-dir" && i + 1 < args.size()) {
+            work_dir = args[++i];
+        } else if (args[i] == "--keep-shards") {
+            keep_shards = true;
+        } else if (args[i] == "--manifest" && i + 1 < args.size()) {
+            manifest_path = args[++i];
+        } else if (args[i] == "--port" && i + 1 < args.size()) {
+            port = std::stoi(args[++i]);
+        } else if (args[i] == "--host" && i + 1 < args.size()) {
+            host = args[++i];
+        } else if (args[i] == "--lease" && i + 1 < args.size()) {
+            lease_sec = std::stoi(args[++i]);
+        } else if (args[i] == "--auto-exit") {
+            auto_exit = true;
+        } else if (args[i] == "--coordinator" && i + 1 < args.size()) {
+            coordinator_url = args[++i];
+        } else if (args[i] == "--device" && i + 1 < args.size()) {
+            worker_device = args[++i];
+        } else if (args[i] == "--worker-id" && i + 1 < args.size()) {
+            worker_id = args[++i];
+        } else if (args[i] == "--poll-ms" && i + 1 < args.size()) {
+            poll_ms = std::stoi(args[++i]);
+        } else if (args[i] == "--max-tasks" && i + 1 < args.size()) {
+            max_tasks = static_cast<size_t>(std::stoul(args[++i]));
+        } else if (args[i] == "--partition" && i + 1 < args.size()) {
+            partition = args[++i];
+        } else if ((args[i] == "--cpus" || args[i] == "--cpus-per-task") && i + 1 < args.size()) {
+            cpus_per_task = std::stoi(args[++i]);
+        } else if ((args[i] == "--gpus" || args[i] == "--gpus-per-task") && i + 1 < args.size()) {
+            gpus_per_task = args[++i];
+        } else if (args[i] == "--time" && i + 1 < args.size()) {
+            time_limit = args[++i];
+        } else if (args[i] == "--job-name" && i + 1 < args.size()) {
+            job_name = args[++i];
+        } else if (args[i] == "--image" && i + 1 < args.size()) {
+            image_name = args[++i];
+        } else if (args[i] == "--parallelism" && i + 1 < args.size()) {
+            parallelism = std::stoi(args[++i]);
+        } else if (args[i] == "--completions" && i + 1 < args.size()) {
+            completions = std::stoi(args[++i]);
         } else if (args[i] == "--format" && i + 1 < args.size()) {
             mesh_format = args[++i];
         } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
@@ -324,13 +532,18 @@ int run(int argc, char** argv) {
         }
     }
 
-    if (command.empty() || (positional.empty() && command != "bundle")) {
+    const bool allow_no_positional = (command == "bundle" || command == "worker" ||
+                                      command == "coordinate" || command == "cluster" ||
+                                      command == "cluster-slurm" || command == "cluster-k8s");
+    if (command.empty() || (positional.empty() && !allow_no_positional)) {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
     if (command != "validate" && command != "estimate" && command != "run" &&
         command != "shard" && command != "merge" && command != "vtk" &&
-        command != "export-mesh" && command != "bundle") {
+        command != "export-mesh" && command != "bundle" && command != "run-parallel" &&
+        command != "coordinate" && command != "worker" && command != "cluster" &&
+        command != "cluster-slurm" && command != "cluster-k8s") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -342,6 +555,40 @@ int run(int argc, char** argv) {
         if (command == "merge") {
             std::vector<std::string> additional(positional.begin() + 1, positional.end());
             return cmd_merge(positional[0], additional, output_path, schema_path);
+        }
+        if (command == "run-parallel") {
+            const std::string& cfg = positional.empty() ? "" : positional[0];
+            if (cfg.empty()) {
+                std::cerr << "strikecem: error: run-parallel requires config path\n";
+                return static_cast<int>(ExitCode::Config);
+            }
+            return cmd_run_parallel(cfg, output_path, workers, devices, work_dir, keep_shards, schema_path);
+        }
+        if (command == "coordinate") {
+            std::string mf = manifest_path;
+            if (mf.empty() && !positional.empty()) mf = positional[0];
+            return cmd_coordinate(mf, output_path, host, port, lease_sec, auto_exit, schema_path);
+        }
+        if (command == "worker") {
+            return cmd_worker(coordinator_url, worker_device, worker_id, poll_ms, max_tasks, schema_path);
+        }
+        if (command == "cluster" || command == "cluster-slurm" || command == "cluster-k8s") {
+            std::string sub = command;
+            if (command == "cluster" && !positional.empty()) {
+                sub = positional[0];
+            }
+            std::string mf = manifest_path;
+            if (mf.empty() && positional.size() > 1) {
+                mf = positional[1];
+            }
+            if (sub == "generate-slurm" || sub == "slurm" || sub == "cluster-slurm") {
+                return cmd_cluster_slurm(mf, output_path, partition, cpus_per_task, gpus_per_task, time_limit, job_name);
+            }
+            if (sub == "generate-k8s" || sub == "k8s" || sub == "cluster-k8s") {
+                return cmd_cluster_k8s(mf, output_path, image_name, coordinator_url, parallelism, completions, job_name);
+            }
+            std::cerr << "strikecem: error: unknown cluster subcommand: " << sub << "\n";
+            return static_cast<int>(ExitCode::Config);
         }
 
         if (positional.size() != 1) {

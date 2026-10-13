@@ -13,6 +13,7 @@
 
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
+#include "strikecem/io/Hdf5Lock.hpp"
 #include "strikecem/io/Hdf5Reader.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
 #include "strikecem/io/OutputError.hpp"
@@ -111,6 +112,7 @@ ShardData read_csv_shard(const fs::path& csv_path) {
 }
 
 ShardData read_hdf5_shard(const fs::path& h5_path) {
+    std::lock_guard<std::recursive_mutex> hdf5_lock_guard(hdf5_global_mutex());
     ShardData sd;
     H5::Exception::dontPrint();
     try {
@@ -321,6 +323,7 @@ void merge_shards(const std::string& manifest_or_shard_path,
                   const std::vector<std::string>& additional_shards,
                   const std::string& output_path,
                   const std::string& schema_path) {
+    std::lock_guard<std::recursive_mutex> hdf5_lock_guard(hdf5_global_mutex());
     std::vector<fs::path> shard_paths;
     nlohmann::json manifest_meta = nlohmann::json::object();
     const fs::path first_path(manifest_or_shard_path);

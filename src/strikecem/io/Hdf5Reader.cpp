@@ -11,6 +11,7 @@
 #include <H5Cpp.h>
 
 #include "strikecem/io/Checksum.hpp"
+#include "strikecem/io/Hdf5Lock.hpp"
 
 namespace strikecem {
 namespace {
@@ -209,6 +210,7 @@ std::vector<std::string> read_strings(H5::Group& group, const char* name) {
 } // namespace
 
 Hdf5Database read_hdf5_database(const std::string& path) {
+    std::lock_guard<std::recursive_mutex> hdf5_lock_guard(hdf5_global_mutex());
     H5::Exception::dontPrint();
     Hdf5Database db;
     try {
