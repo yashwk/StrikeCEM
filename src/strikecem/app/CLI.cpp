@@ -347,9 +347,10 @@ int run(int argc, char** argv) {
 
         EdgeModel edge_model;
         FringeOptions fringe;
-        if (rc.value["solver"]["po_options"].value("edge_correction", "none") == "fringe") {
+        const std::string edge_corr = rc.value["solver"]["po_options"].value("edge_correction", "none");
+        if (edge_corr == "fringe" || edge_corr == "ptd_lite" || edge_corr == "ptd_full") {
             edge_model = extract_edges(mesh);
-            fringe = FringeOptions{true, &edge_model};
+            fringe = FringeOptions{true, &edge_model, edge_corr};
             std::cout << "fringe_edges: " << edge_model.edges.size() << "\n";
         }
         GoOptions go{rc.value["solver"]["po_options"].value("shadowing", false),

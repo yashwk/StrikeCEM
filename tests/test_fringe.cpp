@@ -802,4 +802,78 @@ TEST(Go, ResumeWithOptions) {
     fs::remove_all(dir, ec);
 }
 
+TEST(Fringe, QuadratureMatchesAnalyticalAtBroadside) {
+    const auto e = synthetic_edge(2.5);
+    const double k = 2.0 * kPi;
+    const geom::Vec3d s(0, 0, -1);
+    const geom::Vec3d r(0, 0, 1);
+    const auto closed = strikecem::along_edge_integral(e, k, s, r);
+    const auto quad = strikecem::along_edge_integral_quadrature(e, k, s, r);
+    EXPECT_NEAR(closed.real(), quad.real(), 1e-12);
+    EXPECT_NEAR(closed.imag(), quad.imag(), 1e-12);
 }
+
+TEST(Fringe, QuadratureAccurateAtObliqueIncidence) {
+    const auto e = synthetic_edge(0.3);
+    const double k = 10.0;
+    const geom::Vec3d s = unit(0.3, 0.4, -0.866);
+    const geom::Vec3d r = unit(-0.2, 0.5, 0.842);
+    const auto closed = strikecem::along_edge_integral(e, k, s, r);
+    const auto quad = strikecem::along_edge_integral_quadrature(e, k, s, r);
+    EXPECT_NEAR(closed.real(), quad.real(), 1e-5);
+    EXPECT_NEAR(closed.imag(), quad.imag(), 1e-5);
+}
+
+TEST(Fringe, PtdFullShadowedWedgeZeroFringe) {
+    strikecem::MeshEdge e;
+    e.p0 = {0, 0, 0};
+    e.p1 = {1.0, 0, 0};
+    e.tangent = {1, 0, 0};
+    e.length = 1.0;
+    e.n0 = {0, 0, 1};
+    e.n1 = {0, 1, 0};
+    e.face0_dir = {0, 1, 0};
+    e.face1_dir = {0, 0, 1};
+    e.boundary = false;
+    e.wedge_n = 1.5; // 90 degree wedge
+
+    // Arrival from (0, -1, -1), meaning propagation direction s_hat is (0, 1, 1) / sqrt(2)
+    // s_hat . n0 = 1/sqrt(2) > 0 (dark)
+    // s_hat . n1 = 1/sqrt(2) > 0 (dark)
+    const geom::Vec3d s = unit(0, 1, 1);
+    const geom::Vec3d r = unit(0, -1, -1);
+    const std::array<std::complex<double>, 3> e_inc = {
+        std::complex<double>(1.0, 0.0),
+        std::complex<double>(0.0, 0.0),
+        std::complex<double>(0.0, 0.0)
+    };
+
+    auto res_full = strikecem::fringe_vector(e, 2.0 * kPi, s, r, e_inc, {0,0,0}, strikecem::PtdMethod::Full);
+    EXPECT_FALSE(res_full.has_value()); // Shadowed: both faces dark
+}
+
+TEST(Fringe, PtdNonPecFaceWarning) {
+    auto mesh = load_mesh("valid_minimal.json");
+    ASSERT_FALSE(mesh.triangle_tags.empty());
+    mesh.triangle_tags[0] = "dielectric_foam";
+
+    auto rc = strikecem::load_config(fixture("valid_minimal.json"), SCEM_SCHEMA_PATH);
+    rc.value["solver"]["po_options"]["edge_correction"] = "ptd_full";
+
+    const auto edge_model = strikecem::extract_edges(mesh);
+    const strikecem::FringeOptions fringe{true, &edge_model, "ptd_full"};
+    const auto plan = make_fringe_plan({10e9}, {{0.0, 0.0}}, {"HH"});
+
+    const auto res = strikecem::solve_po(mesh, plan, rc.value, fringe);
+    bool found_warning = false;
+    for (const auto& w : res.warnings) {
+        if (w.find("non-PEC faces; PTD assumes PEC wedge") != std::string::npos) {
+            found_warning = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_warning);
+}
+
+}
+

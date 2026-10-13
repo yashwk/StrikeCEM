@@ -382,13 +382,14 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                       static_cast<double>(r_hat.z)};
             const double k_d = static_cast<double>(k);
             const double e0_d = static_cast<double>(e0_r);
+            const PtdMethod ptd_m = (fringe.method == "ptd_full") ? PtdMethod::Full : PtdMethod::Lite;
             for (const MeshEdge& edge : fringe.edges->edges) {
                 for (int tx = 0; tx < 2; ++tx) {
                     const std::array<std::complex<double>, 3> e_unit = {
                         std::complex<double>(static_cast<double>(tx_e[tx].x) / e0_d, 0.0),
                         std::complex<double>(static_cast<double>(tx_e[tx].y) / e0_d, 0.0),
                         std::complex<double>(static_cast<double>(tx_e[tx].z) / e0_d, 0.0)};
-                    const auto fv = fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_unit, phase_ref);
+                    const auto fv = fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_unit, phase_ref, ptd_m);
                     if (!fv) {
                         if (tx == 0) ++fringe_skipped;
                         continue;
@@ -586,10 +587,31 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
         for (auto& t : threads) t.join();
         if (first_error) std::rethrow_exception(first_error);
     }
-    if (fringe.enabled && fringe_skipped.load() > 0)
-        out.warnings.push_back("fringe correction skipped " +
-                               std::to_string(fringe_skipped.load()) +
-                               " edge-sample(s): no transverse frame (end-on incidence)");
+    if (fringe.enabled) {
+        if (fringe_skipped.load() > 0) {
+            out.warnings.push_back("fringe correction skipped " +
+                                   std::to_string(fringe_skipped.load()) +
+                                   " edge-sample(s): no transverse frame (end-on incidence)");
+        }
+        if (fringe.edges != nullptr) {
+            bool has_non_pec = false;
+            for (const auto& edge : fringe.edges->edges) {
+                if (edge.tri0 >= 0 && static_cast<size_t>(edge.tri0) < mesh.triangle_tags.size() &&
+                    mesh.triangle_tags[edge.tri0] != "pec") {
+                    has_non_pec = true;
+                    break;
+                }
+                if (edge.tri1 >= 0 && static_cast<size_t>(edge.tri1) < mesh.triangle_tags.size() &&
+                    mesh.triangle_tags[edge.tri1] != "pec") {
+                    has_non_pec = true;
+                    break;
+                }
+            }
+            if (has_non_pec) {
+                out.warnings.push_back("edge diffraction enabled with non-PEC faces; PTD assumes PEC wedge");
+            }
+        }
+    }
     out.chains_fired = chains_fired.load();
     return out;
 }

@@ -38,6 +38,7 @@ struct PoResult {
 struct FringeOptions {
     bool enabled = false;
     const EdgeModel* edges = nullptr;
+    std::string method = "ptd_lite"; // "ptd_lite", "ptd_full", or "fringe"
 };
 
 struct MaterialOptions {

@@ -205,7 +205,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "edge_correction": {"type": "string", "enum": ["none", "fringe"], "default": "none"},
+            "edge_correction": {"type": "string", "enum": ["none", "fringe", "ptd_lite", "ptd_full"], "default": "none"},
             "illumination_model": {"const": "hard", "default": "hard"},
             "curvature_correction": {"type": "boolean", "default": false},
             "shadowing": {"type": "boolean", "default": false},

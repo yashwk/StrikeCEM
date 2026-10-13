@@ -93,19 +93,31 @@ TransverseAngles wedge_transverse_angles(const MeshEdge& edge,
 std::optional<std::complex<double>> fringe_amplitude(const MeshEdge& edge, double k,
                                                      const geom::Vec3d& s_hat,
                                                      const geom::Vec3d& r_hat, char pol,
-                                                     const geom::Vec3d& phase_ref) {
+                                                     const geom::Vec3d& phase_ref,
+                                                     PtdMethod method) {
     if (pol != 's' && pol != 'h') throw std::invalid_argument("fringe pol must be 's' or 'h'");
     if (!(k > 0.0) || !std::isfinite(k))
         throw std::invalid_argument("wavenumber must be positive and finite");
     if (!is_unit(s_hat) || !is_unit(r_hat))
         throw std::invalid_argument("edge fringe directions must be unit vectors");
+    if (method == PtdMethod::Full) {
+        const bool lit0 = geom::dot(s_hat, edge.n0) < 1e-6;
+        if (edge.boundary) {
+            if (!lit0) return std::nullopt;
+        } else {
+            const bool lit1 = geom::dot(s_hat, edge.n1) < 1e-6;
+            if (!lit0 && !lit1) return std::nullopt;
+        }
+    }
     const TransverseAngles ang =
         edge.boundary ? edge_transverse_angles(edge, s_hat, r_hat)
                       : wedge_transverse_angles(edge, s_hat, r_hat);
     if (!ang.valid) return std::nullopt;
     const double n = edge.boundary ? 2.0 : edge.wedge_n;
     const double kt = k * ang.sin_beta0;
-    const auto integral = along_edge_integral(edge, k, s_hat, r_hat, phase_ref);
+    const auto integral = (method == PtdMethod::Full)
+                              ? along_edge_integral_quadrature(edge, k, s_hat, r_hat, phase_ref)
+                              : along_edge_integral(edge, k, s_hat, r_hat, phase_ref);
     const auto d = utd_coefficient(kt, edge.length, n, ang.phi, ang.phi_prime);
     return (pol == 's' ? d.soft : d.hard) * integral;
 }
@@ -113,7 +125,8 @@ std::optional<std::complex<double>> fringe_amplitude(const MeshEdge& edge, doubl
 std::optional<std::array<std::complex<double>, 3>> fringe_vector(
     const MeshEdge& edge, double k, const geom::Vec3d& s_hat, const geom::Vec3d& r_hat,
     const std::array<std::complex<double>, 3>& e_inc,
-    const geom::Vec3d& phase_ref) {
+    const geom::Vec3d& phase_ref,
+    PtdMethod method) {
     for (const auto& c : e_inc)
         if (!std::isfinite(c.real() + c.imag())) throw std::invalid_argument("e_inc not finite");
     if (!(k > 0.0) || !std::isfinite(k))
@@ -123,6 +136,15 @@ std::optional<std::array<std::complex<double>, 3>> fringe_vector(
     const double t_len = edge.tangent.length();
     if (!(t_len > 0.0)) throw std::invalid_argument("edge tangent must be non-zero");
     if (!(edge.length > 0.0)) throw std::invalid_argument("edge length must be positive");
+    if (method == PtdMethod::Full) {
+        const bool lit0 = geom::dot(s_hat, edge.n0) < 1e-6;
+        if (edge.boundary) {
+            if (!lit0) return std::nullopt;
+        } else {
+            const bool lit1 = geom::dot(s_hat, edge.n1) < 1e-6;
+            if (!lit0 && !lit1) return std::nullopt;
+        }
+    }
     const TransverseAngles ang =
         edge.boundary ? edge_transverse_angles(edge, s_hat, r_hat)
                       : wedge_transverse_angles(edge, s_hat, r_hat);
@@ -130,7 +152,9 @@ std::optional<std::array<std::complex<double>, 3>> fringe_vector(
     const geom::Vec3d t = edge.tangent * (1.0 / t_len);
     const double n = edge.boundary ? 2.0 : edge.wedge_n;
     const auto d = utd_coefficient(k * ang.sin_beta0, edge.length, n, ang.phi, ang.phi_prime);
-    const auto integral = along_edge_integral(edge, k, s_hat, r_hat, phase_ref);
+    const auto integral = (method == PtdMethod::Full)
+                              ? along_edge_integral_quadrature(edge, k, s_hat, r_hat, phase_ref)
+                              : along_edge_integral(edge, k, s_hat, r_hat, phase_ref);
     const std::complex<double> cs = d.soft * integral, ch = d.hard * integral;
     const std::complex<double> epar = e_inc[0] * t.x + e_inc[1] * t.y + e_inc[2] * t.z;
     const std::array<std::complex<double>, 3> eperp = {
@@ -171,6 +195,47 @@ std::complex<double> along_edge_integral(const MeshEdge& edge, double k,
     const double sinc = (std::abs(x) < 1e-8) ? 1.0 - x * x / 6.0 : std::sin(x) / x;
     const double mag = edge.length * sinc;
     return {mag * std::cos(phase), mag * std::sin(phase)};
+}
+
+std::complex<double> along_edge_integral_quadrature(
+    const MeshEdge& edge, double k, const geom::Vec3d& s_hat,
+    const geom::Vec3d& r_hat, const geom::Vec3d& phase_ref) {
+    if (!(k > 0.0) || !std::isfinite(k))
+        throw std::invalid_argument("wavenumber must be positive and finite");
+    if (!is_unit(s_hat) || !is_unit(r_hat))
+        throw std::invalid_argument("edge fringe directions must be unit vectors");
+    if (!(edge.length > 0.0)) throw std::invalid_argument("edge length must be positive");
+    const double t_len = edge.tangent.length();
+    if (!(t_len > 0.0)) throw std::invalid_argument("edge tangent must be non-zero");
+    const geom::Vec3d t = edge.tangent * (1.0 / t_len);
+    const geom::Vec3d d = r_hat - s_hat;
+    const geom::Vec3d mid = ((edge.p0 + edge.p1) * 0.5) - phase_ref;
+    const double half_len = edge.length * 0.5;
+
+    // 5-point Gauss-Legendre quadrature nodes and weights on [-1, 1]
+    static const double nodes[5] = {
+        0.0,
+        -0.538469310105683,
+        0.538469310105683,
+        -0.906179845938664,
+        0.906179845938664
+    };
+    static const double weights[5] = {
+        128.0 / 225.0,
+        (322.0 + 13.0 * std::sqrt(70.0)) / 900.0,
+        (322.0 + 13.0 * std::sqrt(70.0)) / 900.0,
+        (322.0 - 13.0 * std::sqrt(70.0)) / 900.0,
+        (322.0 - 13.0 * std::sqrt(70.0)) / 900.0
+    };
+
+    std::complex<double> sum{0.0, 0.0};
+    for (int i = 0; i < 5; ++i) {
+        const geom::Vec3d pos = mid + t * (nodes[i] * half_len);
+        const double phase = k * geom::dot(d, pos);
+        const std::complex<double> integrand(std::cos(phase), std::sin(phase));
+        sum += weights[i] * integrand;
+    }
+    return sum * half_len;
 }
 
 }

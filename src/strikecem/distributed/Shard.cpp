@@ -450,9 +450,10 @@ void merge_shards(const std::string& manifest_or_shard_path,
     const DesignerIdentity designer = {};
     EdgeModel edge_model;
     FringeOptions fringe;
-    if (rc.value["solver"]["po_options"].value("edge_correction", "none") == "fringe") {
+    const std::string edge_corr = rc.value["solver"]["po_options"].value("edge_correction", "none");
+    if (edge_corr == "fringe" || edge_corr == "ptd_lite" || edge_corr == "ptd_full") {
         edge_model = extract_edges(mesh);
-        fringe = FringeOptions{true, &edge_model};
+        fringe = FringeOptions{true, &edge_model, edge_corr};
     }
     const ResolvedMaterials resolved_mat = resolve_materials(rc.value, mesh);
     MaterialOptions material;
