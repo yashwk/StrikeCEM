@@ -658,7 +658,8 @@ int cmd_sar(const std::string& input_path, const std::string& output_image,
             const std::string& output_json, const std::string& preset,
             double freq_hz, double bw_hz, double incidence_deg,
             double altitude_m, double velocity_mps, const std::string& ground_str,
-            bool enable_shadow, const std::string& colormap_name,
+            bool enable_shadow, bool overlay_wireframe, double radar_azimuth,
+            const std::string& colormap_name,
             size_t width, size_t height, const std::string& schema_path) {
     if (input_path.empty()) {
         std::cerr << "strikecem: error: sar requires input mesh or config path\n";
@@ -704,6 +705,8 @@ int cmd_sar(const std::string& input_path, const std::string& output_image,
     if (altitude_m > 0.0) cfg.altitude_m = altitude_m;
     if (velocity_mps > 0.0) cfg.platform_velocity_mps = velocity_mps;
     if (!enable_shadow) cfg.enable_shadow = false;
+    if (overlay_wireframe) cfg.overlay_wireframe = true;
+    if (radar_azimuth != 0.0) cfg.radar_azimuth_deg = radar_azimuth;
 
     if (!ground_str.empty()) {
         if (ground_str == "none" || ground_str == "free_space") cfg.ground_type = analysis::SarGroundType::None;
@@ -819,6 +822,8 @@ int run(int argc, char** argv) {
     std::string sar_ground;
     std::string sar_colormap;
     bool sar_shadow = true;
+    bool sar_wireframe = false;
+    double sar_azimuth = 0.0;
     std::string sar_json_out;
 
     std::vector<std::string> positional;
@@ -854,6 +859,10 @@ int run(int argc, char** argv) {
             sar_ground = args[++i];
         } else if (args[i] == "--no-shadow") {
             sar_shadow = false;
+        } else if (args[i] == "--wireframe") {
+            sar_wireframe = true;
+        } else if ((args[i] == "--sar-az" || args[i] == "--radar-az") && i + 1 < args.size()) {
+            sar_azimuth = std::stod(args[++i]);
         } else if (args[i] == "--json" && i + 1 < args.size()) {
             sar_json_out = args[++i];
         } else if (args[i] == "--lod" && i + 1 < args.size()) {
@@ -1072,7 +1081,8 @@ int run(int argc, char** argv) {
             return cmd_sar(input, output_path, sar_json_out, sar_preset,
                            sar_freq, sar_bandwidth, sar_incidence,
                            sar_altitude, sar_velocity, sar_ground,
-                           sar_shadow, sar_colormap, render_width,
+                           sar_shadow, sar_wireframe, sar_azimuth,
+                           sar_colormap, render_width,
                            render_height, schema_path);
         }
 

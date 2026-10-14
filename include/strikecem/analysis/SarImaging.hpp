@@ -47,8 +47,10 @@ struct SarConfig {
     double altitude_m = 500.0e3;              // 500 km (LEO satellite)
     double platform_velocity_mps = 7600.0;    // 7.6 km/s orbital speed
     double incidence_angle_deg = 40.0;        // Angle from vertical (depression = 90 - inc = 50 deg)
+    double radar_azimuth_deg = 45.0;          // Azimuth of radar illumination relative to vehicle (0=nose, 90=starboard)
     double heading_deg = 0.0;                 // Flight track azimuth (deg, 0 = North along +y)
     double standoff_ground_range_m = 0.0;     // Computed from altitude and incidence if 0
+    bool overlay_wireframe = false;           // Overlay CAD wireframe as in simulation IF stage (Image 3)
 
     // Radar sensor parameters
     double center_frequency_hz = 35.0e9;      // 35.0 GHz (Ka-band default)
@@ -108,6 +110,8 @@ struct SarImage {
     SarConfig config;
     std::string vehicle_name;
     size_t mesh_triangles = 0;
+    std::vector<std::pair<geom::Vec3d, geom::Vec3d>> wireframe_edges;
+    std::vector<geom::Vec3d> scattering_centers;
 
     // Export & Rendering
     nlohmann::json to_json() const;
