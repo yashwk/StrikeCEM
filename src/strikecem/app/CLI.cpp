@@ -25,6 +25,7 @@
 #include "strikecem/rendering/Image.hpp"
 #include "strikecem/rendering/ModelRenderer.hpp"
 #include "strikecem/analysis/SignatureReport.hpp"
+#include "strikecem/analysis/SarImaging.hpp"
 #include "strikecem/io/AssetBundle.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
 #include "strikecem/io/CsvWriter.hpp"
@@ -87,6 +88,10 @@ constexpr const char* kUsage =
     "               options: <database.h5|config.json> [-o report.html] [--config CFG] [--mesh MESH]\n"
     "                        [--title \"...\"] [--vehicle \"...\"] [--image img.png] [--isar isar.png]\n"
     "                        [--mode currents|lit_shadow|shaded] [--colormap turbo|jet|viridis]\n"
+    "  sar          simulate spaceborne or airborne Synthetic Aperture Radar (SAR) 2D imaging\n"
+    "               options: <config.json|mesh> [--output sar.png] [--preset satellite-ka|satellite-x|airborne-ka|airborne-x]\n"
+    "                        [--freq HZ] [--bandwidth HZ] [--incidence DEG] [--altitude M] [--velocity M/S]\n"
+    "                        [--ground tarmac|soil|none] [--no-shadow] [--colormap gray|turbo|jet] [--json sar.json]\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
 
 int fail(const std::exception& e, ExitCode code) {
@@ -649,6 +654,89 @@ int cmd_report(const std::string& input_path, const std::string& output_html,
     }
 }
 
+int cmd_sar(const std::string& input_path, const std::string& output_image,
+            const std::string& output_json, const std::string& preset,
+            double freq_hz, double bw_hz, double incidence_deg,
+            double altitude_m, double velocity_mps, const std::string& ground_str,
+            bool enable_shadow, const std::string& colormap_name,
+            size_t width, size_t height, const std::string& schema_path) {
+    if (input_path.empty()) {
+        std::cerr << "strikecem: error: sar requires input mesh or config path\n";
+        return static_cast<int>(ExitCode::Config);
+    }
+
+    NormalizedMesh mesh;
+    std::string vehicle_name = "Target";
+
+    if (input_path.rfind(".json") != std::string::npos) {
+        ResolvedConfig rc = load_config(input_path, schema_path);
+        mesh = load_normalized_mesh(rc.value, config_dir_of(input_path), rc.schema_version);
+        if (rc.value.contains("model") && rc.value["model"].contains("name")) {
+            vehicle_name = rc.value["model"]["name"].get<std::string>();
+        } else {
+            vehicle_name = fs::path(input_path).stem().string();
+        }
+    } else {
+        const fs::path abs_path = fs::absolute(input_path);
+        nlohmann::json dummy_cfg = {
+            {"model", {
+                {"path", abs_path.string()},
+                {"units", "m"},
+                {"mesh_repair", "report"}
+            }},
+            {"mesh", {{"max_aspect_ratio", 100.0}}},
+            {"scem_schema_version", "1.0"}
+        };
+        mesh = load_normalized_mesh(dummy_cfg, abs_path.parent_path(), "1.0");
+        vehicle_name = abs_path.stem().string();
+    }
+
+    analysis::SarConfig cfg;
+    if (!preset.empty()) {
+        cfg = analysis::SarProcessor::make_preset(preset);
+    } else {
+        cfg = analysis::SarProcessor::make_preset("satellite-ka");
+    }
+
+    if (freq_hz > 0.0) cfg.center_frequency_hz = freq_hz;
+    if (bw_hz > 0.0) cfg.bandwidth_hz = bw_hz;
+    if (incidence_deg > 0.0) cfg.incidence_angle_deg = incidence_deg;
+    if (altitude_m > 0.0) cfg.altitude_m = altitude_m;
+    if (velocity_mps > 0.0) cfg.platform_velocity_mps = velocity_mps;
+    if (!enable_shadow) cfg.enable_shadow = false;
+
+    if (!ground_str.empty()) {
+        if (ground_str == "none" || ground_str == "free_space") cfg.ground_type = analysis::SarGroundType::None;
+        else if (ground_str == "soil") cfg.ground_type = analysis::SarGroundType::Soil;
+        else if (ground_str == "water") cfg.ground_type = analysis::SarGroundType::Water;
+        else if (ground_str == "pec") cfg.ground_type = analysis::SarGroundType::Pec;
+        else cfg.ground_type = analysis::SarGroundType::Tarmac;
+    }
+
+    if (!colormap_name.empty()) cfg.colormap = colormap_name;
+    if (width > 0) cfg.image_width = width;
+    if (height > 0) cfg.image_height = height;
+
+    try {
+        analysis::SarImage sar_img = analysis::SarProcessor::compute(mesh, cfg, vehicle_name);
+
+        std::string img_path = output_image.empty() ? "sar_image.png" : output_image;
+        sar_img.write_image(img_path, cfg.image_width, cfg.image_height, cfg.colormap);
+        std::cout << "sar_image: " << img_path << "\n";
+
+        if (!output_json.empty()) {
+            sar_img.write_json(output_json);
+            std::cout << "sar_json: " << output_json << "\n";
+        }
+
+        std::cout << "status: ok\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "strikecem: error: SAR processing failed: " << e.what() << "\n";
+        return static_cast<int>(ExitCode::Output);
+    }
+}
+
 } // namespace
 
 int run(int argc, char** argv) {
@@ -721,6 +809,18 @@ int run(int argc, char** argv) {
     std::string report_vehicle;
     std::string report_isar;
 
+    // SAR parameters
+    std::string sar_preset;
+    double sar_freq = 0.0;
+    double sar_bandwidth = 0.0;
+    double sar_incidence = 0.0;
+    double sar_altitude = 0.0;
+    double sar_velocity = 0.0;
+    std::string sar_ground;
+    std::string sar_colormap;
+    bool sar_shadow = true;
+    std::string sar_json_out;
+
     std::vector<std::string> positional;
 
     for (size_t i = 0; i < args.size(); ++i) {
@@ -740,6 +840,22 @@ int run(int argc, char** argv) {
             bundle_rcs = args[++i];
         } else if (args[i] == "--mesh" && i + 1 < args.size()) {
             bundle_mesh = args[++i];
+        } else if (args[i] == "--preset" && i + 1 < args.size()) {
+            sar_preset = args[++i];
+        } else if (args[i] == "--bandwidth" && i + 1 < args.size()) {
+            sar_bandwidth = std::stod(args[++i]);
+        } else if (args[i] == "--incidence" && i + 1 < args.size()) {
+            sar_incidence = std::stod(args[++i]);
+        } else if (args[i] == "--altitude" && i + 1 < args.size()) {
+            sar_altitude = std::stod(args[++i]);
+        } else if (args[i] == "--velocity" && i + 1 < args.size()) {
+            sar_velocity = std::stod(args[++i]);
+        } else if (args[i] == "--ground" && i + 1 < args.size()) {
+            sar_ground = args[++i];
+        } else if (args[i] == "--no-shadow") {
+            sar_shadow = false;
+        } else if (args[i] == "--json" && i + 1 < args.size()) {
+            sar_json_out = args[++i];
         } else if (args[i] == "--lod" && i + 1 < args.size()) {
             std::string lod_spec = args[++i];
             size_t eq = lod_spec.find('=');
@@ -837,6 +953,7 @@ int run(int argc, char** argv) {
             isar_image_out = args[++i];
         } else if (args[i] == "--colormap" && i + 1 < args.size()) {
             render_colormap = args[++i];
+            sar_colormap = render_colormap;
         } else if (args[i] == "--width" && i + 1 < args.size()) {
             render_width = static_cast<size_t>(std::stoul(args[++i]));
         } else if (args[i] == "--height" && i + 1 < args.size()) {
@@ -851,6 +968,7 @@ int run(int argc, char** argv) {
             render_el = std::stod(args[++i]);
         } else if (args[i] == "--freq" && i + 1 < args.size()) {
             render_freq = std::stod(args[++i]);
+            sar_freq = render_freq;
         } else if (args[i] == "--format" && i + 1 < args.size()) {
             mesh_format = args[++i];
         } else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
@@ -877,7 +995,7 @@ int run(int argc, char** argv) {
         command != "export-mesh" && command != "bundle" && command != "run-parallel" &&
         command != "coordinate" && command != "worker" && command != "cluster" &&
         command != "cluster-slurm" && command != "cluster-k8s" && command != "prescan" &&
-        command != "isar" && command != "render" && command != "report") {
+        command != "isar" && command != "render" && command != "report" && command != "sar") {
         std::cerr << kUsage;
         return static_cast<int>(ExitCode::Config);
     }
@@ -948,6 +1066,14 @@ int run(int argc, char** argv) {
             return cmd_report(input, output_path, companion, report_title,
                               report_vehicle, report_isar, isar_image_out,
                               render_mode, render_colormap);
+        }
+        if (command == "sar") {
+            const std::string& input = positional.empty() ? "" : positional[0];
+            return cmd_sar(input, output_path, sar_json_out, sar_preset,
+                           sar_freq, sar_bandwidth, sar_incidence,
+                           sar_altitude, sar_velocity, sar_ground,
+                           sar_shadow, sar_colormap, render_width,
+                           render_height, schema_path);
         }
 
         if (positional.size() != 1) {

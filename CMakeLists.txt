@@ -92,7 +92,8 @@ add_library(scem_core STATIC src/strikecem/core/Config.cpp src/strikecem/io/Mesh
         src/strikecem/analysis/IsarImaging.cpp
         src/strikecem/rendering/Image.cpp
         src/strikecem/rendering/ModelRenderer.cpp
-        src/strikecem/analysis/SignatureReport.cpp)
+        src/strikecem/analysis/SignatureReport.cpp
+        src/strikecem/analysis/SarImaging.cpp)
 if(SCEM_HAVE_CUDA)
     target_sources(scem_core PRIVATE src/strikecem/solvers/GpuPO.cu)
     target_compile_definitions(scem_core PUBLIC SCEM_ENABLE_CUDA)
@@ -166,7 +167,7 @@ add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests
         tests/test_analysis.cpp tests/test_bistatic.cpp tests/test_symmetry.cpp
         tests/test_remesh.cpp tests/test_curvature.cpp tests/test_bundle.cpp
         tests/test_cluster.cpp tests/test_similitude.cpp tests/test_prescan.cpp
-        tests/test_isar.cpp tests/test_render.cpp tests/test_report.cpp
+        tests/test_isar.cpp tests/test_render.cpp tests/test_report.cpp tests/test_sar.cpp
         src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE
