@@ -1,0 +1,61 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {
+    "path": "f15.obj",
+    "units": "m",
+    "mesh_repair": "report"
+  },
+  "similitude": {
+    "enabled": true,
+    "geometric_scale": 0.2,
+    "direction": "full_to_model",
+    "auto_rescale_rcs": true
+  },
+  "frequency": {
+    "frequency_hz": 10000000000
+  },
+  "physics": {
+    "monostatic": true,
+    "polarization_basis": "linear",
+    "incident_amplitude": 1.0,
+    "phase_reference": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "angles": {
+    "azimuth": {
+      "start": 0,
+      "stop": 360,
+      "step": 1
+    },
+    "elevation": {
+      "start": 0,
+      "stop": 0,
+      "step": 1
+    }
+  },
+  "polarization": [
+    "HH",
+    "VV"
+  ],
+  "solver": {
+    "type": "PO",
+    "precision": "float64",
+    "rcs_units": "dBsm",
+    "po_options": {
+      "edge_correction": "none",
+      "curvature_correction": false,
+      "shadowing": false,
+      "max_bounces": 1
+    }
+  },
+  "execution": {
+    "accelerator": "cpu"
+  },
+  "output": {
+    "format": "hdf5",
+    "path": "examples/f15/f15_similitude.h5"
+  }
+}

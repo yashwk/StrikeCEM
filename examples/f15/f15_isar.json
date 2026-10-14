@@ -1,0 +1,58 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {
+    "path": "f15.obj",
+    "units": "m",
+    "mesh_repair": "report"
+  },
+  "frequency": {
+    "sweep": {
+      "start": 9000000000,
+      "stop": 11000000000,
+      "step": 100000000
+    }
+  },
+  "physics": {
+    "monostatic": true,
+    "polarization_basis": "linear",
+    "incident_amplitude": 1.0,
+    "phase_reference": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "angles": {
+    "azimuth": {
+      "start": 35.0,
+      "stop": 55.0,
+      "step": 0.5
+    },
+    "elevation": {
+      "start": 0,
+      "stop": 0,
+      "step": 1
+    }
+  },
+  "polarization": [
+    "HH"
+  ],
+  "solver": {
+    "type": "PO",
+    "precision": "float64",
+    "rcs_units": "dBsm",
+    "po_options": {
+      "edge_correction": "none",
+      "curvature_correction": false,
+      "shadowing": false,
+      "max_bounces": 1
+    }
+  },
+  "execution": {
+    "accelerator": "cpu"
+  },
+  "output": {
+    "format": "hdf5",
+    "path": "examples/f15/f15_isar.h5"
+  }
+}
