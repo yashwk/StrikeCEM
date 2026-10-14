@@ -230,9 +230,11 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
     // 2. Linear intensity accumulator [nx][ny]
     std::vector<std::vector<double>> lin_intensity(nx, std::vector<double>(ny, 0.0));
 
-    // Base ground clutter power per pixel
-    const double pixel_area = dx * dy;
-    double base_clutter_lin = std::pow(10.0, config.ground_clutter_sigma0_db / 10.0) * pixel_area;
+    // Base ground clutter power per resolution cell
+    const double res_x = img.ground_range_resolution_m;
+    const double res_y = img.azimuth_resolution_m;
+    const double cell_area = res_x * res_y;
+    double base_clutter_lin = std::pow(10.0, config.ground_clutter_sigma0_db / 10.0) * cell_area;
     if (config.ground_type == SarGroundType::None) {
         base_clutter_lin = 1e-12; // Free-space dark background
     }
@@ -249,8 +251,8 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
 
             if (shadow_mask[i][j]) {
                 shadow_pixel_count++;
-                // Deep shadow: 30 dB suppression below clutter floor
-                lin_intensity[i][j] = clutter * 0.001;
+                // Deep shadow: 35 dB suppression below clutter floor
+                lin_intensity[i][j] = clutter * 0.0003;
             } else {
                 lin_intensity[i][j] = clutter;
             }
@@ -259,10 +261,9 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
     img.shadow_area_fraction = static_cast<double>(shadow_pixel_count) / static_cast<double>(nx * ny);
 
     // 3. Target Electrodynamics Backscatter Injection
-    // Physical Optics + PTD + Dihedral Ground-Bounce
+    // Physical Optics + Diffuse Skin + Dihedral Ground-Bounce
     double max_lin = 1e-9;
-    const double res_x = img.ground_range_resolution_m;
-    const double res_y = img.azimuth_resolution_m;
+    const double sample_step = std::max(0.10, std::min(res_x, res_y) * 0.7);
 
     for (size_t t = 0; t < mesh.triangles.size(); ++t) {
         const auto& tri = mesh.triangles[t];
@@ -274,71 +275,106 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
 
         // Illuminated check
         double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
-        if (cos_i <= 0.0) continue; // In shadow
+        if (cos_i <= 0.0) continue; // In self-shadow
 
-        geom::Vec3d center = (v0 + v1 + v2) * (1.0 / 3.0);
+        // Subdivide triangle to distribute scattering across physical surface
+        int subdiv = std::clamp(static_cast<int>(std::round(std::sqrt(2.0 * area / (sample_step * sample_step)))), 1, 16);
+        int num_samples = subdiv * (subdiv + 1) / 2;
+        double sub_area = area / static_cast<double>(num_samples);
 
-        // Slant-to-ground layover mapping:
-        // Elevated target points appear at ground range: x_apparent = x_center - (z_center - ground_z) * cot(incidence)
-        double cot_inc = std::cos(inc_rad) / std::sin(inc_rad);
-        double target_gx = center.x - (center.z - ground_z) * cot_inc;
-        double target_gy = center.y;
+        for (int p = 0; p < subdiv; ++p) {
+            for (int q = 0; q < subdiv - p; ++q) {
+                double u = (p + 1.0 / 3.0) / static_cast<double>(subdiv);
+                double v = (q + 1.0 / 3.0) / static_cast<double>(subdiv);
+                double w = 1.0 - u - v;
+                geom::Vec3d pt{
+                    u * v0.x + v * v1.x + w * v2.x,
+                    u * v0.y + v * v1.y + w * v2.y,
+                    u * v0.z + v * v1.z + w * v2.z
+                };
 
-        // Scattering intensity: PO area specular glint factor
-        double rcs_facet = (4.0 * M_PI / (lambda * lambda)) * (area * area) * (cos_i * cos_i);
-        // Realistic dynamic range limit for facet scatter
-        rcs_facet = std::min(rcs_facet, 1000.0 * area);
+                // Slant-to-ground layover mapping:
+                double cot_inc = std::cos(inc_rad) / std::sin(inc_rad);
+                double target_gx = pt.x - (pt.z - ground_z) * cot_inc;
+                double target_gy = pt.y;
 
-        // Ground-bounce dihedral multipath enhancement for lower vehicle structures
-        if (config.enable_ground_multipath && (center.z - ground_z) < (0.35 * vehicle_height)) {
-            rcs_facet *= 3.5; // Double-bounce dihedral corner boost
-        }
+                // Backscatter model: diffuse airframe skin + specular PO glint
+                double rcs_diff = 0.35 * sub_area * cos_i;
+                double specular_factor = std::pow(std::max(0.0, cos_i), 12.0);
+                double rcs_spec = (4.0 * M_PI / (lambda * lambda)) * (sub_area * sub_area) * specular_factor;
+                rcs_spec = std::min(rcs_spec, 10.0 * sub_area);
 
-        // Splat facet energy across Point Spread Function (PSF)
-        int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
-        int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
+                double rcs_sub = rcs_diff + rcs_spec;
 
-        int spread_i = std::max(1, static_cast<int>(std::ceil(res_x / dx)));
-        int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
+                // Ground-bounce dihedral multipath enhancement for lower vehicle structures
+                if (config.enable_ground_multipath && (pt.z - ground_z) < (0.35 * vehicle_height)) {
+                    rcs_sub *= 3.5;
+                }
 
-        for (int di = -spread_i; di <= spread_i; ++di) {
-            int ci = center_i + di;
-            if (ci < 0 || ci >= static_cast<int>(nx)) continue;
-            double dist_x = di * dx / res_x;
-            double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
+                // Splat sub-element energy across Point Spread Function (PSF)
+                int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
+                int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
 
-            for (int dj = -spread_j; dj <= spread_j; ++dj) {
-                int cj = center_j + dj;
-                if (cj < 0 || cj >= static_cast<int>(ny)) continue;
-                double dist_y = dj * dy / res_y;
-                double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
+                int spread_i = std::max(1, static_cast<int>(std::ceil(res_x / dx)));
+                int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
 
-                double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
-                lin_intensity[ci][cj] += rcs_facet * psf;
+                for (int di = -spread_i; di <= spread_i; ++di) {
+                    int ci = center_i + di;
+                    if (ci < 0 || ci >= static_cast<int>(nx)) continue;
+                    double dist_x = di * dx / res_x;
+                    double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
+
+                    for (int dj = -spread_j; dj <= spread_j; ++dj) {
+                        int cj = center_j + dj;
+                        if (cj < 0 || cj >= static_cast<int>(ny)) continue;
+                        double dist_y = dj * dy / res_y;
+                        double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
+
+                        double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
+                        lin_intensity[ci][cj] += rcs_sub * psf;
+                    }
+                }
             }
         }
     }
 
     // 4. Find Peak and Convert to Decibels
+    std::vector<double> non_zero_vals;
+    non_zero_vals.reserve(nx * ny);
+
     for (size_t i = 0; i < nx; ++i) {
         for (size_t j = 0; j < ny; ++j) {
-            if (lin_intensity[i][j] > max_lin) {
-                max_lin = lin_intensity[i][j];
+            double v = lin_intensity[i][j];
+            if (v > max_lin) {
+                max_lin = v;
                 img.peak_ground_range_m = img.ground_range_axis_m[i];
                 img.peak_azimuth_m = img.azimuth_axis_m[j];
+            }
+            if (v > 1e-12) {
+                non_zero_vals.push_back(v);
             }
         }
     }
     img.peak_rcs_dbsm = (max_lin > 1e-30) ? 10.0 * std::log10(max_lin) : -999.0;
 
+    // Use 99.8th percentile for display dynamic range normalization so specular spikes
+    // do not crush background clutter and diffuse body scattering into pitch black.
+    double display_ref = max_lin;
+    if (non_zero_vals.size() > 100) {
+        size_t p_idx = static_cast<size_t>(0.998 * non_zero_vals.size());
+        p_idx = std::clamp(p_idx, size_t{0}, non_zero_vals.size() - 1);
+        std::nth_element(non_zero_vals.begin(), non_zero_vals.begin() + p_idx, non_zero_vals.end());
+        display_ref = std::max(1e-12, non_zero_vals[p_idx]);
+    }
+
     img.intensity_db.resize(nx, std::vector<double>(ny, -config.dynamic_range_db));
-    const double inv_max = 1.0 / std::max(1e-30, max_lin);
+    const double inv_ref = 1.0 / display_ref;
 
     for (size_t i = 0; i < nx; ++i) {
         for (size_t j = 0; j < ny; ++j) {
-            double ratio = lin_intensity[i][j] * inv_max;
+            double ratio = lin_intensity[i][j] * inv_ref;
             double val_db = (ratio > 1e-15) ? 10.0 * std::log10(ratio) : -config.dynamic_range_db;
-            img.intensity_db[i][j] = std::max(-config.dynamic_range_db, val_db);
+            img.intensity_db[i][j] = std::clamp(val_db, -config.dynamic_range_db, 0.0);
         }
     }
 
