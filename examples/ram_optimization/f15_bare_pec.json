@@ -1,0 +1,77 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {
+    "path": "f15_ram.obj",
+    "units": "m",
+    "mesh_repair": "report"
+  },
+  "materials": {
+    "default_material": "pec_body",
+    "tag_coverage": "warn",
+    "definitions": [
+      {
+        "tag": "pec_body",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_intake",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_leading_edges",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_vertical_tails",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_canopy",
+        "type": "pec"
+      }
+    ]
+  },
+  "frequency": {
+    "frequency_hz": 10000000000
+  },
+  "physics": {
+    "monostatic": true,
+    "polarization_basis": "linear",
+    "incident_amplitude": 1.0,
+    "phase_reference": [0.0, 0.0, 0.0]
+  },
+  "angles": {
+    "azimuth": {
+      "start": 0,
+      "stop": 360,
+      "step": 1
+    },
+    "elevation": {
+      "start": 0,
+      "stop": 0,
+      "step": 1
+    }
+  },
+  "polarization": [
+    "HH",
+    "VV"
+  ],
+  "solver": {
+    "type": "PO",
+    "precision": "float64",
+    "rcs_units": "dBsm",
+    "po_options": {
+      "edge_correction": "none",
+      "curvature_correction": false,
+      "shadowing": false,
+      "max_bounces": 1
+    }
+  },
+  "execution": {
+    "accelerator": "cpu"
+  },
+  "output": {
+    "format": "hdf5",
+    "path": "examples/ram_optimization/f15_bare_pec.h5"
+  }
+}

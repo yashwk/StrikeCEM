@@ -1,0 +1,96 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {
+    "path": "f15_ram.obj",
+    "units": "m",
+    "mesh_repair": "report"
+  },
+  "materials": {
+    "default_material": "pec_body",
+    "tag_coverage": "warn",
+    "definitions": [
+      {
+        "tag": "pec_body",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_intake",
+        "type": "coated",
+        "layers": [
+          {
+            "thickness_m": 0.0013,
+            "epsilon_r": [10.0, -0.5],
+            "mu_r": [2.2, -1.8]
+          }
+        ]
+      },
+      {
+        "tag": "ram_leading_edges",
+        "type": "coated",
+        "layers": [
+          {
+            "thickness_m": 0.0018,
+            "epsilon_r": [12.0, -1.2],
+            "mu_r": [2.4, -1.6]
+          }
+        ]
+      },
+      {
+        "tag": "ram_vertical_tails",
+        "type": "coated",
+        "layers": [
+          {
+            "thickness_m": 0.0013,
+            "epsilon_r": [10.0, -0.5],
+            "mu_r": [2.2, -1.8]
+          }
+        ]
+      },
+      {
+        "tag": "ram_canopy",
+        "type": "impedance",
+        "normalized_impedance": [1.0, 0.0]
+      }
+    ]
+  },
+  "frequency": {
+    "sweep": {
+      "start": 9000000000,
+      "stop": 11000000000,
+      "step": 100000000
+    }
+  },
+  "physics": {
+    "monostatic": true,
+    "polarization_basis": "linear",
+    "incident_amplitude": 1.0,
+    "phase_reference": [0.0, 0.0, 0.0]
+  },
+  "angles": {
+    "azimuth": {
+      "start": 35.0,
+      "stop": 55.0,
+      "step": 0.5
+    },
+    "elevation": {
+      "start": 0,
+      "stop": 0,
+      "step": 1
+    }
+  },
+  "polarization": [
+    "HH"
+  ],
+  "solver": {
+    "type": "PO",
+    "precision": "float64",
+    "rcs_units": "dBsm"
+  },
+  "execution": {
+    "accelerator": "cpu"
+  },
+  "output": {
+    "format": "hdf5",
+    "path": "examples/ram_optimization/f15_isar_ram.h5"
+  }
+}

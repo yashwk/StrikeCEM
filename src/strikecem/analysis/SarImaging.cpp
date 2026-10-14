@@ -287,7 +287,8 @@ static void splat_sar_scatterer(
 
 SarImage SarProcessor::compute(const NormalizedMesh& mesh,
                                const SarConfig& config,
-                               const std::string& vehicle_name) {
+                               const std::string& vehicle_name,
+                               const ResolvedMaterials* materials) {
     SarImage img;
     img.config = config;
     img.vehicle_name = vehicle_name;
@@ -323,6 +324,37 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
 
     const double cot_inc = std::cos(inc_rad) / std::sin(inc_rad);
     const double tan_inc = std::tan(inc_rad);
+
+    std::vector<double> facet_refl(mesh.triangles.size(), 1.0);
+    if (materials && materials->has_materials) {
+        const double lambda_vac = lambda;
+        ComplexMedium incident;
+        for (size_t t = 0; t < mesh.triangles.size(); ++t) {
+            if (t >= materials->facet_material_indices.size()) continue;
+            uint32_t midx = materials->facet_material_indices[t];
+            if (midx >= materials->models.size()) continue;
+            const auto& model = materials->models[midx];
+            if (model.type == WallType::Pec) {
+                facet_refl[t] = 1.0;
+            } else if (model.type == WallType::Coated) {
+                const geom::Vec3d n = mesh.normals.empty() ? geom::Vec3d{0,0,1} : mesh.normals[t];
+                double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
+                auto cr = coated_pec_reflection(incident, model.layers, std::clamp(std::abs(cos_i), 0.05, 1.0), lambda_vac);
+                facet_refl[t] = std::clamp(0.5 * (std::norm(cr.r_te) + std::norm(cr.r_tm)), 1e-4, 1.0);
+            } else if (model.type == WallType::Impedance) {
+                const geom::Vec3d n = mesh.normals.empty() ? geom::Vec3d{0,0,1} : mesh.normals[t];
+                double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
+                auto ir = impedance_reflection(model.surface_impedance, std::clamp(std::abs(cos_i), 0.05, 1.0));
+                facet_refl[t] = std::clamp(0.5 * (std::norm(ir.r_te) + std::norm(ir.r_tm)), 1e-4, 1.0);
+            } else if (model.type == WallType::Dielectric) {
+                const geom::Vec3d n = mesh.normals.empty() ? geom::Vec3d{0,0,1} : mesh.normals[t];
+                double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
+                ComplexMedium wmed = evaluate_material(model, config.center_frequency_hz);
+                auto fr = fresnel(incident, wmed, std::clamp(std::abs(cos_i), 0.05, 1.0));
+                facet_refl[t] = std::clamp(0.5 * (std::norm(fr.r_te) + std::norm(fr.r_tm)), 1e-4, 1.0);
+            }
+        }
+    }
 
     // Layover vector: elevated points shift towards the radar (closer in slant range)
     const double layover_dir_x = -cot_inc * std::cos(az_rad);
@@ -405,7 +437,8 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
         double lp2y = v2.y + (v2.z - ground_z) * layover_dir_y;
 
         // Effective backscatter: metallic airframe is ~11 dB above tarmac clutter
-        double skin_pwr = base_clutter_lin * std::pow(10.0, 1.1);
+        double refl = (t < facet_refl.size()) ? facet_refl[t] : 1.0;
+        double skin_pwr = base_clutter_lin * std::pow(10.0, 1.1 * refl);
         if (cos_i > 0.0) {
             skin_pwr *= (0.4 + 0.6 * cos_i);
         } else {
@@ -520,7 +553,8 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
         double rcs_spec = (4.0 * M_PI / (lambda * lambda)) * (area * area) * spec_lobe;
         rcs_spec = std::min(rcs_spec, 25.0 * area);
 
-        double rcs_facet = rcs_spec;
+        double refl = (t < facet_refl.size()) ? facet_refl[t] : 1.0;
+        double rcs_facet = rcs_spec * refl;
         if (config.enable_ground_multipath && (center.z - ground_z) < (0.35 * vehicle_height)) {
             rcs_facet *= 2.5;
         }
@@ -571,7 +605,13 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
             double target_gy = pt.y + (pt.z - ground_z) * layover_dir_y;
 
             // PTD edge diffraction cross-section
-            double rcs_edge_pt = 30.0 * d_len * std::pow(std::max(0.0, broadside), 4.0) * (facing * facing) * base_clutter_lin;
+            double edge_refl = 1.0;
+            for (size_t at : ed.adjacent_triangles) {
+                if (at < facet_refl.size()) {
+                    edge_refl = std::min(edge_refl, facet_refl[at]);
+                }
+            }
+            double rcs_edge_pt = 30.0 * d_len * std::pow(std::max(0.0, broadside), 4.0) * (facing * facing) * base_clutter_lin * edge_refl;
 
             bool is_bright_edge = (rcs_edge_pt > 0.6 * base_clutter_lin && broadside > 0.96);
             if (is_bright_edge) {
@@ -616,13 +656,31 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
             const auto& pt = mesh.vertices[idx];
             double target_gx = pt.x + (pt.z - ground_z) * layover_dir_x;
             double target_gy = pt.y + (pt.z - ground_z) * layover_dir_y;
-            img.scattering_centers.push_back({target_gx, target_gy, 0.0});
 
-            double rcs_glint = rcs_scale * base_clutter_lin;
+            double vert_refl = 1.0;
+            if (materials && materials->has_materials) {
+                for (size_t at = 0; at < mesh.triangles.size(); ++at) {
+                    const auto& tri = mesh.triangles[at];
+                    if (tri[0] == static_cast<size_t>(idx) ||
+                        tri[1] == static_cast<size_t>(idx) ||
+                        tri[2] == static_cast<size_t>(idx)) {
+                        if (at < facet_refl.size()) {
+                            vert_refl = std::min(vert_refl, facet_refl[at]);
+                        }
+                    }
+                }
+            }
+
+            double rcs_glint = rcs_scale * base_clutter_lin * vert_refl;
+            bool produces_glint = (rcs_glint > 0.4 * base_clutter_lin);
+            if (produces_glint) {
+                img.scattering_centers.push_back({target_gx, target_gy, 0.0});
+            }
+
             splat_sar_scatterer(lin_intensity, target_gx, target_gy, rcs_glint,
                                 config, img.ground_range_min_m, dx, nx,
                                 img.azimuth_min_m, dy, ny, res_x, res_y,
-                                display_ref, flare);
+                                display_ref, flare && (vert_refl > 0.2));
         };
 
         // Forward nose / radome retroreflection (crisp pinpoint point, no horizontal flare)
@@ -666,12 +724,13 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
 SarImage SarProcessor::compute_from_database(const Hdf5Database& db,
                                              const SarConfig& config,
                                              const NormalizedMesh* mesh,
-                                             const std::string& vehicle_name) {
+                                             const std::string& vehicle_name,
+                                             const ResolvedMaterials* materials) {
     if (mesh) {
-        return compute(*mesh, config, vehicle_name);
+        return compute(*mesh, config, vehicle_name, materials);
     }
     NormalizedMesh dummy;
-    return compute(dummy, config, vehicle_name);
+    return compute(dummy, config, vehicle_name, materials);
 }
 
 nlohmann::json SarImage::to_json() const {

@@ -568,6 +568,12 @@ int cmd_render(const std::string& input_path, const std::string& output_path,
                    rc.value["solver"]["po_options"]["shadowing"].is_boolean()) {
             go.shadowing = rc.value["solver"]["po_options"]["shadowing"].get<bool>();
         }
+        if (rc.value.contains("materials")) {
+            const ResolvedMaterials resolved_mat = resolve_materials(rc.value, mesh);
+            material.enabled = resolved_mat.has_materials;
+            material.models = resolved_mat.models;
+            material.facet_material_indices = resolved_mat.facet_material_indices;
+        }
     } else {
         const fs::path abs_path = fs::absolute(input_path);
         nlohmann::json dummy_cfg = {
@@ -679,10 +685,14 @@ int cmd_sar(const std::string& input_path, const std::string& output_image,
 
     NormalizedMesh mesh;
     std::string vehicle_name = "Target";
+    ResolvedMaterials resolved_mats;
 
     if (input_path.rfind(".json") != std::string::npos) {
         ResolvedConfig rc = load_config(input_path, schema_path);
         mesh = load_normalized_mesh(rc.value, config_dir_of(input_path), rc.schema_version);
+        if (rc.value.contains("materials")) {
+            resolved_mats = resolve_materials(rc.value, mesh);
+        }
         if (rc.value.contains("model") && rc.value["model"].contains("name")) {
             vehicle_name = rc.value["model"]["name"].get<std::string>();
         } else {
@@ -735,7 +745,9 @@ int cmd_sar(const std::string& input_path, const std::string& output_image,
     if (height > 0) cfg.image_height = height;
 
     try {
-        analysis::SarImage sar_img = analysis::SarProcessor::compute(mesh, cfg, vehicle_name);
+        analysis::SarImage sar_img = analysis::SarProcessor::compute(
+            mesh, cfg, vehicle_name,
+            resolved_mats.has_materials ? &resolved_mats : nullptr);
 
         std::string img_path = output_image.empty() ? "sar_image.png" : output_image;
         sar_img.write_image(img_path, cfg.image_width, cfg.image_height, cfg.colormap);

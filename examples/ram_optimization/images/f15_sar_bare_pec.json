@@ -1,0 +1,28 @@
+{
+  "altitude_m": 500000.0,
+  "azimuth_max_m": 14.750138731691209,
+  "azimuth_min_m": -15.897213166330175,
+  "bandwidth_hz": 1500000000.0,
+  "center_frequency_hz": 35000000000.0,
+  "ground_range_max_m": 19.810938731691213,
+  "ground_range_min_m": -20.75801316633018,
+  "incidence_angle_deg": 40.0,
+  "mesh_triangles": 752,
+  "mode": "spotlight",
+  "peak_scatterer": {
+    "azimuth_m": -3.5963717306985448,
+    "ground_range_m": -7.961361346934758,
+    "rcs_dbsm": -11.130568387302848
+  },
+  "platform": "spaceborne",
+  "platform_velocity_mps": 7600.0,
+  "resolutions": {
+    "azimuth_m": 0.09815338613287425,
+    "ground_range_m": 0.15546475667454984,
+    "slant_range_m": 0.09993081933333334
+  },
+  "shadow_area_fraction": 0.02083587646484375,
+  "sidelobe_suppression_db": 30.0,
+  "sidelobe_window": "taylor",
+  "vehicle_name": "f15_bare_pec"
+}

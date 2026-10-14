@@ -10,6 +10,7 @@
 
 #include "strikecem/core/Conventions.hpp"
 #include "strikecem/io/OutputError.hpp"
+#include "strikecem/solvers/Material.hpp"
 
 namespace strikecem {
 
@@ -75,8 +76,31 @@ VtkMeshDiagnostics compute_facet_diagnostics(
         // H_inc = (k_hat x E_inc) / eta0
         const geom::Vec3d h_inc = cross(k_hat, e_inc_dir) * (1.0 / kEta0);
 
-        // PEC surface current: J_po = 2 * (n x H_inc)
-        const geom::Vec3d j_vec = cross(n, h_inc) * 2.0;
+        // Surface current: J_po = (1 + Gamma) * (n x H_inc)
+        geom::Vec3d j_vec = cross(n, h_inc) * 2.0;
+        if (material.enabled && t < material.facet_material_indices.size()) {
+            uint32_t midx = material.facet_material_indices[t];
+            if (midx < material.models.size()) {
+                const auto& model = material.models[midx];
+                if (model.type == WallType::Coated) {
+                    ComplexMedium incident;
+                    double lambda_vac = kSpeedOfLight / frequency_hz;
+                    auto cr = coated_pec_reflection(incident, model.layers, std::clamp(cos_inc, 0.05, 1.0), lambda_vac);
+                    double refl = std::sqrt(0.5 * (std::norm(cr.r_te) + std::norm(cr.r_tm)));
+                    j_vec = j_vec * refl;
+                } else if (model.type == WallType::Impedance) {
+                    auto ir = impedance_reflection(model.surface_impedance, std::clamp(cos_inc, 0.05, 1.0));
+                    double refl = std::sqrt(0.5 * (std::norm(ir.r_te) + std::norm(ir.r_tm)));
+                    j_vec = j_vec * refl;
+                } else if (model.type == WallType::Dielectric) {
+                    ComplexMedium incident;
+                    ComplexMedium wmed = evaluate_material(model, frequency_hz);
+                    auto fr = fresnel(incident, wmed, std::clamp(cos_inc, 0.05, 1.0));
+                    double refl = std::sqrt(0.5 * (std::norm(fr.r_te) + std::norm(fr.r_tm)));
+                    j_vec = j_vec * refl;
+                }
+            }
+        }
 
         const std::complex<double> jx = j_vec.x * phase_factor;
         const std::complex<double> jy = j_vec.y * phase_factor;

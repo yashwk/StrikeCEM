@@ -17,6 +17,7 @@
 #include "strikecem/io/Hdf5Reader.hpp"
 #include "strikecem/rendering/Colormap.hpp"
 #include "strikecem/rendering/Image.hpp"
+#include "strikecem/solvers/Material.hpp"
 
 namespace strikecem::analysis {
 
@@ -135,13 +136,15 @@ public:
     // Compute complete 2D SAR image from a normalized 3D CAD mesh
     static SarImage compute(const NormalizedMesh& mesh,
                             const SarConfig& config,
-                            const std::string& vehicle_name = "Target");
+                            const std::string& vehicle_name = "Target",
+                            const ResolvedMaterials* materials = nullptr);
 
     // Compute SAR image from an existing multi-angle/multi-frequency Hdf5Database
     static SarImage compute_from_database(const Hdf5Database& db,
                                           const SarConfig& config,
                                           const NormalizedMesh* mesh = nullptr,
-                                          const std::string& vehicle_name = "Target");
+                                          const std::string& vehicle_name = "Target",
+                                          const ResolvedMaterials* materials = nullptr);
 
     // Geometric ground shadow projection along radar look vector k_hat
     static std::vector<std::vector<bool>> compute_ground_shadow_mask(
