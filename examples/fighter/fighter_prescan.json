@@ -1,0 +1,29 @@
+{
+  "feature_breakdown": {
+    "cavity_percent": 100.0,
+    "curved_percent": 0.0,
+    "edge_percent": 0.0,
+    "planar_percent": 0.0
+  },
+  "recommendations": {
+    "recommended_curvature_correction": false,
+    "recommended_edge_correction": "none",
+    "recommended_max_bounces": 3,
+    "recommended_shadowing": true,
+    "recommended_solver": "SBR"
+  },
+  "summary": {
+    "bounding_box_m": {
+      "height_z": 3.85,
+      "length_x": 18.8,
+      "width_y": 13.6
+    },
+    "cavity_facets": 656,
+    "curved_facets": 0,
+    "edge_facets": 0,
+    "estimated_cavity_volume_m3": 984.368,
+    "planar_facets": 0,
+    "surface_area_m2": 293.1569094440208,
+    "total_facets": 656
+  }
+}

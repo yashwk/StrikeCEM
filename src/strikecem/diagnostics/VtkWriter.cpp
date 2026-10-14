@@ -58,8 +58,9 @@ VtkMeshDiagnostics compute_facet_diagnostics(
 
         if (go.shadowing) {
             const geom::Vec3d ray_origin = centroid + n * 1e-6;
-            const geom::Vec3d light_src = ray_origin - k_hat * 1e6;
-            if (occluded_bvh(bvh, mesh, ray_origin, light_src, 1e6, static_cast<uint32_t>(t))) {
+            const geom::Vec3d dir_to_source = -k_hat;
+            const double max_dist = (mesh.report.bbox_max - mesh.report.bbox_min).length() * 2.0;
+            if (occluded_bvh(bvh, mesh, ray_origin, dir_to_source, max_dist > 0.0 ? max_dist : 1e3, static_cast<uint32_t>(t))) {
                 fd.lit = 0;
                 continue;
             }

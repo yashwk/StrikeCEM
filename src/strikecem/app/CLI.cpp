@@ -557,7 +557,17 @@ int cmd_render(const std::string& input_path, const std::string& output_path,
         if (!plan.directions.empty()) dir = plan.directions.front();
         if (!plan.frequencies_hz.empty()) freq = plan.frequencies_hz.front();
         if (!plan.polarizations.empty()) polarization = plan.polarizations.front();
-        go.shadowing = rc.value["solver"]["go"]["shadowing"].get<bool>();
+        if (rc.value.contains("solver") && rc.value["solver"].contains("go") &&
+            rc.value["solver"]["go"].contains("shadowing") && rc.value["solver"]["go"]["shadowing"].is_boolean()) {
+            go.shadowing = rc.value["solver"]["go"]["shadowing"].get<bool>();
+        } else if (rc.value.contains("solver") && rc.value["solver"].contains("shadowing") &&
+                   rc.value["solver"]["shadowing"].is_boolean()) {
+            go.shadowing = rc.value["solver"]["shadowing"].get<bool>();
+        } else if (rc.value.contains("solver") && rc.value["solver"].contains("po_options") &&
+                   rc.value["solver"]["po_options"].contains("shadowing") &&
+                   rc.value["solver"]["po_options"]["shadowing"].is_boolean()) {
+            go.shadowing = rc.value["solver"]["po_options"]["shadowing"].get<bool>();
+        }
     } else {
         const fs::path abs_path = fs::absolute(input_path);
         nlohmann::json dummy_cfg = {
