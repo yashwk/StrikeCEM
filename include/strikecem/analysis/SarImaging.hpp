@@ -77,6 +77,10 @@ struct SarConfig {
     size_t grid_samples_azimuth = 512;
     double dynamic_range_db = 40.0;           // dB dynamic range for display
     std::string colormap = "gray";            // "gray" (authentic satellite IMINT look), "turbo", "jet", "viridis"
+    std::string sidelobe_window = "taylor";   // "taylor" (realistic -30dB apodization), "kaiser", "uniform", "clean"
+    double sidelobe_suppression_db = 30.0;    // Peak sidelobe suppression level in dB (e.g. 30 dB for satellite SAR)
+    bool show_reticle = false;                // Show red target reticle marker on peak scatterer (default false)
+    bool show_hud = true;                     // Overlay satellite orbit / HUD annotations
     size_t image_width = 1024;
     size_t image_height = 768;
 };

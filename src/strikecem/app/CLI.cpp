@@ -660,6 +660,7 @@ int cmd_sar(const std::string& input_path, const std::string& output_image,
             double altitude_m, double velocity_mps, const std::string& ground_str,
             bool enable_shadow, bool overlay_wireframe, double radar_azimuth,
             const std::string& colormap_name,
+            const std::string& sidelobe_window, double sidelobe_db, bool show_reticle,
             size_t width, size_t height, const std::string& schema_path) {
     if (input_path.empty()) {
         std::cerr << "strikecem: error: sar requires input mesh or config path\n";
@@ -717,6 +718,9 @@ int cmd_sar(const std::string& input_path, const std::string& output_image,
     }
 
     if (!colormap_name.empty()) cfg.colormap = colormap_name;
+    if (!sidelobe_window.empty()) cfg.sidelobe_window = sidelobe_window;
+    if (sidelobe_db > 0.0) cfg.sidelobe_suppression_db = sidelobe_db;
+    if (show_reticle) cfg.show_reticle = true;
     if (width > 0) cfg.image_width = width;
     if (height > 0) cfg.image_height = height;
 
@@ -824,6 +828,9 @@ int run(int argc, char** argv) {
     bool sar_shadow = true;
     bool sar_wireframe = false;
     double sar_azimuth = 0.0;
+    std::string sar_sidelobe_window;
+    double sar_sidelobe_db = 0.0;
+    bool sar_reticle = false;
     std::string sar_json_out;
 
     std::vector<std::string> positional;
@@ -865,6 +872,14 @@ int run(int argc, char** argv) {
             sar_azimuth = std::stod(args[++i]);
         } else if (args[i] == "--json" && i + 1 < args.size()) {
             sar_json_out = args[++i];
+        } else if ((args[i] == "--sidelobe-window" || args[i] == "--window") && i + 1 < args.size()) {
+            sar_sidelobe_window = args[++i];
+        } else if (args[i] == "--sidelobe-db" && i + 1 < args.size()) {
+            sar_sidelobe_db = std::stod(args[++i]);
+        } else if (args[i] == "--reticle") {
+            sar_reticle = true;
+        } else if (args[i] == "--no-reticle") {
+            sar_reticle = false;
         } else if (args[i] == "--lod" && i + 1 < args.size()) {
             std::string lod_spec = args[++i];
             size_t eq = lod_spec.find('=');
@@ -1082,7 +1097,8 @@ int run(int argc, char** argv) {
                            sar_freq, sar_bandwidth, sar_incidence,
                            sar_altitude, sar_velocity, sar_ground,
                            sar_shadow, sar_wireframe, sar_azimuth,
-                           sar_colormap, render_width,
+                           sar_colormap, sar_sidelobe_window, sar_sidelobe_db,
+                           sar_reticle, render_width,
                            render_height, schema_path);
         }
 

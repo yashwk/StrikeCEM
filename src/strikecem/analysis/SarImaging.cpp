@@ -186,6 +186,105 @@ std::vector<std::vector<bool>> SarProcessor::compute_ground_shadow_mask(
     return mask;
 }
 
+static void splat_sar_scatterer(
+    std::vector<std::vector<double>>& lin_intensity,
+    double target_gx, double target_gy, double rcs,
+    const SarConfig& config,
+    double range_min_m, double dx, size_t nx,
+    double az_min_m, double dy, size_t ny,
+    double res_x, double res_y,
+    double display_ref,
+    bool allow_flare) {
+
+    double u_center = (target_gx - range_min_m) / dx;
+    double v_center = (target_gy - az_min_m) / dy;
+    int center_i = static_cast<int>(std::round(u_center));
+    int center_j = static_cast<int>(std::round(v_center));
+
+    if (center_i < 0 || center_i >= static_cast<int>(nx) ||
+        center_j < 0 || center_j >= static_cast<int>(ny)) {
+        return;
+    }
+
+    double sll_db = (config.sidelobe_suppression_db > 0.0) ? config.sidelobe_suppression_db : 30.0;
+    std::string win = config.sidelobe_window;
+    if (win.empty()) win = "taylor";
+    std::transform(win.begin(), win.end(), win.begin(), ::tolower);
+
+    double sll_lin = std::pow(10.0, -sll_db / 10.0);
+    if (win == "kaiser") {
+        sll_lin = std::pow(10.0, -std::max(sll_db, 35.0) / 10.0);
+    } else if (win == "clean") {
+        sll_lin = 3.0e-5; // -45 dB
+    } else if (win == "uniform" || win == "unweighted") {
+        sll_lin = 0.0478; // -13.2 dB unweighted chirp
+    }
+
+    // Mainlobe resolution cell footprint
+    int main_spread_i = std::max(2, static_cast<int>(std::ceil(1.6 * res_x / dx)));
+    int main_spread_j = std::max(1, static_cast<int>(std::ceil(1.6 * res_y / dy)));
+
+    int spread_i = main_spread_i;
+    int spread_j = main_spread_j;
+
+    bool has_flare = allow_flare && (win != "clean") && (rcs > 0.25);
+    if (has_flare) {
+        double flare_reach_res = std::clamp(std::sqrt(rcs) * 8.0, 6.0, static_cast<double>(nx / 4));
+        spread_i = std::min(static_cast<int>(nx / 3), static_cast<int>(std::ceil(flare_reach_res * (res_x / dx))));
+    }
+
+    // Prevent saturation blooming from swelling the specular point into a large disc:
+    // Core peak pixel reaches ~0 dB saturation, and falls off steeply within 1-2 pixels
+    double core_rcs = std::min(rcs, 1.35 * display_ref);
+
+    for (int di = -spread_i; di <= spread_i; ++di) {
+        int ci = center_i + di;
+        if (ci < 0 || ci >= static_cast<int>(nx)) continue;
+        double px = range_min_m + (ci + 0.5) * dx;
+        double dist_x = (px - target_gx) / res_x;
+        double dx_pix = (px - target_gx) / dx;
+
+        for (int dj = -spread_j; dj <= spread_j; ++dj) {
+            int cj = center_j + dj;
+            if (cj < 0 || cj >= static_cast<int>(ny)) continue;
+            double py = az_min_m + (cj + 0.5) * dy;
+            double dist_y = (py - target_gy) / res_y;
+            double dy_pix = (py - target_gy) / dy;
+
+            // Pinpoint specular core (tight sub-pixel diffraction spot: 1-2 pixels)
+            double core_psf = std::exp(-2.772587 * (dx_pix * dx_pix * 0.9 + dy_pix * dy_pix * 0.9));
+            double added_val = core_rcs * core_psf;
+
+            if (has_flare) {
+                double abs_u = std::abs(dist_x);
+                // Razor-thin flare in azimuth (strictly 1 to 2 pixels wide)
+                double flare_az = std::exp(-2.2 * dy_pix * dy_pix);
+
+                if (win == "uniform" || win == "unweighted") {
+                    double sinc_u = (abs_u < 1e-4) ? 1.0 : (std::sin(M_PI * abs_u) / (M_PI * abs_u));
+                    double sinc_sq = sinc_u * sinc_u;
+                    double sinc_sidelobe = (sinc_sq + 0.08) / (1.0 + 0.8 * abs_u * abs_u) * std::exp(-abs_u / 25.0);
+                    added_val = std::max(added_val, rcs * sinc_sidelobe * flare_az);
+                } else {
+                    double decay_len = std::min(30.0, 10.0 + std::sqrt(rcs) * 5.0);
+                    double taylor_sidelobe = sll_lin * (1.0 / (1.0 + 0.5 * std::pow(abs_u, 1.35))) * std::exp(-abs_u / decay_len);
+                    added_val = std::max(added_val, rcs * taylor_sidelobe * flare_az);
+                }
+
+                // Secondary vertical cross-hair diffraction spike on intense glints (RCS > 2.0 m^2)
+                if (rcs > 2.0 && std::abs(dx_pix) < 2.0) {
+                    double abs_v = std::abs(dist_y);
+                    double flare_x = std::exp(-2.2 * dx_pix * dx_pix);
+                    double az_sidelobe = 0.20 * sll_lin * (1.0 / (1.0 + 0.8 * std::pow(abs_v, 1.7))) * std::exp(-abs_v / 10.0);
+                    added_val = std::max(added_val, rcs * az_sidelobe * flare_x);
+                }
+            }
+
+            lin_intensity[ci][cj] += added_val;
+        }
+    }
+}
+
 SarImage SarProcessor::compute(const NormalizedMesh& mesh,
                                const SarConfig& config,
                                const std::string& vehicle_name) {
@@ -279,6 +378,9 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
     if (config.ground_type == SarGroundType::None) {
         base_clutter_lin = 1e-12; // Free-space dark background
     }
+    double display_ref = (config.ground_type != SarGroundType::None)
+                             ? (base_clutter_lin * std::pow(10.0, 22.0 / 10.0))
+                             : 1.0;
     std::vector<std::vector<double>> lin_intensity(nx, std::vector<double>(ny, 0.0));
 
     // 2. Rasterize Vehicle Surface Footprint and Layover Skin
@@ -408,7 +510,7 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
         const double area = mesh.areas.empty() ? 0.01 : mesh.areas[t];
 
         double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
-        if (cos_i < 0.88) continue; // Only specular facets facing radar
+        if (cos_i < 0.85) continue; // Only specular facets facing radar
 
         geom::Vec3d center = (v0 + v1 + v2) * (1.0 / 3.0);
         double target_gx = center.x + (center.z - ground_z) * layover_dir_x;
@@ -423,32 +525,15 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
             rcs_facet *= 2.5;
         }
 
-        int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
-        int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
-
-        int spread_i = std::max(2, static_cast<int>(std::ceil(res_x / dx)));
-        int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
-        if (rcs_facet > 0.5) {
-            spread_i = std::min(static_cast<int>(nx / 4), spread_i * 4); // Horizontal range sidelobe streak
+        bool produces_glint = (rcs_facet > 0.4);
+        if (produces_glint) {
             img.scattering_centers.push_back({target_gx, target_gy, 0.0});
         }
 
-        for (int di = -spread_i; di <= spread_i; ++di) {
-            int ci = center_i + di;
-            if (ci < 0 || ci >= static_cast<int>(nx)) continue;
-            double dist_x = di * dx / res_x;
-            double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
-
-            for (int dj = -spread_j; dj <= spread_j; ++dj) {
-                int cj = center_j + dj;
-                if (cj < 0 || cj >= static_cast<int>(ny)) continue;
-                double dist_y = dj * dy / res_y;
-                double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
-
-                double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
-                lin_intensity[ci][cj] += rcs_facet * psf;
-            }
-        }
+        splat_sar_scatterer(lin_intensity, target_gx, target_gy, rcs_facet,
+                            config, img.ground_range_min_m, dx, nx,
+                            img.azimuth_min_m, dy, ny, res_x, res_y,
+                            display_ref, produces_glint);
     }
 
     // B. Physical Theory of Diffraction (PTD) Edge & Perimeter Scatterers
@@ -488,78 +573,62 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
             // PTD edge diffraction cross-section
             double rcs_edge_pt = 30.0 * d_len * std::pow(std::max(0.0, broadside), 4.0) * (facing * facing) * base_clutter_lin;
 
-            int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
-            int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
-
-            int spread_i = std::max(2, static_cast<int>(std::ceil(res_x / dx)));
-            int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
-
-            for (int di = -spread_i; di <= spread_i; ++di) {
-                int ci = center_i + di;
-                if (ci < 0 || ci >= static_cast<int>(nx)) continue;
-                double dist_x = di * dx / res_x;
-                double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
-
-                for (int dj = -spread_j; dj <= spread_j; ++dj) {
-                    int cj = center_j + dj;
-                    if (cj < 0 || cj >= static_cast<int>(ny)) continue;
-                    double dist_y = dj * dy / res_y;
-                    double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
-
-                    double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
-                    lin_intensity[ci][cj] += rcs_edge_pt * psf;
-                }
+            bool is_bright_edge = (rcs_edge_pt > 0.6 * base_clutter_lin && broadside > 0.96);
+            if (is_bright_edge) {
+                img.scattering_centers.push_back({target_gx, target_gy, 0.0});
             }
+
+            splat_sar_scatterer(lin_intensity, target_gx, target_gy, rcs_edge_pt,
+                                config, img.ground_range_min_m, dx, nx,
+                                img.azimuth_min_m, dy, ny, res_x, res_y,
+                                display_ref, is_bright_edge);
         }
     }
 
-    // C. Dominant Structural / Anatomical Scattering Centers (Nose, Wingtips, Cockpit, Exhaust)
-    if (!mesh.vertices.empty()) {
-        std::vector<geom::Vec3d> hot_spots;
-        size_t idx_nose = 0, idx_tail = 0, idx_port = 0, idx_starboard = 0, idx_top = 0;
-        for (size_t v = 0; v < mesh.vertices.size(); ++v) {
-            const auto& pt = mesh.vertices[v];
-            if (pt.x > mesh.vertices[idx_nose].x) idx_nose = v;
-            if (pt.x < mesh.vertices[idx_tail].x) idx_tail = v;
-            if (pt.y < mesh.vertices[idx_port].y) idx_port = v;
-            if (pt.y > mesh.vertices[idx_starboard].y) idx_starboard = v;
-            if (pt.z > mesh.vertices[idx_top].z) idx_top = v;
+    // C. Dominant Structural & Cavity Scattering Centers (Radar-Illuminated Only)
+    if (!mesh.vertices.empty() && !mesh.triangles.empty()) {
+        std::vector<bool> vert_illuminated(mesh.vertices.size(), false);
+        for (size_t t = 0; t < mesh.triangles.size(); ++t) {
+            const auto& tri = mesh.triangles[t];
+            const geom::Vec3d n = mesh.normals.empty() ? geom::Vec3d{0,0,1} : mesh.normals[t];
+            double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
+            if (cos_i > 0.1) {
+                vert_illuminated[tri[0]] = true;
+                vert_illuminated[tri[1]] = true;
+                vert_illuminated[tri[2]] = true;
+            }
         }
-        hot_spots.push_back(mesh.vertices[idx_nose]);
-        hot_spots.push_back(mesh.vertices[idx_top]);
-        hot_spots.push_back(mesh.vertices[idx_starboard]);
-        hot_spots.push_back(mesh.vertices[idx_port]);
-        hot_spots.push_back(mesh.vertices[idx_tail]);
 
-        for (const auto& pt : hot_spots) {
+        int best_nose = -1, best_tail = -1, best_port = -1, best_starboard = -1, best_top = -1;
+
+        for (size_t v = 0; v < mesh.vertices.size(); ++v) {
+            if (!vert_illuminated[v]) continue;
+            const auto& pt = mesh.vertices[v];
+            if (best_nose < 0 || pt.x > mesh.vertices[best_nose].x) best_nose = static_cast<int>(v);
+            if (best_tail < 0 || pt.x < mesh.vertices[best_tail].x) best_tail = static_cast<int>(v);
+            if (best_port < 0 || pt.y > mesh.vertices[best_port].y) best_port = static_cast<int>(v);
+            if (best_starboard < 0 || pt.y < mesh.vertices[best_starboard].y) best_starboard = static_cast<int>(v);
+            if (best_top < 0 || pt.z > mesh.vertices[best_top].z) best_top = static_cast<int>(v);
+        }
+
+        auto add_hotspot = [&](int idx, double rcs_scale, bool flare) {
+            if (idx < 0) return;
+            const auto& pt = mesh.vertices[idx];
             double target_gx = pt.x + (pt.z - ground_z) * layover_dir_x;
             double target_gy = pt.y + (pt.z - ground_z) * layover_dir_y;
             img.scattering_centers.push_back({target_gx, target_gy, 0.0});
 
-            double rcs_glint = 120.0 * base_clutter_lin;
-            int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
-            int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
+            double rcs_glint = rcs_scale * base_clutter_lin;
+            splat_sar_scatterer(lin_intensity, target_gx, target_gy, rcs_glint,
+                                config, img.ground_range_min_m, dx, nx,
+                                img.azimuth_min_m, dy, ny, res_x, res_y,
+                                display_ref, flare);
+        };
 
-            int spread_i = std::min(static_cast<int>(nx / 4), static_cast<int>(std::ceil(res_x / dx)) * 4);
-            int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
-
-            for (int di = -spread_i; di <= spread_i; ++di) {
-                int ci = center_i + di;
-                if (ci < 0 || ci >= static_cast<int>(nx)) continue;
-                double dist_x = di * dx / res_x;
-                double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
-
-                for (int dj = -spread_j; dj <= spread_j; ++dj) {
-                    int cj = center_j + dj;
-                    if (cj < 0 || cj >= static_cast<int>(ny)) continue;
-                    double dist_y = dj * dy / res_y;
-                    double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
-
-                    double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
-                    lin_intensity[ci][cj] += rcs_glint * psf;
-                }
-            }
-        }
+        // Forward nose / radome retroreflection (crisp pinpoint point, no horizontal flare)
+        add_hotspot(best_nose, 20.0, /*flare=*/false);
+        // Cockpit canopy / engine intake cavity lip (produces primary razor-thin horizontal flare)
+        add_hotspot(best_top, 40.0, /*flare=*/true);
     }
 
     // 5. Find Peak and Convert to Decibels
@@ -576,9 +645,8 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
     }
     img.peak_rcs_dbsm = (max_lin > 1e-30) ? 10.0 * std::log10(max_lin) : -999.0;
 
-    double display_ref = max_lin;
-    if (config.ground_type != SarGroundType::None) {
-        display_ref = base_clutter_lin * std::pow(10.0, 22.0 / 10.0);
+    if (config.ground_type == SarGroundType::None) {
+        display_ref = max_lin;
     }
 
     img.intensity_db.resize(nx, std::vector<double>(ny, -config.dynamic_range_db));
@@ -630,6 +698,8 @@ nlohmann::json SarImage::to_json() const {
         {"rcs_dbsm", peak_rcs_dbsm}
     };
     j["shadow_area_fraction"] = shadow_area_fraction;
+    j["sidelobe_window"] = config.sidelobe_window;
+    j["sidelobe_suppression_db"] = config.sidelobe_suppression_db;
     j["ground_range_min_m"] = ground_range_min_m;
     j["ground_range_max_m"] = ground_range_max_m;
     j["azimuth_min_m"] = azimuth_min_m;
@@ -778,17 +848,19 @@ rendering::ImageBuffer SarImage::render_image(size_t width, size_t height,
     az_label << "ALONG-TRACK AZIMUTH (m)";
     buf.draw_text(12, margin_top + plot_h / 2 - 4, "AZ (m)", {180, 200, 220, 255}, 1);
 
-    // Peak scatterer reticle
-    int peak_px = static_cast<int>(margin_left + (peak_ground_range_m - ground_range_min_m) /
-                                                 (ground_range_max_m - ground_range_min_m) * plot_w);
-    int peak_py = static_cast<int>(margin_top + (1.0 - (peak_azimuth_m - azimuth_min_m) /
-                                                       (azimuth_max_m - azimuth_min_m)) * plot_h);
+    // Peak scatterer reticle (shown only if explicitly requested or in wireframe mode)
+    if (config.show_reticle || config.overlay_wireframe) {
+        int peak_px = static_cast<int>(margin_left + (peak_ground_range_m - ground_range_min_m) /
+                                                     (ground_range_max_m - ground_range_min_m) * plot_w);
+        int peak_py = static_cast<int>(margin_top + (1.0 - (peak_azimuth_m - azimuth_min_m) /
+                                                           (azimuth_max_m - azimuth_min_m)) * plot_h);
 
-    if (peak_px >= margin_left && peak_px < margin_left + plot_w &&
-        peak_py >= margin_top && peak_py < margin_top + plot_h) {
-        buf.draw_circle(peak_px, peak_py, 6, {255, 50, 50, 255}, false);
-        buf.draw_line(peak_px - 9, peak_py, peak_px + 9, peak_py, {255, 50, 50, 255});
-        buf.draw_line(peak_px, peak_py - 9, peak_px, peak_py + 9, {255, 50, 50, 255});
+        if (peak_px >= margin_left && peak_px < margin_left + plot_w &&
+            peak_py >= margin_top && peak_py < margin_top + plot_h) {
+            buf.draw_circle(peak_px, peak_py, 6, {255, 50, 50, 255}, false);
+            buf.draw_line(peak_px - 9, peak_py, peak_px + 9, peak_py, {255, 50, 50, 255});
+            buf.draw_line(peak_px, peak_py - 9, peak_px, peak_py + 9, {255, 50, 50, 255});
+        }
     }
 
     return buf;
