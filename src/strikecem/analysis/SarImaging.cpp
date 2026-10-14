@@ -261,10 +261,29 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
     img.shadow_area_fraction = static_cast<double>(shadow_pixel_count) / static_cast<double>(nx * ny);
 
     // 3. Target Electrodynamics Backscatter Injection
-    // Physical Optics + Diffuse Skin + Dihedral Ground-Bounce
+    // Physical Optics specular facet glints + PTD edge diffraction + Cavity/Dihedral
     double max_lin = 1e-9;
-    const double sample_step = std::max(0.10, std::min(res_x, res_y) * 0.7);
 
+    // Helper: collect unique structural edges from triangles
+    struct EdgeData {
+        size_t v0, v1;
+        std::vector<size_t> adjacent_triangles;
+    };
+    std::map<std::pair<size_t, size_t>, EdgeData> edge_map;
+    for (size_t t = 0; t < mesh.triangles.size(); ++t) {
+        const auto& tri = mesh.triangles[t];
+        for (int e = 0; e < 3; ++e) {
+            size_t a = tri[e];
+            size_t b = tri[(e + 1) % 3];
+            auto key = std::minmax(a, b);
+            auto& ed = edge_map[key];
+            ed.v0 = key.first;
+            ed.v1 = key.second;
+            ed.adjacent_triangles.push_back(t);
+        }
+    }
+
+    // A. Specular Facet Glints (Physical Optics)
     for (size_t t = 0; t < mesh.triangles.size(); ++t) {
         const auto& tri = mesh.triangles[t];
         const geom::Vec3d& v0 = mesh.vertices[tri[0]];
@@ -273,66 +292,141 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
         const geom::Vec3d n = mesh.normals.empty() ? geom::Vec3d{0,0,1} : mesh.normals[t];
         const double area = mesh.areas.empty() ? 0.01 : mesh.areas[t];
 
-        // Illuminated check
         double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
         if (cos_i <= 0.0) continue; // In self-shadow
 
-        // Subdivide triangle to distribute scattering across physical surface
-        int subdiv = std::clamp(static_cast<int>(std::round(std::sqrt(2.0 * area / (sample_step * sample_step)))), 1, 16);
-        int num_samples = subdiv * (subdiv + 1) / 2;
-        double sub_area = area / static_cast<double>(num_samples);
+        geom::Vec3d center = (v0 + v1 + v2) * (1.0 / 3.0);
+        double cot_inc = std::cos(inc_rad) / std::sin(inc_rad);
+        double target_gx = center.x - (center.z - ground_z) * cot_inc;
+        double target_gy = center.y;
 
-        for (int p = 0; p < subdiv; ++p) {
-            for (int q = 0; q < subdiv - p; ++q) {
-                double u = (p + 1.0 / 3.0) / static_cast<double>(subdiv);
-                double v = (q + 1.0 / 3.0) / static_cast<double>(subdiv);
-                double w = 1.0 - u - v;
-                geom::Vec3d pt{
-                    u * v0.x + v * v1.x + w * v2.x,
-                    u * v0.y + v * v1.y + w * v2.y,
-                    u * v0.z + v * v1.z + w * v2.z
-                };
+        // Smooth skin bounces specular energy away unless normal directly faces radar
+        double rcs_spec = 0.0;
+        if (cos_i > 0.80) {
+            double spec_lobe = std::pow(cos_i, 32.0);
+            rcs_spec = (4.0 * M_PI / (lambda * lambda)) * (area * area) * spec_lobe;
+            rcs_spec = std::min(rcs_spec, 15.0 * area);
+        }
+        // Faint diffuse background skin speckle
+        double skin_speckle = -std::log(std::max(1e-5, uniform_random(static_cast<int>(t), static_cast<int>(t * 17))));
+        double rcs_diff = 0.005 * area * cos_i * skin_speckle;
 
-                // Slant-to-ground layover mapping:
-                double cot_inc = std::cos(inc_rad) / std::sin(inc_rad);
-                double target_gx = pt.x - (pt.z - ground_z) * cot_inc;
-                double target_gy = pt.y;
+        double rcs_facet = rcs_spec + rcs_diff;
+        if (config.enable_ground_multipath && (center.z - ground_z) < (0.35 * vehicle_height)) {
+            rcs_facet *= 3.0;
+        }
 
-                // Backscatter model: diffuse airframe skin + specular PO glint
-                double rcs_diff = 0.35 * sub_area * cos_i;
-                double specular_factor = std::pow(std::max(0.0, cos_i), 12.0);
-                double rcs_spec = (4.0 * M_PI / (lambda * lambda)) * (sub_area * sub_area) * specular_factor;
-                rcs_spec = std::min(rcs_spec, 10.0 * sub_area);
+        int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
+        int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
 
-                double rcs_sub = rcs_diff + rcs_spec;
+        int spread_i = std::max(2, static_cast<int>(std::ceil(res_x / dx)));
+        int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
+        if (rcs_facet > 0.5) {
+            spread_i = std::min(static_cast<int>(nx / 4), spread_i * 3);
+        }
 
-                // Ground-bounce dihedral multipath enhancement for lower vehicle structures
-                if (config.enable_ground_multipath && (pt.z - ground_z) < (0.35 * vehicle_height)) {
-                    rcs_sub *= 3.5;
-                }
+        for (int di = -spread_i; di <= spread_i; ++di) {
+            int ci = center_i + di;
+            if (ci < 0 || ci >= static_cast<int>(nx)) continue;
+            double dist_x = di * dx / res_x;
+            double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
 
-                // Splat sub-element energy across Point Spread Function (PSF)
-                int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
-                int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
+            for (int dj = -spread_j; dj <= spread_j; ++dj) {
+                int cj = center_j + dj;
+                if (cj < 0 || cj >= static_cast<int>(ny)) continue;
+                double dist_y = dj * dy / res_y;
+                double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
 
-                int spread_i = std::max(1, static_cast<int>(std::ceil(res_x / dx)));
-                int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
+                double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
+                lin_intensity[ci][cj] += rcs_facet * psf;
+            }
+        }
+    }
 
-                for (int di = -spread_i; di <= spread_i; ++di) {
-                    int ci = center_i + di;
-                    if (ci < 0 || ci >= static_cast<int>(nx)) continue;
-                    double dist_x = di * dx / res_x;
-                    double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
+    // B. Physical Theory of Diffraction (PTD) Edge & Perimeter Scatterers
+    const double edge_step = std::max(0.08, std::min(res_x, res_y) * 0.8);
+    for (const auto& [key, ed] : edge_map) {
+        if (ed.v0 >= mesh.vertices.size() || ed.v1 >= mesh.vertices.size()) continue;
+        const geom::Vec3d& p0 = mesh.vertices[ed.v0];
+        const geom::Vec3d& p1 = mesh.vertices[ed.v1];
 
-                    for (int dj = -spread_j; dj <= spread_j; ++dj) {
-                        int cj = center_j + dj;
-                        if (cj < 0 || cj >= static_cast<int>(ny)) continue;
-                        double dist_y = dj * dy / res_y;
-                        double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
+        // Check if edge is illuminated by radar
+        bool is_illuminated = false;
+        for (size_t t_adj : ed.adjacent_triangles) {
+            if (t_adj < mesh.normals.size()) {
+                const auto& n = mesh.normals[t_adj];
+                double cos_i = -(n.x * k_hat.x + n.y * k_hat.y + n.z * k_hat.z);
+                if (cos_i > 0.0) { is_illuminated = true; break; }
+            }
+        }
+        if (!is_illuminated) continue;
 
-                        double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
-                        lin_intensity[ci][cj] += rcs_sub * psf;
-                    }
+        // Filter out coplanar internal triangulation edges (keep boundary edges and sharp crease edges > 20 deg)
+        if (ed.adjacent_triangles.size() >= 2) {
+            size_t t0 = ed.adjacent_triangles[0];
+            size_t t1 = ed.adjacent_triangles[1];
+            if (t0 < mesh.normals.size() && t1 < mesh.normals.size()) {
+                const auto& n0 = mesh.normals[t0];
+                const auto& n1 = mesh.normals[t1];
+                double dot_n = n0.x * n1.x + n0.y * n1.y + n0.z * n1.z;
+                if (dot_n > 0.93) continue; // Internal coplanar seam, not a physical edge
+            }
+        }
+
+        double edge_len = std::sqrt((p1.x - p0.x)*(p1.x - p0.x) + (p1.y - p0.y)*(p1.y - p0.y) + (p1.z - p0.z)*(p1.z - p0.z));
+        int num_edge_pts = std::clamp(static_cast<int>(std::ceil(edge_len / edge_step)), 1, 30);
+        double d_len = edge_len / static_cast<double>(num_edge_pts);
+
+        geom::Vec3d edge_dir{(p1.x - p0.x)/edge_len, (p1.y - p0.y)/edge_len, (p1.z - p0.z)/edge_len};
+        // Broadside edge specular factor: high when edge is orthogonal to radar line of sight
+        double broadside = 1.0 - std::abs(edge_dir.x * k_hat.x + edge_dir.y * k_hat.y + edge_dir.z * k_hat.z);
+
+        for (int k = 0; k < num_edge_pts; ++k) {
+            double frac = (k + 0.5) / static_cast<double>(num_edge_pts);
+            geom::Vec3d pt{p0.x + frac * (p1.x - p0.x), p0.y + frac * (p1.y - p0.y), p0.z + frac * (p1.z - p0.z)};
+
+            double cot_inc = std::cos(inc_rad) / std::sin(inc_rad);
+            double target_gx = pt.x - (pt.z - ground_z) * cot_inc;
+            double target_gy = pt.y;
+
+            // PTD edge diffraction cross-section
+            double rcs_edge_pt = 0.15 * d_len * (0.3 + 0.7 * broadside);
+
+            // Wingtips, nose, and engine nozzle boosts
+            bool is_wingtip = (std::abs(pt.y) > (0.88 * (bmax.y - bmin.y) * 0.5));
+            bool is_nozzle = (pt.x < (bmin.x + 0.18 * (bmax.x - bmin.x))) && (std::abs(pt.y) < 1.0);
+            bool is_nose = (pt.x > (bmax.x - 0.12 * (bmax.x - bmin.x)));
+            if (is_wingtip || is_nozzle || is_nose) {
+                rcs_edge_pt *= 2.8;
+            }
+
+            if (config.enable_ground_multipath && (pt.z - ground_z) < (0.35 * vehicle_height)) {
+                rcs_edge_pt *= 3.0;
+            }
+
+            int center_i = static_cast<int>((target_gx - img.ground_range_min_m) / dx);
+            int center_j = static_cast<int>((target_gy - img.azimuth_min_m) / dy);
+
+            int spread_i = std::max(2, static_cast<int>(std::ceil(res_x / dx)));
+            int spread_j = std::max(1, static_cast<int>(std::ceil(res_y / dy)));
+            if (rcs_edge_pt > 0.15) {
+                spread_i = std::min(static_cast<int>(nx / 4), spread_i * 3);
+            }
+
+            for (int di = -spread_i; di <= spread_i; ++di) {
+                int ci = center_i + di;
+                if (ci < 0 || ci >= static_cast<int>(nx)) continue;
+                double dist_x = di * dx / res_x;
+                double sinc_x = (std::abs(dist_x) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_x) / (M_PI * dist_x));
+
+                for (int dj = -spread_j; dj <= spread_j; ++dj) {
+                    int cj = center_j + dj;
+                    if (cj < 0 || cj >= static_cast<int>(ny)) continue;
+                    double dist_y = dj * dy / res_y;
+                    double sinc_y = (std::abs(dist_y) < 1e-4) ? 1.0 : (std::sin(M_PI * dist_y) / (M_PI * dist_y));
+
+                    double psf = (sinc_x * sinc_x) * (sinc_y * sinc_y);
+                    lin_intensity[ci][cj] += rcs_edge_pt * psf;
                 }
             }
         }
