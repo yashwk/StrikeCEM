@@ -20,9 +20,11 @@ namespace {
 #define CUDA_CHECK(call)                                                      \
     do {                                                                      \
         const cudaError_t err = (call);                                       \
-        if (err != cudaSuccess)                                               \
+        if (err != cudaSuccess) {                                             \
+            (void)cudaGetLastError();                                         \
             throw CudaError(std::string("CUDA failure: ") +                   \
                             cudaGetErrorString(err));                         \
+        }                                                                     \
     } while (0)
 
 template <typename T> class DeviceBuffer {
@@ -53,6 +55,10 @@ template <typename Real> struct UnitParams {
     Real ehx, ehy, ehz; // H-transmit E0 vector (with amplitude)
     Real evx, evy, evz; // V-transmit E0 vector (with amplitude)
     Real k, eta, e0;
+    Real qx, qy, qz;   // wavevector difference: k * (r - k)
+    Real h0_h[3];      // (k x Eh) / eta
+    Real h0_v[3];      // (k x Ev) / eta
+    Real k_eta_4pi;    // k * eta / (4 * pi)
 };
 
 __device__ inline void fsincos(float a, float* s, float* c) { sincosf(a, s, c); }
@@ -74,56 +80,49 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
     __shared__ int lit_sh[kBlock];
     Cplx<Real> sum[2][3] = {};
     int lit = 0;
+
+    const Real to_inc_x = -p.kx, to_inc_y = -p.ky, to_inc_z = -p.kz;
+
     for (int t = static_cast<int>(threadIdx.x); t < ntris; t += kBlock) {
         const Real nx = normals[3 * t], ny = normals[3 * t + 1], nz = normals[3 * t + 2];
-        if (!(nx * -p.kx + ny * -p.ky + nz * -p.kz > Real(0))) continue; // hard shadow
+        if (!(nx * to_inc_x + ny * to_inc_y + nz * to_inc_z > Real(0))) continue; // hard shadow
         ++lit;
+
         const Real cx = centroids[3 * t], cy = centroids[3 * t + 1], cz = centroids[3 * t + 2];
-        Real s_in, c_in, s_out, c_out;
-        fsincos(-p.k * (p.kx * cx + p.ky * cy + p.kz * cz), &s_in, &c_in);
-        fsincos(p.k * (p.rx * cx + p.ry * cy + p.rz * cz), &s_out, &c_out);
-        // Per-transmit incident H = (k x E0)/eta, phased at the centroid.
-        const Real e0v[2][3] = {{p.ehx, p.ehy, p.ehz}, {p.evx, p.evy, p.evz}};
-        for (int tx = 0; tx < 2; ++tx) {
-            const Real* e = e0v[tx];
-            // k x E0
-            const Real kxx[3] = {p.ky * e[2] - p.kz * e[1], p.kz * e[0] - p.kx * e[2],
-                                 p.kx * e[1] - p.ky * e[0]};
-            // H complex = (k x E0)/eta * (c_in + j s_in)
-            Real h_re[3], h_im[3];
-            for (int i = 0; i < 3; ++i) {
-                h_re[i] = kxx[i] / p.eta * c_in;
-                h_im[i] = kxx[i] / p.eta * s_in;
-            }
-            // J = 2 n x H
-            const Real nrm[3] = {nx, ny, nz};
-            Real j_re[3], j_im[3];
-            for (int i = 0; i < 3; ++i) {
-                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
-                j_re[i] = 2 * (nrm[j] * h_re[k3] - nrm[k3] * h_re[j]);
-                j_im[i] = 2 * (nrm[j] * h_im[k3] - nrm[k3] * h_im[j]);
-            }
-            // T = r x (r x J), ADR-0001 transverse projector.
-            const Real rv[3] = {p.rx, p.ry, p.rz};
-            Real t1_re[3], t1_im[3], t2_re[3], t2_im[3];
-            for (int i = 0; i < 3; ++i) {
-                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
-                t1_re[i] = rv[j] * j_re[k3] - rv[k3] * j_re[j];
-                t1_im[i] = rv[j] * j_im[k3] - rv[k3] * j_im[j];
-            }
-            for (int i = 0; i < 3; ++i) {
-                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
-                t2_re[i] = rv[j] * t1_re[k3] - rv[k3] * t1_re[j];
-                t2_im[i] = rv[j] * t1_im[k3] - rv[k3] * t1_im[j];
-            }
-            // coeff = j*k*eta/4pi * A, times output phase.
-            const Real a = areas[t];
-            const Real ck_re = -p.k * p.eta / Real(4 * 3.141592653589793) * a * s_out;
-            const Real ck_im = p.k * p.eta / Real(4 * 3.141592653589793) * a * c_out;
-            for (int i = 0; i < 3; ++i) {
-                sum[tx][i].re += ck_re * t2_re[i] - ck_im * t2_im[i];
-                sum[tx][i].im += ck_re * t2_im[i] + ck_im * t2_re[i];
-            }
+        const Real phi = p.qx * cx + p.qy * cy + p.qz * cz;
+        Real s_phi, c_phi;
+        fsincos(phi, &s_phi, &c_phi);
+
+        const Real w = p.k_eta_4pi * areas[t];
+        const Real w_re = -w * s_phi;
+        const Real w_im =  w * c_phi;
+
+        // tx = 0: H transmit
+        {
+            const Real j0_0 = Real(2) * (ny * p.h0_h[2] - nz * p.h0_h[1]);
+            const Real j0_1 = Real(2) * (nz * p.h0_h[0] - nx * p.h0_h[2]);
+            const Real j0_2 = Real(2) * (nx * p.h0_h[1] - ny * p.h0_h[0]);
+            const Real r_dot_j0 = p.rx * j0_0 + p.ry * j0_1 + p.rz * j0_2;
+            const Real t0_0 = r_dot_j0 * p.rx - j0_0;
+            const Real t0_1 = r_dot_j0 * p.ry - j0_1;
+            const Real t0_2 = r_dot_j0 * p.rz - j0_2;
+            sum[0][0].re += w_re * t0_0;  sum[0][0].im += w_im * t0_0;
+            sum[0][1].re += w_re * t0_1;  sum[0][1].im += w_im * t0_1;
+            sum[0][2].re += w_re * t0_2;  sum[0][2].im += w_im * t0_2;
+        }
+
+        // tx = 1: V transmit
+        {
+            const Real j0_0 = Real(2) * (ny * p.h0_v[2] - nz * p.h0_v[1]);
+            const Real j0_1 = Real(2) * (nz * p.h0_v[0] - nx * p.h0_v[2]);
+            const Real j0_2 = Real(2) * (nx * p.h0_v[1] - ny * p.h0_v[0]);
+            const Real r_dot_j0 = p.rx * j0_0 + p.ry * j0_1 + p.rz * j0_2;
+            const Real t0_0 = r_dot_j0 * p.rx - j0_0;
+            const Real t0_1 = r_dot_j0 * p.ry - j0_1;
+            const Real t0_2 = r_dot_j0 * p.rz - j0_2;
+            sum[1][0].re += w_re * t0_0;  sum[1][0].im += w_im * t0_0;
+            sum[1][1].re += w_re * t0_1;  sum[1][1].im += w_im * t0_1;
+            sum[1][2].re += w_re * t0_2;  sum[1][2].im += w_im * t0_2;
         }
     }
     const int lane = static_cast<int>(threadIdx.x);
@@ -168,60 +167,53 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
     __shared__ int lit_sh[kBlock];
     Cplx<double> sum[2][3] = {};
     int lit = 0;
+
+    const double to_inc_x = -p.kx, to_inc_y = -p.ky, to_inc_z = -p.kz;
+
     for (int t = static_cast<int>(threadIdx.x); t < ntris; t += kBlock) {
         const double nx = static_cast<double>(normals[3 * t]);
         const double ny = static_cast<double>(normals[3 * t + 1]);
         const double nz = static_cast<double>(normals[3 * t + 2]);
-        if (!(nx * -p.kx + ny * -p.ky + nz * -p.kz > 0.0)) continue; // hard shadow
+        if (!(nx * to_inc_x + ny * to_inc_y + nz * to_inc_z > 0.0)) continue; // hard shadow
         ++lit;
+
         const double cx = static_cast<double>(centroids[3 * t]);
         const double cy = static_cast<double>(centroids[3 * t + 1]);
         const double cz = static_cast<double>(centroids[3 * t + 2]);
-        double s_in, c_in, s_out, c_out;
-        fsincos(-p.k * (p.kx * cx + p.ky * cy + p.kz * cz), &s_in, &c_in);
-        fsincos(p.k * (p.rx * cx + p.ry * cy + p.rz * cz), &s_out, &c_out);
-        // Per-transmit incident H = (k x E0)/eta, phased at the centroid.
-        const double e0v[2][3] = {{p.ehx, p.ehy, p.ehz}, {p.evx, p.evy, p.evz}};
-        for (int tx = 0; tx < 2; ++tx) {
-            const double* e = e0v[tx];
-            // k x E0
-            const double kxx[3] = {p.ky * e[2] - p.kz * e[1], p.kz * e[0] - p.kx * e[2],
-                                   p.kx * e[1] - p.ky * e[0]};
-            // H complex = (k x E0)/eta * (c_in + j s_in)
-            double h_re[3], h_im[3];
-            for (int i = 0; i < 3; ++i) {
-                h_re[i] = kxx[i] / p.eta * c_in;
-                h_im[i] = kxx[i] / p.eta * s_in;
-            }
-            // J = 2 n x H
-            const double nrm[3] = {nx, ny, nz};
-            double j_re[3], j_im[3];
-            for (int i = 0; i < 3; ++i) {
-                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
-                j_re[i] = 2.0 * (nrm[j] * h_re[k3] - nrm[k3] * h_re[j]);
-                j_im[i] = 2.0 * (nrm[j] * h_im[k3] - nrm[k3] * h_im[j]);
-            }
-            // T = r x (r x J), ADR-0001 transverse projector.
-            const double rv[3] = {p.rx, p.ry, p.rz};
-            double t1_re[3], t1_im[3], t2_re[3], t2_im[3];
-            for (int i = 0; i < 3; ++i) {
-                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
-                t1_re[i] = rv[j] * j_re[k3] - rv[k3] * j_re[j];
-                t1_im[i] = rv[j] * j_im[k3] - rv[k3] * j_im[j];
-            }
-            for (int i = 0; i < 3; ++i) {
-                const int j = (i + 1) % 3, k3 = (i + 2) % 3;
-                t2_re[i] = rv[j] * t1_re[k3] - rv[k3] * t1_re[j];
-                t2_im[i] = rv[j] * t1_im[k3] - rv[k3] * t1_im[j];
-            }
-            // coeff = j*k*eta/4pi * A, times output phase.
-            const double a = static_cast<double>(areas[t]);
-            const double ck_re = -p.k * p.eta / (4.0 * 3.141592653589793) * a * s_out;
-            const double ck_im = p.k * p.eta / (4.0 * 3.141592653589793) * a * c_out;
-            for (int i = 0; i < 3; ++i) {
-                sum[tx][i].re += ck_re * t2_re[i] - ck_im * t2_im[i];
-                sum[tx][i].im += ck_re * t2_im[i] + ck_im * t2_re[i];
-            }
+        const double phi = p.qx * cx + p.qy * cy + p.qz * cz;
+        double s_phi, c_phi;
+        fsincos(phi, &s_phi, &c_phi);
+
+        const double w = p.k_eta_4pi * static_cast<double>(areas[t]);
+        const double w_re = -w * s_phi;
+        const double w_im =  w * c_phi;
+
+        // tx = 0: H transmit
+        {
+            const double j0_0 = 2.0 * (ny * p.h0_h[2] - nz * p.h0_h[1]);
+            const double j0_1 = 2.0 * (nz * p.h0_h[0] - nx * p.h0_h[2]);
+            const double j0_2 = 2.0 * (nx * p.h0_h[1] - ny * p.h0_h[0]);
+            const double r_dot_j0 = p.rx * j0_0 + p.ry * j0_1 + p.rz * j0_2;
+            const double t0_0 = r_dot_j0 * p.rx - j0_0;
+            const double t0_1 = r_dot_j0 * p.ry - j0_1;
+            const double t0_2 = r_dot_j0 * p.rz - j0_2;
+            sum[0][0].re += w_re * t0_0;  sum[0][0].im += w_im * t0_0;
+            sum[0][1].re += w_re * t0_1;  sum[0][1].im += w_im * t0_1;
+            sum[0][2].re += w_re * t0_2;  sum[0][2].im += w_im * t0_2;
+        }
+
+        // tx = 1: V transmit
+        {
+            const double j0_0 = 2.0 * (ny * p.h0_v[2] - nz * p.h0_v[1]);
+            const double j0_1 = 2.0 * (nz * p.h0_v[0] - nx * p.h0_v[2]);
+            const double j0_2 = 2.0 * (nx * p.h0_v[1] - ny * p.h0_v[0]);
+            const double r_dot_j0 = p.rx * j0_0 + p.ry * j0_1 + p.rz * j0_2;
+            const double t0_0 = r_dot_j0 * p.rx - j0_0;
+            const double t0_1 = r_dot_j0 * p.ry - j0_1;
+            const double t0_2 = r_dot_j0 * p.rz - j0_2;
+            sum[1][0].re += w_re * t0_0;  sum[1][0].im += w_im * t0_0;
+            sum[1][1].re += w_re * t0_1;  sum[1][1].im += w_im * t0_1;
+            sum[1][2].re += w_re * t0_2;  sum[1][2].im += w_im * t0_2;
         }
     }
     const int lane = static_cast<int>(threadIdx.x);
@@ -445,6 +437,16 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             p.k = k;
             p.eta = static_cast<Real>(eta);
             p.e0 = static_cast<Real>(e0);
+            p.qx = p.k * (p.rx - p.kx);
+            p.qy = p.k * (p.ry - p.ky);
+            p.qz = p.k * (p.rz - p.kz);
+            p.h0_h[0] = (p.ky * p.ehz - p.kz * p.ehy) / p.eta;
+            p.h0_h[1] = (p.kz * p.ehx - p.kx * p.ehz) / p.eta;
+            p.h0_h[2] = (p.kx * p.ehy - p.ky * p.ehx) / p.eta;
+            p.h0_v[0] = (p.ky * p.evz - p.kz * p.evy) / p.eta;
+            p.h0_v[1] = (p.kz * p.evx - p.kx * p.evz) / p.eta;
+            p.h0_v[2] = (p.kx * p.evy - p.ky * p.evx) / p.eta;
+            p.k_eta_4pi = p.k * p.eta / static_cast<Real>(4.0 * 3.14159265358979323846);
         }
         CUDA_CHECK(cudaMemcpy(d_units.get(), h_units.data(), count * sizeof(UnitParams<Real>),
                               cudaMemcpyHostToDevice));
@@ -627,6 +629,16 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             p.k = k;
             p.eta = eta;
             p.e0 = e0;
+            p.qx = p.k * (p.rx - p.kx);
+            p.qy = p.k * (p.ry - p.ky);
+            p.qz = p.k * (p.rz - p.kz);
+            p.h0_h[0] = (p.ky * p.ehz - p.kz * p.ehy) / p.eta;
+            p.h0_h[1] = (p.kz * p.ehx - p.kx * p.ehz) / p.eta;
+            p.h0_h[2] = (p.kx * p.ehy - p.ky * p.ehx) / p.eta;
+            p.h0_v[0] = (p.ky * p.evz - p.kz * p.evy) / p.eta;
+            p.h0_v[1] = (p.kz * p.evx - p.kx * p.evz) / p.eta;
+            p.h0_v[2] = (p.kx * p.evy - p.ky * p.evx) / p.eta;
+            p.k_eta_4pi = p.k * p.eta / (4.0 * 3.14159265358979323846);
         }
         CUDA_CHECK(cudaMemcpy(d_units.get(), h_units.data(), count * sizeof(UnitParams<double>),
                               cudaMemcpyHostToDevice));

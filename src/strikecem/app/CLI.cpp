@@ -54,7 +54,7 @@ constexpr const char* kUsage =
     "usage: strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...>\n"
     "  validate     resolve config, inspect mesh, print hashes\n"
     "  estimate     validate plus plan counts and resource estimates\n"
-    "  run          full pipeline (PO solver, CSV/HDF5 output) [--scale S]\n"
+    "  run          full pipeline (PO solver, CSV/HDF5 output) [--scale S] [--cuda] [--cpu] [--threads N] [--cuda-device D]\n"
     "  shard        partition sample plan across N shards and write shard configs + manifest\n"
     "               options: --num-shards N (default 2), --out-dir DIR (default ./shards), --run-id ID\n"
     "  merge        merge completed shard outputs into a unified database\n"
@@ -782,6 +782,9 @@ int run(int argc, char** argv) {
     std::vector<std::pair<std::string, std::string>> lod_meshes;
     size_t num_shards = 2;
     size_t direction_id = 0;
+    std::string accelerator_override;
+    int device_override = -1;
+    size_t threads_override = 0;
 
     // Domain 4 parameters
     size_t workers = 0;
@@ -912,6 +915,16 @@ int run(int argc, char** argv) {
             }
         } else if (args[i] == "--workers" && i + 1 < args.size()) {
             workers = static_cast<size_t>(std::stoul(args[++i]));
+        } else if ((args[i] == "--accelerator" || args[i] == "--backend") && i + 1 < args.size()) {
+            accelerator_override = args[++i];
+        } else if (args[i] == "--cuda") {
+            accelerator_override = "cuda";
+        } else if (args[i] == "--cpu") {
+            accelerator_override = "cpu";
+        } else if (args[i] == "--cuda-device" && i + 1 < args.size()) {
+            device_override = std::stoi(args[++i]);
+        } else if (args[i] == "--threads" && i + 1 < args.size()) {
+            threads_override = static_cast<size_t>(std::stoul(args[++i]));
         } else if (args[i] == "--devices" && i + 1 < args.size()) {
             std::string d_str = args[++i];
             std::stringstream ss(d_str);
@@ -1130,6 +1143,15 @@ int run(int argc, char** argv) {
         }
         const std::string& config_path = positional[0];
         ResolvedConfig rc = load_config(config_path, schema_path);
+        if (!accelerator_override.empty()) {
+            rc.value["execution"]["accelerator"] = accelerator_override;
+        }
+        if (device_override >= 0) {
+            rc.value["execution"]["cuda_device_id"] = device_override;
+        }
+        if (threads_override > 0) {
+            rc.value["execution"]["cpu_threads"] = threads_override;
+        }
         if (!bench_profile.empty() && command != "run") {
             std::cerr << kUsage;
             return static_cast<int>(ExitCode::Config);

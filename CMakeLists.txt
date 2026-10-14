@@ -15,7 +15,7 @@ if(SCEM_ENABLE_CUDA)
         set(CMAKE_CUDA_STANDARD 20)
         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
         if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-            set(CMAKE_CUDA_ARCHITECTURES native)
+            set(CMAKE_CUDA_ARCHITECTURES 89 75)
         endif()
         set(SCEM_HAVE_CUDA ON)
         message(STATUS "StrikeCEM: CUDA backend enabled (${CMAKE_CUDA_COMPILER_ID})")
@@ -142,6 +142,9 @@ target_link_libraries(scem_compare PRIVATE scem_core)
 add_executable(scem_benchreport tools/benchmark_report/main.cpp)
 target_link_libraries(scem_benchreport PRIVATE scem_core)
 
+add_executable(scem_gpubench tools/gpu_bench/main.cpp)
+target_link_libraries(scem_gpubench PRIVATE scem_core)
+
 # Shared library target for later StrikeEngine and Python SDK integration
 add_library(strikecem_lib SHARED src/strikecem/app/CLI.cpp)
 target_link_libraries(strikecem_lib PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,scem_core>")
@@ -200,7 +203,7 @@ target_compile_definitions(scem_tests PRIVATE
         SCEM_SCHEMA_INSTALL_RELATIVE_PATH="${SCEM_SCHEMA_INSTALL_RELATIVE_PATH}"
         SCEM_SOURCE_SCHEMA_PATH="${SCEM_SOURCE_SCHEMA_PATH}")
 
-install(TARGETS strikecem scem_quicklook scem_compare scem_benchreport strikecem_lib
+install(TARGETS strikecem scem_quicklook scem_compare scem_benchreport scem_gpubench strikecem_lib
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

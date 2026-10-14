@@ -151,6 +151,39 @@ TEST(Gpu, BadDeviceIdRefuses) {
     EXPECT_THROW(strikecem::solve_po(c.mesh, plan, bad), strikecem::cuda::CudaError);
 }
 
+TEST(Gpu, BistaticMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_sphere.json");
+    strikecem::SamplePlan plan;
+    plan.frequencies_hz = {10e9};
+    plan.polarizations = {"HH", "VV"};
+    strikecem::Direction d;
+    d.id = 0;
+    d.azimuth_deg = 30.0;
+    d.elevation_deg = 15.0;
+    d.k_hat = strikecem::direction_from_az_el(30.0, 15.0);
+    d.is_bistatic = true;
+    d.r_obs_hat = strikecem::direction_from_az_el(45.0, 20.0);
+    plan.directions.push_back(d);
+
+    const auto cpu = solve_backend(c, plan, "cpu", "float64");
+    const auto gpu = solve_backend(c, plan, "cuda", "float64");
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, DenseAzimuthSweepMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_sphere.json");
+    std::vector<std::pair<double, double>> dirs;
+    for (double az = 0.0; az < 360.0; az += 15.0) {
+        dirs.emplace_back(az, 0.0);
+    }
+    const auto plan = make_plan({10e9}, dirs, {"HH", "VV"});
+    const auto cpu = solve_backend(c, plan, "cpu", "float64");
+    const auto gpu = solve_backend(c, plan, "cuda", "float64");
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
 #else
 
 TEST(Gpu, CudaDisabledStubRefuses) {
