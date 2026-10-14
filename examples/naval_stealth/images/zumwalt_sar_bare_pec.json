@@ -1,0 +1,28 @@
+{
+  "altitude_m": 500000.0,
+  "azimuth_max_m": 51.04148682915624,
+  "azimuth_min_m": -59.02113507012297,
+  "bandwidth_hz": 1500000000.0,
+  "center_frequency_hz": 35000000000.0,
+  "ground_range_max_m": 180.05348682915627,
+  "ground_range_min_m": -188.03313507012297,
+  "incidence_angle_deg": 40.0,
+  "mesh_triangles": 170,
+  "mode": "spotlight",
+  "peak_scatterer": {
+    "azimuth_m": -14.845610069533372,
+    "ground_range_m": 30.8777562742726,
+    "rcs_dbsm": -18.058680703116906
+  },
+  "platform": "spaceborne",
+  "platform_velocity_mps": 7600.0,
+  "resolutions": {
+    "azimuth_m": 0.09815338613287425,
+    "ground_range_m": 0.15546475667454984,
+    "slant_range_m": 0.09993081933333334
+  },
+  "shadow_area_fraction": 0.01959991455078125,
+  "sidelobe_suppression_db": 30.0,
+  "sidelobe_window": "taylor",
+  "vehicle_name": "zumwalt_bare_pec"
+}

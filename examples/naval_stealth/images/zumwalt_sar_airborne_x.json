@@ -1,0 +1,28 @@
+{
+  "altitude_m": 12000.0,
+  "azimuth_max_m": 64.98787324533117,
+  "azimuth_min_m": -48.51646071415115,
+  "bandwidth_hz": 1000000000.0,
+  "center_frequency_hz": 10000000000.0,
+  "ground_range_max_m": 193.99987324533117,
+  "ground_range_min_m": -177.52846071415115,
+  "incidence_angle_deg": 55.0,
+  "mesh_triangles": 170,
+  "mode": "spotlight",
+  "peak_scatterer": {
+    "azimuth_m": -5.619803250948358,
+    "ground_range_m": 34.721612885748414,
+    "rcs_dbsm": -12.620462249835677
+  },
+  "platform": "airborne",
+  "platform_velocity_mps": 220.0,
+  "resolutions": {
+    "azimuth_m": 0.28628070955421653,
+    "ground_range_m": 0.18298950731436803,
+    "slant_range_m": 0.149896229
+  },
+  "shadow_area_fraction": 0.04535675048828125,
+  "sidelobe_suppression_db": 30.0,
+  "sidelobe_window": "taylor",
+  "vehicle_name": "zumwalt_stealth"
+}

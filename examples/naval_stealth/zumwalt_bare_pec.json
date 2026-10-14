@@ -1,0 +1,67 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {
+    "path": "zumwalt_stealth.obj",
+    "units": "m",
+    "mesh_repair": "report"
+  },
+  "frequency": {
+    "frequency_hz": 10000000000
+  },
+  "physics": {
+    "monostatic": true,
+    "polarization_basis": "linear",
+    "incident_amplitude": 1.0,
+    "phase_reference": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "angles": {
+    "azimuth": {
+      "start": 0,
+      "stop": 360,
+      "step": 1
+    },
+    "elevation": {
+      "start": 0,
+      "stop": 0,
+      "step": 1
+    }
+  },
+  "polarization": [
+    "HH",
+    "VV"
+  ],
+  "materials": {
+    "default_material": "pec_keel",
+    "tag_coverage": "warn",
+    "definitions": [
+      { "tag": "pec_keel", "type": "pec" },
+      { "tag": "pec_deck", "type": "pec" },
+      { "tag": "ram_hull", "type": "pec" },
+      { "tag": "ram_deckhouse", "type": "pec" },
+      { "tag": "ram_mast", "type": "pec" },
+      { "tag": "ram_turret", "type": "pec" }
+    ]
+  },
+  "solver": {
+    "type": "PO",
+    "precision": "float64",
+    "rcs_units": "dBsm",
+    "po_options": {
+      "edge_correction": "none",
+      "curvature_correction": false,
+      "shadowing": true,
+      "max_bounces": 1
+    }
+  },
+  "execution": {
+    "accelerator": "cpu"
+  },
+  "output": {
+    "format": "hdf5",
+    "path": "examples/naval_stealth/zumwalt_bare_pec.h5"
+  }
+}
