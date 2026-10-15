@@ -503,7 +503,10 @@ TEST(Fringe, SolverGuards) {
     auto rc_cuda = rc;
     rc_cuda.value["execution"]["accelerator"] = "cuda";
     const strikecem::FringeOptions on{true, &model};
-    EXPECT_THROW(strikecem::solve_po(mesh, plan, rc_cuda.value, on), strikecem::cuda::CudaError);
+    if (strikecem::cuda::cuda_available()) {
+        const auto res_cuda = strikecem::solve_po(mesh, plan, rc_cuda.value, on);
+        EXPECT_FALSE(res_cuda.samples.empty());
+    }
 }
 
 TEST(Fringe, SkippedEdgesWarned) {
@@ -597,13 +600,14 @@ TEST(Fringe, CliInvalidValueRejected) {
     fs::remove_all(dir, ec);
 }
 
-TEST(Fringe, CliCudaRefused) {
+TEST(Fringe, CliCudaSupported) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; skipping";
     const fs::path dir = fs::temp_directory_path() / "scem_fringe_cuda";
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
     const std::string config = write_fringe_config(dir, "out.h5", "fringe", "hdf5", true);
-    EXPECT_EQ(cli_run("run", config), 4);
+    EXPECT_EQ(cli_run("run", config), 0);
     fs::remove_all(dir, ec);
 }
 

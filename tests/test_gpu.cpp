@@ -6,8 +6,12 @@
 
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/MeshLoader.hpp"
+#include "strikecem/solvers/Curvature.hpp"
+#include "strikecem/solvers/EdgeFringe.hpp"
+#include "strikecem/solvers/EdgeModel.hpp"
 #include "strikecem/solvers/GpuPO.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
+#include "strikecem/solvers/UtdWedge.hpp"
 
 namespace {
 
@@ -411,6 +415,78 @@ TEST(Gpu, MultiMaterialMatchesCpu) {
     nlohmann::json gpu_cfg = c.rc.value;
     gpu_cfg["execution"]["accelerator"] = "cuda";
     const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, {}, {}, mixed_opts);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, CurvatureMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_sweep_grid.json");
+    const auto plan = make_plan({10e9, 12e9}, {{0.0, -90.0}, {30.0, 20.0}}, {"HH", "VV"});
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    cpu_cfg["solver"]["po_options"]["curvature_correction"] = true;
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg);
+
+    nlohmann::json gpu_cfg = cpu_cfg;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, PtdLiteMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {45.0, 30.0}}, {"HH", "VV"});
+    const auto edge_model = strikecem::extract_edges(c.mesh);
+    const strikecem::FringeOptions fringe{true, &edge_model, "ptd_lite"};
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, fringe);
+
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, fringe);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, PtdFullMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {30.0, 20.0}}, {"HH", "VV"});
+    const auto edge_model = strikecem::extract_edges(c.mesh);
+    const strikecem::FringeOptions fringe{true, &edge_model, "ptd_full"};
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, fringe);
+
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, fringe);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, CurvatureAndPtdCombinedMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {45.0, 30.0}}, {"HH", "VV"});
+    const auto edge_model = strikecem::extract_edges(c.mesh);
+    const strikecem::FringeOptions fringe{true, &edge_model, "ptd_full"};
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    cpu_cfg["solver"]["po_options"]["curvature_correction"] = true;
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, fringe);
+
+    nlohmann::json gpu_cfg = cpu_cfg;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, fringe);
 
     expect_close(gpu, cpu, 1e-9, 1e-12);
 }

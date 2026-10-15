@@ -13,6 +13,9 @@
 #include <nvtx3/nvToolsExt.h>
 
 #include "strikecem/geometry/Symmetry.hpp"
+#include "strikecem/solvers/Curvature.hpp"
+#include "strikecem/solvers/EdgeFringe.hpp"
+#include "strikecem/solvers/EdgeModel.hpp"
 #include "strikecem/solvers/Fresnel.hpp"
 #include "strikecem/solvers/Material.hpp"
 #include "strikecem/solvers/Projection.hpp"
@@ -52,6 +55,7 @@ private:
 template <typename Real> struct Cplx {
     Real re{0}, im{0};
 };
+using ComplexD = Cplx<double>;
 
 // Device complex arithmetic helpers
 template <typename Real>
@@ -160,6 +164,294 @@ template <typename Real> struct UnitParams {
 };
 
 constexpr int kBlock = 256;
+
+// --- GPU Edge / PTD Structures & Device Functions ---
+
+struct GpuMeshEdge {
+    double p0[3];
+    double p1[3];
+    double tangent[3];
+    double length;
+    double n0[3];
+    double n1[3];
+    double face0_dir[3];
+    double face1_dir[3];
+    double wedge_n;
+    int boundary;   // 1 if boundary, 0 if wedge
+    int ptd_method; // 0 for Lite, 1 for Full
+};
+
+__device__ inline double dev_aux_f(double x) {
+    constexpr double pi = 3.14159265358979323846;
+    const double p1 = pi * x;
+    const double p3x5 = p1 * p1 * p1 * x * x;
+    const double p5x9 = p3x5 * p1 * p1 * x * x * x * x;
+    const double p7x13 = p5x9 * p1 * p1 * x * x * x * x;
+    return 1.0 / p1 - 3.0 / p3x5 + 105.0 / p5x9 - 10395.0 / p7x13;
+}
+
+__device__ inline double dev_aux_g(double x) {
+    constexpr double pi = 3.14159265358979323846;
+    const double p2x3 = pi * pi * x * x * x;
+    const double p4x7 = p2x3 * pi * pi * x * x * x * x;
+    const double p6x11 = p4x7 * pi * pi * x * x * x * x;
+    return 1.0 / p2x3 - 15.0 / p4x7 + 945.0 / p6x11;
+}
+
+__device__ inline void dev_fresnel_cs(double x, double& c, double& s) {
+    constexpr double pi = 3.14159265358979323846;
+    const double ax = fabs(x);
+    double cc, ss;
+    if (ax <= 3.0) {
+        const double x2 = ax * ax;
+        const double p = pi * 0.5;
+        double term_c = ax, term_s = p * ax * x2 / 3.0;
+        cc = term_c;
+        ss = term_s;
+        for (int n = 1; n < 60; ++n) {
+            const double fn = static_cast<double>(n);
+            term_c *= -p * p * x2 * x2 / (((2.0 * fn) * (2.0 * fn - 1.0) * (4.0 * fn + 1.0)) / (4.0 * fn - 3.0));
+            term_s *= -p * p * x2 * x2 / (((2.0 * fn + 1.0) * (2.0 * fn) * (4.0 * fn + 3.0)) / (4.0 * fn - 1.0));
+            cc += term_c;
+            ss += term_s;
+            if (fabs(term_c) < 1e-18 && fabs(term_s) < 1e-18) break;
+        }
+    } else {
+        const double arg = pi * ax * ax * 0.5;
+        double sn, cs;
+        fsincos(arg, &sn, &cs);
+        const double f = dev_aux_f(ax), g = dev_aux_g(ax);
+        cc = 0.5 + f * sn - g * cs;
+        ss = 0.5 - f * cs - g * sn;
+    }
+    c = (x < 0.0) ? -cc : cc;
+    s = (x < 0.0) ? -ss : ss;
+}
+
+__device__ inline ComplexD dev_utd_transition(double x) {
+    if (x <= 0.0) return {0.0, 0.0};
+    constexpr double pi = 3.14159265358979323846;
+    const double t0 = sqrt(2.0 * x / pi);
+    double c, s;
+    dev_fresnel_cs(t0, c, s);
+    ComplexD rest = {0.5 - c, -(0.5 - s)};
+    double sn, cs;
+    fsincos(x, &sn, &cs);
+    ComplexD phase = {cs, sn};
+    double f = sqrt(2.0 * pi * x);
+    ComplexD ifactor = {0.0, f};
+    return c_mul(ifactor, c_mul(phase, rest));
+}
+
+__device__ inline void dev_utd_term(double beta, double k, double rho, double n, ComplexD& out) {
+    constexpr double pi = 3.14159265358979323846;
+    double np = round((beta + pi) / (2.0 * n * pi));
+    double nm = round((beta - pi) / (2.0 * n * pi));
+    double c_p = cos((2.0 * n * pi * np - beta) * 0.5);
+    double c_m = cos((2.0 * n * pi * nm - beta) * 0.5);
+    double ap = 2.0 * c_p * c_p;
+    double am = 2.0 * c_m * c_m;
+    out = {0.0, 0.0};
+    double tp = (pi + beta) / (2.0 * n);
+    double tm = (pi - beta) / (2.0 * n);
+    double sp_val, cp_val;
+    fsincos(tp, &sp_val, &cp_val);
+    double sm_val, cm_val;
+    fsincos(tm, &sm_val, &cm_val);
+    double cp = cp_val / sp_val;
+    if (isfinite(cp)) {
+        ComplexD trans_p = dev_utd_transition(k * rho * ap);
+        out = c_add(out, c_scale(trans_p, cp));
+    }
+    double cm = cm_val / sm_val;
+    if (isfinite(cm)) {
+        ComplexD trans_m = dev_utd_transition(k * rho * am);
+        out = c_add(out, c_scale(trans_m, cm));
+    }
+}
+
+__device__ inline bool dev_transverse_basis(const double* face_dir, const double* t,
+                                            double* e1, double* e2) {
+    double dot_ft = face_dir[0] * t[0] + face_dir[1] * t[1] + face_dir[2] * t[2];
+    e1[0] = face_dir[0] - t[0] * dot_ft;
+    e1[1] = face_dir[1] - t[1] * dot_ft;
+    e1[2] = face_dir[2] - t[2] * dot_ft;
+    double n = sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+    if (n <= 1e-12) return false;
+    double inv_n = 1.0 / n;
+    e1[0] *= inv_n; e1[1] *= inv_n; e1[2] *= inv_n;
+    e2[0] = e1[1] * t[2] - e1[2] * t[1];
+    e2[1] = e1[2] * t[0] - e1[0] * t[2];
+    e2[2] = e1[0] * t[1] - e1[1] * t[0];
+    return true;
+}
+
+__device__ inline double dev_norm_2pi(double a) {
+    constexpr double two_pi = 2.0 * 3.14159265358979323846;
+    a = fmod(a, two_pi);
+    if (a < 0.0) a += two_pi;
+    return a;
+}
+
+__device__ inline double dev_atan2(double y, double x) {
+    if (y > 0.0 && x < 0.0 && fabs(x) < 1e-15 * y) {
+        return 1.57079632679489678;
+    }
+    return atan2(y, x);
+}
+
+__device__ inline void dev_project_angles(const double* e1, const double* e2,
+                                          const double* s_hat, const double* r_hat,
+                                          double& phi, double& phi_prime) {
+    double arr[3] = {-s_hat[0], -s_hat[1], -s_hat[2]};
+    phi = dev_norm_2pi(dev_atan2(r_hat[0] * e2[0] + r_hat[1] * e2[1] + r_hat[2] * e2[2],
+                                 r_hat[0] * e1[0] + r_hat[1] * e1[1] + r_hat[2] * e1[2]));
+    phi_prime = dev_norm_2pi(dev_atan2(arr[0] * e2[0] + arr[1] * e2[1] + arr[2] * e2[2],
+                                       arr[0] * e1[0] + arr[1] * e1[1] + arr[2] * e1[2]));
+}
+
+__device__ inline ComplexD dev_along_edge_integral(const GpuMeshEdge& edge, double k,
+                                                   const double* s_hat, const double* r_hat,
+                                                   const double* phase_ref) {
+    double d[3] = {r_hat[0] - s_hat[0], r_hat[1] - s_hat[1], r_hat[2] - s_hat[2]};
+    double a = d[0] * edge.tangent[0] + d[1] * edge.tangent[1] + d[2] * edge.tangent[2];
+    double c[3] = {0.5 * (edge.p0[0] + edge.p1[0]) - phase_ref[0],
+                   0.5 * (edge.p0[1] + edge.p1[1]) - phase_ref[1],
+                   0.5 * (edge.p0[2] + edge.p1[2]) - phase_ref[2]};
+    double phase = k * (d[0] * c[0] + d[1] * c[1] + d[2] * c[2]);
+    double x = k * edge.length * a * 0.5;
+    double sinc = (fabs(x) < 1e-8) ? 1.0 - x * x / 6.0 : sin(x) / x;
+    double mag = edge.length * sinc;
+    double sn, cs;
+    fsincos(phase, &sn, &cs);
+    return {mag * cs, mag * sn};
+}
+
+__device__ inline ComplexD dev_along_edge_integral_quadrature(const GpuMeshEdge& edge, double k,
+                                                              const double* s_hat, const double* r_hat,
+                                                              const double* phase_ref) {
+    double d[3] = {r_hat[0] - s_hat[0], r_hat[1] - s_hat[1], r_hat[2] - s_hat[2]};
+    double mid[3] = {0.5 * (edge.p0[0] + edge.p1[0]) - phase_ref[0],
+                     0.5 * (edge.p0[1] + edge.p1[1]) - phase_ref[1],
+                     0.5 * (edge.p0[2] + edge.p1[2]) - phase_ref[2]};
+    double half_len = edge.length * 0.5;
+    const double nodes[5] = {
+        0.0,
+        -0.538469310105683,
+        0.538469310105683,
+        -0.906179845938664,
+        0.906179845938664
+    };
+    const double weights[5] = {
+        128.0 / 225.0,
+        (322.0 + 13.0 * sqrt(70.0)) / 900.0,
+        (322.0 + 13.0 * sqrt(70.0)) / 900.0,
+        (322.0 - 13.0 * sqrt(70.0)) / 900.0,
+        (322.0 - 13.0 * sqrt(70.0)) / 900.0
+    };
+    ComplexD sum = {0.0, 0.0};
+    for (int i = 0; i < 5; ++i) {
+        double offset = nodes[i] * half_len;
+        double pos[3] = {mid[0] + edge.tangent[0] * offset,
+                         mid[1] + edge.tangent[1] * offset,
+                         mid[2] + edge.tangent[2] * offset};
+        double phase = k * (d[0] * pos[0] + d[1] * pos[1] + d[2] * pos[2]);
+        double sn, cs;
+        fsincos(phase, &sn, &cs);
+        sum.re += weights[i] * cs;
+        sum.im += weights[i] * sn;
+    }
+    return {sum.re * half_len, sum.im * half_len};
+}
+
+__device__ inline bool dev_fringe_vector(const GpuMeshEdge& edge, double k,
+                                         const double* s_hat, const double* r_hat,
+                                         const ComplexD* e_inc,
+                                         const double* phase_ref,
+                                         ComplexD* out) {
+    if (edge.ptd_method == 1) { // PtdMethod::Full
+        double dot0 = s_hat[0] * edge.n0[0] + s_hat[1] * edge.n0[1] + s_hat[2] * edge.n0[2];
+        bool lit0 = (dot0 < 1e-6);
+        if (edge.boundary) {
+            if (!lit0) return false;
+        } else {
+            double dot1 = s_hat[0] * edge.n1[0] + s_hat[1] * edge.n1[1] + s_hat[2] * edge.n1[2];
+            bool lit1 = (dot1 < 1e-6);
+            if (!lit0 && !lit1) return false;
+        }
+    }
+    double e1[3], e2[3];
+    if (!dev_transverse_basis(edge.face0_dir, edge.tangent, e1, e2)) return false;
+    if (!edge.boundary) {
+        double f1[3], dummy[3];
+        if (!dev_transverse_basis(edge.face1_dir, edge.tangent, f1, dummy)) return false;
+        if (f1[0] * e2[0] + f1[1] * e2[1] + f1[2] * e2[2] > 0.0) {
+            e2[0] = -e2[0]; e2[1] = -e2[1]; e2[2] = -e2[2];
+        }
+    }
+    double dot_st = s_hat[0] * edge.tangent[0] + s_hat[1] * edge.tangent[1] + s_hat[2] * edge.tangent[2];
+    double st[3] = {s_hat[0] - edge.tangent[0] * dot_st,
+                    s_hat[1] - edge.tangent[1] * dot_st,
+                    s_hat[2] - edge.tangent[2] * dot_st};
+    double sin_beta0 = sqrt(st[0] * st[0] + st[1] * st[1] + st[2] * st[2]);
+    if (sin_beta0 <= 1e-12) return false;
+
+    double phi, phi_prime;
+    dev_project_angles(e1, e2, s_hat, r_hat, phi, phi_prime);
+
+    double n = edge.boundary ? 2.0 : edge.wedge_n;
+    ComplexD d_soft, d_hard;
+    double kt = k * sin_beta0;
+    ComplexD tm_term, tp_term;
+    dev_utd_term(phi - phi_prime, kt, edge.length, n, tm_term);
+    dev_utd_term(phi + phi_prime, kt, edge.length, n, tp_term);
+
+    double c0_scale = 1.0 / (4.0 * n * sqrt(3.14159265358979323846 * kt));
+    ComplexD c0 = {-c0_scale, c0_scale};
+    d_soft = c_mul(c0, c_sub(tm_term, tp_term));
+    d_hard = c_mul(c0, c_add(tm_term, tp_term));
+
+
+    ComplexD integral = (edge.ptd_method == 1)
+        ? dev_along_edge_integral_quadrature(edge, k, s_hat, r_hat, phase_ref)
+        : dev_along_edge_integral(edge, k, s_hat, r_hat, phase_ref);
+
+    ComplexD cs = c_mul(d_soft, integral);
+    ComplexD ch = c_mul(d_hard, integral);
+
+    ComplexD epar = {
+        e_inc[0].re * edge.tangent[0] + e_inc[1].re * edge.tangent[1] + e_inc[2].re * edge.tangent[2],
+        e_inc[0].im * edge.tangent[0] + e_inc[1].im * edge.tangent[1] + e_inc[2].im * edge.tangent[2]
+    };
+    ComplexD eperp[3] = {
+        {e_inc[0].re - epar.re * edge.tangent[0], e_inc[0].im - epar.im * edge.tangent[0]},
+        {e_inc[1].re - epar.re * edge.tangent[1], e_inc[1].im - epar.im * edge.tangent[1]},
+        {e_inc[2].re - epar.re * edge.tangent[2], e_inc[2].im - epar.im * edge.tangent[2]}
+    };
+    double rx = r_hat[0], ry = r_hat[1], rz = r_hat[2];
+    ComplexD along = {
+        eperp[0].re * rx + eperp[1].re * ry + eperp[2].re * rz,
+        eperp[0].im * rx + eperp[1].im * ry + eperp[2].im * rz
+    };
+    ComplexD cpar = c_mul(cs, epar);
+    ComplexD cperp[3];
+    for (int i = 0; i < 3; ++i) {
+        ComplexD diff = {eperp[i].re - along.re * r_hat[i], eperp[i].im - along.im * r_hat[i]};
+        cperp[i] = c_mul(ch, diff);
+    }
+    for (int i = 0; i < 3; ++i) {
+        out[i] = {cpar.re * edge.tangent[i] + cperp[i].re, cpar.im * edge.tangent[i] + cperp[i].im};
+    }
+    ComplexD rad = {
+        out[0].re * rx + out[1].re * ry + out[2].re * rz,
+        out[0].im * rx + out[1].im * ry + out[2].im * rz
+    };
+    for (int i = 0; i < 3; ++i) {
+        out[i].re -= rad.re * r_hat[i];
+        out[i].im -= rad.im * r_hat[i];
+    }
+    return true;
+}
 
 // --- Device Material Reflection Functions ---
 
@@ -497,9 +789,12 @@ template <typename Real>
 __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
                           const Real* __restrict__ normals,   // [3N]
                           const Real* __restrict__ areas,     // [N]
+                          const Real* __restrict__ curvatures, // [N] or null
                           const uint32_t* __restrict__ mat_indices, // [N] or null
                           const UnitParams<Real>* __restrict__ units, // [U]
                           GpuBvhData bvh_data,
+                          const GpuMeshEdge* __restrict__ edges, // [nedges] or null
+                          int nedges,
                           const double* __restrict__ mesh_centroids, // [3*N_mesh] or null
                           const double* __restrict__ mesh_normals,   // [3*N_mesh] or null
                           const double* __restrict__ mesh_areas,     // [N_mesh] or null
@@ -549,6 +844,17 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
                 }
             }
 
+            Real curv_re = Real(1);
+            Real curv_im = Real(0);
+            if (curvatures != nullptr) {
+                Real H = curvatures[t];
+                if (fabs(H) >= Real(1e-9) && p.k > Real(0)) {
+                    Real cos_inc = fabs(nx * to_inc_x + ny * to_inc_y + nz * to_inc_z);
+                    Real cos_clamped = (cos_inc > Real(0.1)) ? cos_inc : Real(0.1);
+                    curv_im = -H / (p.k * cos_clamped);
+                }
+            }
+
             if (wall_type == 0) {
                 // Fast PEC path
                 const Real phi = p.qx * cx + p.qy * cy + p.qz * cz;
@@ -556,8 +862,10 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
                 fsincos(phi, &s_phi, &c_phi);
 
                 const Real w = p.k_eta_4pi * areas[t];
-                const Real w_re = -w * s_phi;
-                const Real w_im =  w * c_phi;
+                const Real raw_re = -w * s_phi;
+                const Real raw_im =  w * c_phi;
+                const Real w_re = raw_re * curv_re - raw_im * curv_im;
+                const Real w_im = raw_re * curv_im + raw_im * curv_re;
 
                 // tx = 0: H transmit
                 {
@@ -627,8 +935,10 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
                     Cplx<Real> f_mat[3];
                     dev_material_facet_field(n_vec, k_vec, r_vec, e_inc, p.k, p.eta, areas[t], c_vec, r_te, r_tm, f_mat);
                     for (int i = 0; i < 3; ++i) {
-                        sum[0][i].re += f_mat[i].re;
-                        sum[0][i].im += f_mat[i].im;
+                        Real re = f_mat[i].re * curv_re - f_mat[i].im * curv_im;
+                        Real im = f_mat[i].re * curv_im + f_mat[i].im * curv_re;
+                        sum[0][i].re += re;
+                        sum[0][i].im += im;
                     }
                 }
                 // tx = 1: V transmit
@@ -637,8 +947,10 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
                     Cplx<Real> f_mat[3];
                     dev_material_facet_field(n_vec, k_vec, r_vec, e_inc, p.k, p.eta, areas[t], c_vec, r_te, r_tm, f_mat);
                     for (int i = 0; i < 3; ++i) {
-                        sum[1][i].re += f_mat[i].re;
-                        sum[1][i].im += f_mat[i].im;
+                        Real re = f_mat[i].re * curv_re - f_mat[i].im * curv_im;
+                        Real im = f_mat[i].re * curv_im + f_mat[i].im * curv_re;
+                        sum[1][i].re += re;
+                        sum[1][i].im += im;
                     }
                 }
             }
@@ -871,6 +1183,47 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
             }
         }
     }
+
+    // Edge / PTD fringe currents
+    if (edges != nullptr && nedges > 0) {
+        double s_hat_d[3] = {static_cast<double>(p.kx), static_cast<double>(p.ky), static_cast<double>(p.kz)};
+        double r_hat_d[3] = {static_cast<double>(p.rx), static_cast<double>(p.ry), static_cast<double>(p.rz)};
+        double k_d = static_cast<double>(p.k);
+        for (int e = static_cast<int>(threadIdx.x); e < nedges; e += kBlock) {
+            const GpuMeshEdge& edge = edges[e];
+            // tx = 0: H transmit
+            {
+                ComplexD e_inc_h[3] = {
+                    {static_cast<double>(p.ehx), 0.0},
+                    {static_cast<double>(p.ehy), 0.0},
+                    {static_cast<double>(p.ehz), 0.0}
+                };
+                ComplexD fv_h[3];
+                if (dev_fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_inc_h, bvh_data.phase_ref, fv_h)) {
+                    for (int i = 0; i < 3; ++i) {
+                        sum[0][i].re += static_cast<Real>(fv_h[i].re);
+                        sum[0][i].im += static_cast<Real>(fv_h[i].im);
+                    }
+                }
+            }
+            // tx = 1: V transmit
+            {
+                ComplexD e_inc_v[3] = {
+                    {static_cast<double>(p.evx), 0.0},
+                    {static_cast<double>(p.evy), 0.0},
+                    {static_cast<double>(p.evz), 0.0}
+                };
+                ComplexD fv_v[3];
+                if (dev_fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_inc_v, bvh_data.phase_ref, fv_v)) {
+                    for (int i = 0; i < 3; ++i) {
+                        sum[1][i].re += static_cast<Real>(fv_v[i].re);
+                        sum[1][i].im += static_cast<Real>(fv_v[i].im);
+                    }
+                }
+            }
+        }
+    }
+
     const int lane = static_cast<int>(threadIdx.x);
     for (int tx = 0; tx < 2; ++tx)
         for (int i = 0; i < 3; ++i) {
@@ -904,9 +1257,12 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
 __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
                                 const float* __restrict__ normals,   // [3N]
                                 const float* __restrict__ areas,     // [N]
+                                const float* __restrict__ curvatures, // [N] or null
                                 const uint32_t* __restrict__ mat_indices,
                                 const UnitParams<double>* __restrict__ units, // [U]
                                 GpuBvhData bvh_data,
+                                const GpuMeshEdge* __restrict__ edges, // [nedges] or null
+                                int nedges,
                                 const double* __restrict__ mesh_centroids,
                                 const double* __restrict__ mesh_normals,
                                 const double* __restrict__ mesh_areas,
@@ -949,6 +1305,17 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
         if (is_lit) {
             ++lit;
 
+            double curv_re = 1.0;
+            double curv_im = 0.0;
+            if (curvatures != nullptr) {
+                double H = static_cast<double>(curvatures[t]);
+                if (fabs(H) >= 1e-9 && p.k > 0.0) {
+                    double cos_inc = fabs(nx * to_inc_x + ny * to_inc_y + nz * to_inc_z);
+                    double cos_clamped = (cos_inc > 0.1) ? cos_inc : 0.1;
+                    curv_im = -H / (p.k * cos_clamped);
+                }
+            }
+
             int mat_id = 0;
             uint8_t wall_type = 0;
             if (p.has_materials) {
@@ -965,8 +1332,10 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
                 fsincos(phi, &s_phi, &c_phi);
 
                 const double w = p.k_eta_4pi * area_t;
-                const double w_re = -w * s_phi;
-                const double w_im =  w * c_phi;
+                const double raw_re = -w * s_phi;
+                const double raw_im =  w * c_phi;
+                const double w_re = raw_re * curv_re - raw_im * curv_im;
+                const double w_im = raw_re * curv_im + raw_im * curv_re;
 
                 // tx = 0: H transmit
                 {
@@ -1032,8 +1401,10 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
                     Cplx<double> f_mat[3];
                     dev_material_facet_field(n_vec, k_vec, r_vec, e_inc, p.k, p.eta, area_t, c_vec, r_te, r_tm, f_mat);
                     for (int i = 0; i < 3; ++i) {
-                        sum[0][i].re += f_mat[i].re;
-                        sum[0][i].im += f_mat[i].im;
+                        double re = f_mat[i].re * curv_re - f_mat[i].im * curv_im;
+                        double im = f_mat[i].re * curv_im + f_mat[i].im * curv_re;
+                        sum[0][i].re += re;
+                        sum[0][i].im += im;
                     }
                 }
                 // tx = 1: V transmit
@@ -1042,8 +1413,10 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
                     Cplx<double> f_mat[3];
                     dev_material_facet_field(n_vec, k_vec, r_vec, e_inc, p.k, p.eta, area_t, c_vec, r_te, r_tm, f_mat);
                     for (int i = 0; i < 3; ++i) {
-                        sum[1][i].re += f_mat[i].re;
-                        sum[1][i].im += f_mat[i].im;
+                        double re = f_mat[i].re * curv_re - f_mat[i].im * curv_im;
+                        double im = f_mat[i].re * curv_im + f_mat[i].im * curv_re;
+                        sum[1][i].re += re;
+                        sum[1][i].im += im;
                     }
                 }
             }
@@ -1262,6 +1635,47 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
             }
         }
     }
+
+    // Edge / PTD fringe currents
+    if (edges != nullptr && nedges > 0) {
+        double s_hat_d[3] = {p.kx, p.ky, p.kz};
+        double r_hat_d[3] = {p.rx, p.ry, p.rz};
+        double k_d = p.k;
+        for (int e = static_cast<int>(threadIdx.x); e < nedges; e += kBlock) {
+            const GpuMeshEdge& edge = edges[e];
+            // tx = 0: H transmit
+            {
+                ComplexD e_inc_h[3] = {
+                    {p.ehx, 0.0},
+                    {p.ehy, 0.0},
+                    {p.ehz, 0.0}
+                };
+                ComplexD fv_h[3];
+                if (dev_fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_inc_h, bvh_data.phase_ref, fv_h)) {
+                    for (int i = 0; i < 3; ++i) {
+                        sum[0][i].re += fv_h[i].re;
+                        sum[0][i].im += fv_h[i].im;
+                    }
+                }
+            }
+            // tx = 1: V transmit
+            {
+                ComplexD e_inc_v[3] = {
+                    {p.evx, 0.0},
+                    {p.evy, 0.0},
+                    {p.evz, 0.0}
+                };
+                ComplexD fv_v[3];
+                if (dev_fringe_vector(edge, k_d, s_hat_d, r_hat_d, e_inc_v, bvh_data.phase_ref, fv_v)) {
+                    for (int i = 0; i < 3; ++i) {
+                        sum[1][i].re += fv_v[i].re;
+                        sum[1][i].im += fv_v[i].im;
+                    }
+                }
+            }
+        }
+    }
+
     const int lane = static_cast<int>(threadIdx.x);
     for (int tx = 0; tx < 2; ++tx)
         for (int i = 0; i < 3; ++i) {
@@ -1359,7 +1773,6 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
                           const FringeOptions& fringe,
                           const GoOptions& go,
                           const MaterialOptions& material) {
-    (void)fringe;
     PoResult out;
     const auto& medium = resolved["frequency"]["medium"];
     const double eps_r = medium["epsilon_r"].get<double>();
@@ -1394,10 +1807,21 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     const HalfMeshResult half_result = use_symmetry ? extract_half_mesh(mesh, sym_opts) : HalfMeshResult{mesh, {}, {}};
     const NormalizedMesh& eff_mesh = use_symmetry ? half_result.mesh : mesh;
 
+    bool curvature_correction = false;
+    if (resolved.contains("solver") && resolved["solver"].contains("po_options")) {
+        curvature_correction = resolved["solver"]["po_options"].value("curvature_correction", false);
+    }
+    const std::vector<CurvatureInfo> curvatures = curvature_correction ? estimate_mesh_curvatures(mesh) : std::vector<CurvatureInfo>{};
+
     std::vector<Real> h_cent, h_norm, h_area;
     h_cent.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
     h_norm.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
     h_area.reserve(eff_mesh.triangles.size() * (use_symmetry ? 2 : 1));
+
+    std::vector<Real> h_curv;
+    if (curvature_correction) {
+        h_curv.reserve(eff_mesh.triangles.size() * (use_symmetry ? 2 : 1));
+    }
 
     std::vector<uint32_t> h_mat_idx;
     bool has_materials = (material.enabled && (material.wall != WallType::Pec || !material.facet_material_indices.empty()));
@@ -1424,6 +1848,12 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             uint32_t midx = (orig_idx < material.facet_material_indices.size()) ? material.facet_material_indices[orig_idx] : 0;
             h_mat_idx.push_back(midx);
         }
+        if (curvature_correction) {
+            Real curv_val = (orig_idx < curvatures.size() && !curvatures[orig_idx].is_discontinuous)
+                ? static_cast<Real>(curvatures[orig_idx].mean_curvature)
+                : Real(0);
+            h_curv.push_back(curv_val);
+        }
 
         if (use_symmetry) {
             const double coord = get_symmetry_coord(c, sym_plane);
@@ -1442,6 +1872,14 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
                     uint32_t midx = (orig_idx < material.facet_material_indices.size()) ? material.facet_material_indices[orig_idx] : 0;
                     h_mat_idx.push_back(midx);
                 }
+                if (curvature_correction) {
+                    const uint32_t refl_idx = half_result.reflected_indices[t];
+                    const uint32_t cur_idx = (refl_idx != UINT32_MAX) ? refl_idx : orig_idx;
+                    Real curv_val = (cur_idx < curvatures.size() && !curvatures[cur_idx].is_discontinuous)
+                        ? static_cast<Real>(curvatures[cur_idx].mean_curvature)
+                        : Real(0);
+                    h_curv.push_back(curv_val);
+                }
             }
         }
     }
@@ -1458,6 +1896,13 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     CUDA_CHECK(cudaMemcpy(d_area.get(), h_area.data(), h_area.size() * sizeof(Real),
                           cudaMemcpyHostToDevice));
 
+    std::unique_ptr<DeviceBuffer<Real>> d_curv;
+    if (curvature_correction && !h_curv.empty()) {
+        d_curv = std::make_unique<DeviceBuffer<Real>>(h_curv.size());
+        CUDA_CHECK(cudaMemcpy(d_curv->get(), h_curv.data(), h_curv.size() * sizeof(Real),
+                              cudaMemcpyHostToDevice));
+    }
+
     DeviceBuffer<uint32_t> d_mat_idx(h_mat_idx.size());
     if (!h_mat_idx.empty()) {
         CUDA_CHECK(cudaMemcpy(d_mat_idx.get(), h_mat_idx.data(), h_mat_idx.size() * sizeof(uint32_t),
@@ -1465,8 +1910,44 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     }
     nvtxRangePop();
 
+    // Edge model upload for PTD fringe diffraction
+    std::vector<GpuMeshEdge> h_edges;
+    int nedges = 0;
+    if (fringe.enabled && fringe.edges != nullptr) {
+        h_edges.reserve(fringe.edges->edges.size());
+        const int ptd_m = (fringe.method == "ptd_full") ? 1 : 0;
+        for (const auto& edge : fringe.edges->edges) {
+            GpuMeshEdge ge{};
+            ge.p0[0] = edge.p0.x; ge.p0[1] = edge.p0.y; ge.p0[2] = edge.p0.z;
+            ge.p1[0] = edge.p1.x; ge.p1[1] = edge.p1.y; ge.p1[2] = edge.p1.z;
+            double t_len = edge.tangent.length();
+            geom::Vec3d t = (t_len > 0.0) ? edge.tangent * (1.0 / t_len) : geom::Vec3d{1.0, 0.0, 0.0};
+            ge.tangent[0] = t.x; ge.tangent[1] = t.y; ge.tangent[2] = t.z;
+            ge.length = edge.length;
+            ge.n0[0] = edge.n0.x; ge.n0[1] = edge.n0.y; ge.n0[2] = edge.n0.z;
+            ge.n1[0] = edge.n1.x; ge.n1[1] = edge.n1.y; ge.n1[2] = edge.n1.z;
+            ge.face0_dir[0] = edge.face0_dir.x; ge.face0_dir[1] = edge.face0_dir.y; ge.face0_dir[2] = edge.face0_dir.z;
+            ge.face1_dir[0] = edge.face1_dir.x; ge.face1_dir[1] = edge.face1_dir.y; ge.face1_dir[2] = edge.face1_dir.z;
+            ge.wedge_n = edge.wedge_n;
+            ge.boundary = edge.boundary ? 1 : 0;
+            ge.ptd_method = ptd_m;
+            h_edges.push_back(ge);
+        }
+        nedges = static_cast<int>(h_edges.size());
+    }
+
+    std::unique_ptr<DeviceBuffer<GpuMeshEdge>> d_edges;
+    if (nedges > 0) {
+        d_edges = std::make_unique<DeviceBuffer<GpuMeshEdge>>(h_edges.size());
+        CUDA_CHECK(cudaMemcpy(d_edges->get(), h_edges.data(), h_edges.size() * sizeof(GpuMeshEdge),
+                              cudaMemcpyHostToDevice));
+    }
+
     // BVH construction & upload for GO (Shadowing / Multi-Bounce)
     GpuBvhData bvh_data{};
+    bvh_data.phase_ref[0] = phase_ref.x;
+    bvh_data.phase_ref[1] = phase_ref.y;
+    bvh_data.phase_ref[2] = phase_ref.z;
     std::unique_ptr<DeviceBuffer<GpuBvhNode>> d_bvh_nodes;
     std::unique_ptr<DeviceBuffer<uint32_t>> d_bvh_order;
     std::unique_ptr<DeviceBuffer<double>> d_tri_verts;
@@ -1659,8 +2140,11 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
         nvtxRangePushA("po_gpu_kernel_launch");
         po_kernel<Real>
             <<<static_cast<unsigned>(count), kBlock>>>(d_cent.get(), d_norm.get(), d_area.get(),
+                                                       d_curv ? d_curv->get() : nullptr,
                                                        d_mat_idx.get(),
                                                        d_units.get(), bvh_data,
+                                                       d_edges ? d_edges->get() : nullptr,
+                                                       nedges,
                                                        d_mesh_cent ? d_mesh_cent->get() : nullptr,
                                                        d_mesh_norm ? d_mesh_norm->get() : nullptr,
                                                        d_mesh_area ? d_mesh_area->get() : nullptr,
@@ -1707,6 +2191,45 @@ PoResult solve_typed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
         nvtxRangePop();
         nvtxRangePop(); // po_gpu_batch
     }
+
+    if (fringe.enabled && fringe.edges != nullptr && !fringe.edges->edges.empty()) {
+        size_t fringe_skipped = 0;
+        const double k_ref = 2.0 * 3.141592653589793 * plan.frequencies_hz[0] * std::sqrt(eps_r * mu_r) / kSpeedOfLight;
+        const PtdMethod ptd_m = (fringe.method == "ptd_full") ? PtdMethod::Full : PtdMethod::Lite;
+        const std::array<std::complex<double>, 3> e_dummy = {{{1.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}}};
+        for (const auto& u : units) {
+            const Direction& dir = plan.directions[u.second];
+            const geom::Vec3d s_hat_d = dir.k_hat;
+            const geom::Vec3d r_hat_d = dir.is_bistatic ? dir.r_obs_hat : (dir.k_hat * -1.0);
+            for (const auto& edge : fringe.edges->edges) {
+                if (!fringe_vector(edge, k_ref, s_hat_d, r_hat_d, e_dummy, phase_ref, ptd_m)) {
+                    ++fringe_skipped;
+                }
+            }
+        }
+        if (fringe_skipped > 0) {
+            out.warnings.push_back("fringe correction skipped " +
+                                   std::to_string(fringe_skipped) +
+                                   " edge-sample(s): no transverse frame (end-on incidence)");
+        }
+
+        bool has_non_pec = false;
+        for (const auto& edge : fringe.edges->edges) {
+            if (edge.tri0 >= 0 && static_cast<size_t>(edge.tri0) < mesh.triangle_tags.size() &&
+                mesh.triangle_tags[edge.tri0] != "pec") {
+                has_non_pec = true;
+                break;
+            }
+            if (edge.tri1 >= 0 && static_cast<size_t>(edge.tri1) < mesh.triangle_tags.size() &&
+                mesh.triangle_tags[edge.tri1] != "pec") {
+                has_non_pec = true;
+                break;
+            }
+        }
+        if (has_non_pec) {
+            out.warnings.push_back("edge diffraction enabled with non-PEC faces; PTD assumes PEC wedge");
+        }
+    }
     return out;
 }
 
@@ -1716,7 +2239,6 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
                           const FringeOptions& fringe,
                           const GoOptions& go,
                           const MaterialOptions& material) {
-    (void)fringe;
     PoResult out;
     const auto& medium = resolved["frequency"]["medium"];
     const double eps_r = medium["epsilon_r"].get<double>();
@@ -1751,10 +2273,21 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     const HalfMeshResult half_result = use_symmetry ? extract_half_mesh(mesh, sym_opts) : HalfMeshResult{mesh, {}, {}};
     const NormalizedMesh& eff_mesh = use_symmetry ? half_result.mesh : mesh;
 
+    bool curvature_correction = false;
+    if (resolved.contains("solver") && resolved["solver"].contains("po_options")) {
+        curvature_correction = resolved["solver"]["po_options"].value("curvature_correction", false);
+    }
+    const std::vector<CurvatureInfo> curvatures = curvature_correction ? estimate_mesh_curvatures(mesh) : std::vector<CurvatureInfo>{};
+
     std::vector<float> h_cent, h_norm, h_area;
     h_cent.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
     h_norm.reserve(eff_mesh.triangles.size() * (use_symmetry ? 6 : 3));
     h_area.reserve(eff_mesh.triangles.size() * (use_symmetry ? 2 : 1));
+
+    std::vector<float> h_curv;
+    if (curvature_correction) {
+        h_curv.reserve(eff_mesh.triangles.size() * (use_symmetry ? 2 : 1));
+    }
 
     std::vector<uint32_t> h_mat_idx;
     bool has_materials = (material.enabled && (material.wall != WallType::Pec || !material.facet_material_indices.empty()));
@@ -1781,6 +2314,12 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
             uint32_t midx = (orig_idx < material.facet_material_indices.size()) ? material.facet_material_indices[orig_idx] : 0;
             h_mat_idx.push_back(midx);
         }
+        if (curvature_correction) {
+            float curv_val = (orig_idx < curvatures.size() && !curvatures[orig_idx].is_discontinuous)
+                ? static_cast<float>(curvatures[orig_idx].mean_curvature)
+                : 0.0f;
+            h_curv.push_back(curv_val);
+        }
 
         if (use_symmetry) {
             const double coord = get_symmetry_coord(c, sym_plane);
@@ -1799,6 +2338,14 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
                     uint32_t midx = (orig_idx < material.facet_material_indices.size()) ? material.facet_material_indices[orig_idx] : 0;
                     h_mat_idx.push_back(midx);
                 }
+                if (curvature_correction) {
+                    const uint32_t refl_idx = half_result.reflected_indices[t];
+                    const uint32_t cur_idx = (refl_idx != UINT32_MAX) ? refl_idx : orig_idx;
+                    float curv_val = (cur_idx < curvatures.size() && !curvatures[cur_idx].is_discontinuous)
+                        ? static_cast<float>(curvatures[cur_idx].mean_curvature)
+                        : 0.0f;
+                    h_curv.push_back(curv_val);
+                }
             }
         }
     }
@@ -1815,6 +2362,13 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     CUDA_CHECK(cudaMemcpy(d_area.get(), h_area.data(), h_area.size() * sizeof(float),
                           cudaMemcpyHostToDevice));
 
+    std::unique_ptr<DeviceBuffer<float>> d_curv;
+    if (curvature_correction && !h_curv.empty()) {
+        d_curv = std::make_unique<DeviceBuffer<float>>(h_curv.size());
+        CUDA_CHECK(cudaMemcpy(d_curv->get(), h_curv.data(), h_curv.size() * sizeof(float),
+                              cudaMemcpyHostToDevice));
+    }
+
     DeviceBuffer<uint32_t> d_mat_idx(h_mat_idx.size());
     if (!h_mat_idx.empty()) {
         CUDA_CHECK(cudaMemcpy(d_mat_idx.get(), h_mat_idx.data(), h_mat_idx.size() * sizeof(uint32_t),
@@ -1822,8 +2376,44 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
     }
     nvtxRangePop();
 
+    // Edge model upload for PTD fringe diffraction
+    std::vector<GpuMeshEdge> h_edges;
+    int nedges = 0;
+    if (fringe.enabled && fringe.edges != nullptr) {
+        h_edges.reserve(fringe.edges->edges.size());
+        const int ptd_m = (fringe.method == "ptd_full") ? 1 : 0;
+        for (const auto& edge : fringe.edges->edges) {
+            GpuMeshEdge ge{};
+            ge.p0[0] = edge.p0.x; ge.p0[1] = edge.p0.y; ge.p0[2] = edge.p0.z;
+            ge.p1[0] = edge.p1.x; ge.p1[1] = edge.p1.y; ge.p1[2] = edge.p1.z;
+            double t_len = edge.tangent.length();
+            geom::Vec3d t = (t_len > 0.0) ? edge.tangent * (1.0 / t_len) : geom::Vec3d{1.0, 0.0, 0.0};
+            ge.tangent[0] = t.x; ge.tangent[1] = t.y; ge.tangent[2] = t.z;
+            ge.length = edge.length;
+            ge.n0[0] = edge.n0.x; ge.n0[1] = edge.n0.y; ge.n0[2] = edge.n0.z;
+            ge.n1[0] = edge.n1.x; ge.n1[1] = edge.n1.y; ge.n1[2] = edge.n1.z;
+            ge.face0_dir[0] = edge.face0_dir.x; ge.face0_dir[1] = edge.face0_dir.y; ge.face0_dir[2] = edge.face0_dir.z;
+            ge.face1_dir[0] = edge.face1_dir.x; ge.face1_dir[1] = edge.face1_dir.y; ge.face1_dir[2] = edge.face1_dir.z;
+            ge.wedge_n = edge.wedge_n;
+            ge.boundary = edge.boundary ? 1 : 0;
+            ge.ptd_method = ptd_m;
+            h_edges.push_back(ge);
+        }
+        nedges = static_cast<int>(h_edges.size());
+    }
+
+    std::unique_ptr<DeviceBuffer<GpuMeshEdge>> d_edges;
+    if (nedges > 0) {
+        d_edges = std::make_unique<DeviceBuffer<GpuMeshEdge>>(h_edges.size());
+        CUDA_CHECK(cudaMemcpy(d_edges->get(), h_edges.data(), h_edges.size() * sizeof(GpuMeshEdge),
+                              cudaMemcpyHostToDevice));
+    }
+
     // BVH construction & upload for GO
     GpuBvhData bvh_data{};
+    bvh_data.phase_ref[0] = phase_ref.x;
+    bvh_data.phase_ref[1] = phase_ref.y;
+    bvh_data.phase_ref[2] = phase_ref.z;
     std::unique_ptr<DeviceBuffer<GpuBvhNode>> d_bvh_nodes;
     std::unique_ptr<DeviceBuffer<uint32_t>> d_bvh_order;
     std::unique_ptr<DeviceBuffer<double>> d_tri_verts;
@@ -2016,8 +2606,11 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
         nvtxRangePushA("po_gpu_kernel_launch");
         po_mixed_kernel
             <<<static_cast<unsigned>(count), kBlock>>>(d_cent.get(), d_norm.get(), d_area.get(),
+                                                       d_curv ? d_curv->get() : nullptr,
                                                        d_mat_idx.get(),
                                                        d_units.get(), bvh_data,
+                                                       d_edges ? d_edges->get() : nullptr,
+                                                       nedges,
                                                        d_mesh_cent ? d_mesh_cent->get() : nullptr,
                                                        d_mesh_norm ? d_mesh_norm->get() : nullptr,
                                                        d_mesh_area ? d_mesh_area->get() : nullptr,
@@ -2062,6 +2655,45 @@ PoResult solve_mixed_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
         }
         nvtxRangePop();
         nvtxRangePop(); // po_gpu_batch
+    }
+
+    if (fringe.enabled && fringe.edges != nullptr && !fringe.edges->edges.empty()) {
+        size_t fringe_skipped = 0;
+        const double k_ref = 2.0 * 3.141592653589793 * plan.frequencies_hz[0] * std::sqrt(eps_r * mu_r) / kSpeedOfLight;
+        const PtdMethod ptd_m = (fringe.method == "ptd_full") ? PtdMethod::Full : PtdMethod::Lite;
+        const std::array<std::complex<double>, 3> e_dummy = {{{1.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}}};
+        for (const auto& u : units) {
+            const Direction& dir = plan.directions[u.second];
+            const geom::Vec3d s_hat_d = dir.k_hat;
+            const geom::Vec3d r_hat_d = dir.is_bistatic ? dir.r_obs_hat : (dir.k_hat * -1.0);
+            for (const auto& edge : fringe.edges->edges) {
+                if (!fringe_vector(edge, k_ref, s_hat_d, r_hat_d, e_dummy, phase_ref, ptd_m)) {
+                    ++fringe_skipped;
+                }
+            }
+        }
+        if (fringe_skipped > 0) {
+            out.warnings.push_back("fringe correction skipped " +
+                                   std::to_string(fringe_skipped) +
+                                   " edge-sample(s): no transverse frame (end-on incidence)");
+        }
+
+        bool has_non_pec = false;
+        for (const auto& edge : fringe.edges->edges) {
+            if (edge.tri0 >= 0 && static_cast<size_t>(edge.tri0) < mesh.triangle_tags.size() &&
+                mesh.triangle_tags[edge.tri0] != "pec") {
+                has_non_pec = true;
+                break;
+            }
+            if (edge.tri1 >= 0 && static_cast<size_t>(edge.tri1) < mesh.triangle_tags.size() &&
+                mesh.triangle_tags[edge.tri1] != "pec") {
+                has_non_pec = true;
+                break;
+            }
+        }
+        if (has_non_pec) {
+            out.warnings.push_back("edge diffraction enabled with non-PEC faces; PTD assumes PEC wedge");
+        }
     }
     return out;
 }

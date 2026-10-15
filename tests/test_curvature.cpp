@@ -170,17 +170,30 @@ TEST(Curvature, SphereSolveCurvatureCorrectionEffect) {
     EXPECT_NE(res_on.samples[0].rcs_sqm, res_off.samples[0].rcs_sqm);
 }
 
-TEST(Curvature, CudaAcceleratorRejection) {
+TEST(Curvature, CudaAcceleratorSupported) {
+    if (!cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; skipping";
     NormalizedMesh plate = make_flat_quad();
     SamplePlan plan = make_simple_plan();
 
-    nlohmann::json cfg = base_resolved().value;
-    cfg["execution"]["accelerator"] = "cuda";
-    cfg["solver"]["po_options"]["curvature_correction"] = true;
+    nlohmann::json cfg_cpu = base_resolved().value;
+    cfg_cpu["execution"]["accelerator"] = "cpu";
+    cfg_cpu["solver"]["po_options"]["curvature_correction"] = true;
 
     FringeOptions fringe;
     GoOptions go;
     MaterialOptions mat;
 
-    EXPECT_THROW(solve_po(plate, plan, cfg, fringe, go, mat), cuda::CudaError);
+    PoResult res_cpu = solve_po(plate, plan, cfg_cpu, fringe, go, mat);
+
+    nlohmann::json cfg_gpu = cfg_cpu;
+    cfg_gpu["execution"]["accelerator"] = "cuda";
+
+    PoResult res_gpu = solve_po(plate, plan, cfg_gpu, fringe, go, mat);
+
+    ASSERT_EQ(res_cpu.samples.size(), res_gpu.samples.size());
+    for (size_t i = 0; i < res_cpu.samples.size(); ++i) {
+        EXPECT_NEAR(res_gpu.samples[i].rcs_sqm, res_cpu.samples[i].rcs_sqm, 1e-12);
+        EXPECT_NEAR(std::abs(res_gpu.samples[i].scattering - res_cpu.samples[i].scattering), 0.0, 1e-9);
+    }
 }
+

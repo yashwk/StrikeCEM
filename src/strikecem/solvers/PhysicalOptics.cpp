@@ -638,13 +638,6 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
     if (fringe.enabled) {
         if (fringe.edges == nullptr)
             throw std::invalid_argument("fringe correction enabled without an edge model");
-        if (resolved["execution"].value("accelerator", "cpu") == "cuda")
-            throw cuda::CudaError("fringe correction is CPU-only in v1");
-    }
-    if (resolved.contains("solver") && resolved["solver"].contains("po_options") &&
-        resolved["solver"]["po_options"].value("curvature_correction", false) &&
-        resolved["execution"].value("accelerator", "cpu") == "cuda") {
-        throw cuda::CudaError("curvature correction is CPU-only in v1");
     }
     if (go.max_bounces < 1 || go.max_bounces > 3)
         throw std::invalid_argument("max_bounces must be 1, 2, or 3");
