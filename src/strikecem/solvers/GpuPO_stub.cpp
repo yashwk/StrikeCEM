@@ -22,12 +22,14 @@ std::string active_device_name(const nlohmann::json& resolved) {
     throw CudaError("built without CUDA support");
 }
 
-PoResult solve_po_cuda(const NormalizedMesh&, const SamplePlan&, const nlohmann::json&, int) {
+PoResult solve_po_cuda(const NormalizedMesh&, const SamplePlan&, const nlohmann::json&, int,
+                       const FringeOptions&, const GoOptions&, const MaterialOptions&) {
     throw CudaError("built without CUDA support");
 }
 
 PoResult solve_po_cuda_units(const NormalizedMesh&, const SamplePlan&, const nlohmann::json&, int,
-                             const std::vector<std::pair<uint32_t, uint32_t>>&) {
+                             const std::vector<std::pair<uint32_t, uint32_t>>&,
+                             const FringeOptions&, const GoOptions&, const MaterialOptions&) {
     throw CudaError("built without CUDA support");
 }
 

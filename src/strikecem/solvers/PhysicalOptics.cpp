@@ -646,9 +646,6 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
         resolved["execution"].value("accelerator", "cpu") == "cuda") {
         throw cuda::CudaError("curvature correction is CPU-only in v1");
     }
-    if ((go.shadowing || go.max_bounces > 1) &&
-        resolved["execution"].value("accelerator", "cpu") == "cuda")
-        throw cuda::CudaError("GO corrections are CPU-only in v1");
     if (go.max_bounces < 1 || go.max_bounces > 3)
         throw std::invalid_argument("max_bounces must be 1, 2, or 3");
     bool any_non_pec = false;
@@ -669,15 +666,13 @@ PoResult solve_backend(const NormalizedMesh& mesh, const SamplePlan& plan,
                 throw std::invalid_argument("coated frequency tables are future work");
         }
         if (any_non_pec) {
-            if (resolved["execution"].value("accelerator", "cpu") == "cuda")
-                throw cuda::CudaError("material walls are CPU-only in v1");
             if (go.max_bounces > 1)
                 throw std::invalid_argument("multi-bounce GO requires PEC walls in v1");
         }
     }
     if (resolved["execution"].value("accelerator", "cpu") == "cuda") {
         const int device = resolved["execution"].value("cuda_device_id", 0);
-        return cuda::solve_po_cuda_units(mesh, plan, resolved, device, units);
+        return cuda::solve_po_cuda_units(mesh, plan, resolved, device, units, fringe, go, material);
     }
     if (precision == "float32")
         return solve_typed<float>(mesh, plan, resolved, threads, units, fringe, go, material);

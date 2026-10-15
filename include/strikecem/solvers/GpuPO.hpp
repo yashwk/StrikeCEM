@@ -51,11 +51,17 @@ std::string active_device_name(const nlohmann::json& resolved);
 
 // Full-plan GPU solve with correct global sample_ids.
 PoResult solve_po_cuda(const NormalizedMesh& mesh, const SamplePlan& plan,
-                       const nlohmann::json& resolved, int device_id);
+                       const nlohmann::json& resolved, int device_id,
+                       const FringeOptions& fringe = {},
+                       const GoOptions& go = {},
+                       const MaterialOptions& material = {});
 
 // Subset GPU solve for resume (same contract as solve_po_units).
 PoResult solve_po_cuda_units(const NormalizedMesh& mesh, const SamplePlan& plan,
                              const nlohmann::json& resolved, int device_id,
-                             const std::vector<std::pair<uint32_t, uint32_t>>& units);
+                             const std::vector<std::pair<uint32_t, uint32_t>>& units,
+                             const FringeOptions& fringe = {},
+                             const GoOptions& go = {},
+                             const MaterialOptions& material = {});
 
 } // namespace strikecem::cuda

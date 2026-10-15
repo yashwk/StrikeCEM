@@ -371,8 +371,16 @@ TEST(Material, MultiMaterialGuards) {
     mixed_opts.models = {pec_model, glass_model};
     mixed_opts.facet_material_indices = {0, 1};
 
-    // CUDA with non-PEC facet throws CudaError
-    EXPECT_THROW(strikecem::solve_po(mesh, plan, resolved, {}, {}, mixed_opts), strikecem::cuda::CudaError);
+#ifdef SCEM_ENABLE_CUDA
+    if (strikecem::cuda::cuda_available()) {
+        resolved["execution"]["accelerator"] = "cpu";
+        const auto cpu_res = strikecem::solve_po(mesh, plan, resolved, {}, {}, mixed_opts);
+        resolved["execution"]["accelerator"] = "cuda";
+        const auto gpu_res = strikecem::solve_po(mesh, plan, resolved, {}, {}, mixed_opts);
+        ASSERT_EQ(gpu_res.samples.size(), cpu_res.samples.size());
+        EXPECT_NEAR(std::abs(gpu_res.samples[0].scattering - cpu_res.samples[0].scattering), 0.0, 1e-9);
+    }
+#endif
 
     // Multi-bounce GO with non-PEC facet throws invalid_argument
     resolved["execution"]["accelerator"] = "cpu";

@@ -184,6 +184,237 @@ TEST(Gpu, DenseAzimuthSweepMatchesCpu) {
     expect_close(gpu, cpu, 1e-9, 1e-12);
 }
 
+strikecem::NormalizedMesh make_test_dihedral(int n) {
+    strikecem::NormalizedMesh m;
+    auto h = [&](int i, int j) { return uint32_t(j * (n + 1) + i); };
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i) m.vertices.push_back({double(i) / n, double(j) / n, 0.0});
+    const uint32_t vbase = uint32_t(m.vertices.size());
+    for (int j = 0; j <= n; ++j)
+        for (int k = 0; k <= n; ++k) m.vertices.push_back({0.0, double(j) / n, double(k) / n});
+    auto w = [&](int j, int k) { return vbase + uint32_t(j * (n + 1) + k); };
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            m.triangles.push_back({h(i, j), h(i + 1, j), h(i + 1, j + 1)});
+            m.triangles.push_back({h(i, j), h(i + 1, j + 1), h(i, j + 1)});
+            m.normals.push_back({0, 0, 1});
+            m.normals.push_back({0, 0, 1});
+            m.areas.push_back(0.5 / (n * n));
+            m.areas.push_back(0.5 / (n * n));
+        }
+    for (int j = 0; j < n; ++j)
+        for (int k = 0; k < n; ++k) {
+            m.triangles.push_back({w(j, k), w(j + 1, k), w(j + 1, k + 1)});
+            m.triangles.push_back({w(j, k), w(j + 1, k + 1), w(j, k + 1)});
+            m.normals.push_back({1, 0, 0});
+            m.normals.push_back({1, 0, 0});
+            m.areas.push_back(0.5 / (n * n));
+            m.areas.push_back(0.5 / (n * n));
+        }
+    m.report.bbox_min = {0, 0, 0};
+    m.report.bbox_max = {1, 1, 1};
+    return m;
+}
+
+strikecem::NormalizedMesh make_test_trihedral(int n) {
+    strikecem::NormalizedMesh m;
+    auto grid = [&](double ox, double oy, double oz, double ax, double ay, double az, double bx,
+                    double by, double bz) {
+        const uint32_t base = uint32_t(m.vertices.size());
+        for (int j = 0; j <= n; ++j)
+            for (int i = 0; i <= n; ++i)
+                m.vertices.push_back({ox + (ax * i + bx * j) / n, oy + (ay * i + by * j) / n,
+                                      oz + (az * i + bz * j) / n});
+        return base;
+    };
+    auto quad = [&](uint32_t a, uint32_t b, uint32_t c, uint32_t d, geom::Vec3d nrm) {
+        m.triangles.push_back({a, b, c});
+        m.triangles.push_back({a, c, d});
+        m.normals.push_back(nrm);
+        m.normals.push_back(nrm);
+        m.areas.push_back(0.5 / (n * n));
+        m.areas.push_back(0.5 / (n * n));
+    };
+    const uint32_t h = grid(0, 0, 0, 1, 0, 0, 0, 1, 0);
+    const uint32_t x = grid(0, 0, 0, 0, 1, 0, 0, 0, 1);
+    const uint32_t y = grid(0, 0, 0, 1, 0, 0, 0, 0, 1);
+    auto id = [&](uint32_t base, int i, int j) { return base + uint32_t(j * (n + 1) + i); };
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            quad(id(h, i, j), id(h, i + 1, j), id(h, i + 1, j + 1), id(h, i, j + 1), {0, 0, 1});
+            quad(id(x, i, j), id(x, i + 1, j), id(x, i + 1, j + 1), id(x, i, j + 1), {1, 0, 0});
+            quad(id(y, i, j), id(y, i + 1, j), id(y, i + 1, j + 1), id(y, i, j + 1), {0, 1, 0});
+        }
+    m.report.bbox_min = {0, 0, 0};
+    m.report.bbox_max = {1, 1, 1};
+    return m;
+}
+
+TEST(Gpu, ShadowingMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_dihedral.json");
+    const auto plan = make_plan({10e9}, {{0.0, -45.0}, {90.0, -45.0}}, {"HH", "VV"});
+    const strikecem::GoOptions shade{true, 1};
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, {}, shade);
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, {}, shade);
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, TwoBounceDihedralMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const auto c = load_case("valid_dihedral.json");
+    const auto mesh = make_test_dihedral(6);
+    const auto plan = make_plan({10e9}, {{180.0, -45.0}}, {"HH", "VV"});
+    const strikecem::GoOptions go{false, 2};
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(mesh, plan, cpu_cfg, {}, go);
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(mesh, plan, gpu_cfg, {}, go);
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, TwoBounceDihedralAnalyticConvergence) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const auto c = load_case("valid_dihedral.json");
+    const auto mesh = make_test_dihedral(10);
+    const auto plan = make_plan({1e9}, {{180.0, -45.0}}, {"HH", "VV"});
+    const strikecem::GoOptions go{false, 2};
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(mesh, plan, gpu_cfg, {}, go);
+    const double lambda = strikecem::kSpeedOfLight / 1e9;
+    const double analytic = 8.0 * 3.14159265358979323846 / (lambda * lambda);
+    for (size_t i = 0; i < 2; ++i) {
+        const double ratio = gpu.samples[i].rcs_sqm / analytic;
+        EXPECT_GT(ratio, 0.8);
+        EXPECT_LT(ratio, 1.2);
+    }
+}
+
+TEST(Gpu, ThreeBounceTrihedralMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const auto c = load_case("valid_dihedral.json");
+    const auto mesh = make_test_trihedral(4);
+    const double q = 1.0 / std::sqrt(3.0);
+    const double az_deg = 180.0 + std::atan2(q, q) * 180.0 / 3.14159265358979323846;
+    const double el_deg = -std::asin(q) * 180.0 / 3.14159265358979323846;
+    const auto plan = make_plan({1e9}, {{az_deg, el_deg}}, {"HH", "VV"});
+    const strikecem::GoOptions go{false, 3};
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(mesh, plan, cpu_cfg, {}, go);
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(mesh, plan, gpu_cfg, {}, go);
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, ImpedanceRAMMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {30.0, -45.0}}, {"HH", "VV"});
+
+    strikecem::MaterialModel ram_model;
+    ram_model.tag = "ram_sibc";
+    ram_model.type = strikecem::WallType::Impedance;
+    ram_model.surface_impedance = {1.0, 0.0}; // Matched normalized impedance
+    strikecem::MaterialOptions ram_opts{true, strikecem::WallType::Impedance, ram_model};
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, {}, {}, ram_opts);
+
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, {}, {}, ram_opts);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+
+    // Verify significant RCS reduction vs bare PEC
+    const auto bare_gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg);
+    EXPECT_LT(gpu.samples[0].rcs_sqm, 0.01 * bare_gpu.samples[0].rcs_sqm);
+}
+
+TEST(Gpu, DielectricMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}, {45.0, -30.0}}, {"HH", "VV"});
+
+    strikecem::MaterialModel d_model;
+    d_model.tag = "glass";
+    d_model.type = strikecem::WallType::Dielectric;
+    d_model.table.push_back({10e9, {{4.0, -0.2}, {1.0, 0.0}}, 0.0});
+    strikecem::MaterialOptions d_opts{true, strikecem::WallType::Dielectric, d_model};
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, {}, {}, d_opts);
+
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, {}, {}, d_opts);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, CoatedRAMMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH", "VV"});
+
+    strikecem::MaterialModel coated_model;
+    coated_model.tag = "stealth_paint";
+    coated_model.type = strikecem::WallType::Coated;
+    coated_model.layers.push_back({0.002, {{3.5, -0.5}, {1.2, -0.1}}});
+    strikecem::MaterialOptions c_opts{true, strikecem::WallType::Coated, coated_model};
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, {}, {}, c_opts);
+
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, {}, {}, c_opts);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
+TEST(Gpu, MultiMaterialMatchesCpu) {
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_minimal.json");
+    const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH", "VV"});
+
+    strikecem::MaterialModel pec_model;
+    pec_model.tag = "pec";
+    pec_model.type = strikecem::WallType::Pec;
+
+    strikecem::MaterialModel ram_model;
+    ram_model.tag = "ram";
+    ram_model.type = strikecem::WallType::Impedance;
+    ram_model.surface_impedance = {1.0, 0.0};
+
+    strikecem::MaterialOptions mixed_opts;
+    mixed_opts.enabled = true;
+    mixed_opts.models = {pec_model, ram_model};
+    mixed_opts.facet_material_indices = {0, 1}; // 2 triangles in minimal mesh
+
+    nlohmann::json cpu_cfg = c.rc.value;
+    cpu_cfg["execution"]["accelerator"] = "cpu";
+    const auto cpu = strikecem::solve_po(c.mesh, plan, cpu_cfg, {}, {}, mixed_opts);
+
+    nlohmann::json gpu_cfg = c.rc.value;
+    gpu_cfg["execution"]["accelerator"] = "cuda";
+    const auto gpu = strikecem::solve_po(c.mesh, plan, gpu_cfg, {}, {}, mixed_opts);
+
+    expect_close(gpu, cpu, 1e-9, 1e-12);
+}
+
 #else
 
 TEST(Gpu, CudaDisabledStubRefuses) {

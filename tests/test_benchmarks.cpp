@@ -424,8 +424,14 @@ TEST(MaterialSolver, NonPecGuards) {
     const auto plan = single_sample(1e9, 0.0, -90.0, {"HH"});
     auto cuda_cfg = rc.value;
     cuda_cfg["execution"]["accelerator"] = "cuda";
-    EXPECT_THROW(strikecem::solve_po(mesh, plan, cuda_cfg, {}, {}, glass),
-                 strikecem::cuda::CudaError);
+#ifdef SCEM_ENABLE_CUDA
+    if (strikecem::cuda::cuda_available()) {
+        const auto cpu_res = strikecem::solve_po(mesh, plan, rc.value, {}, {}, glass);
+        const auto gpu_res = strikecem::solve_po(mesh, plan, cuda_cfg, {}, {}, glass);
+        ASSERT_EQ(gpu_res.samples.size(), cpu_res.samples.size());
+        EXPECT_NEAR(std::abs(gpu_res.samples[0].scattering - cpu_res.samples[0].scattering), 0.0, 1e-9);
+    }
+#endif
     const strikecem::GoOptions chains{false, 2};
     EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, chains, glass),
                  std::invalid_argument);

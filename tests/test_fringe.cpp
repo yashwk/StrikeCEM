@@ -743,14 +743,17 @@ TEST(Go, CliInvalidRejected) {
     fs::remove_all(dir, ec);
 }
 
-TEST(Go, CliCudaRefused) {
+TEST(Go, CliCudaSupported) {
+#ifdef SCEM_ENABLE_CUDA
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
     const fs::path dir = fs::temp_directory_path() / "scem_go_cuda";
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
     const std::string config = write_go_config(dir, "out.h5", "hdf5", true, 3, true);
-    EXPECT_EQ(cli_run("run", config), 4);
+    EXPECT_EQ(cli_run("run", config), 0);
     fs::remove_all(dir, ec);
+#endif
 }
 
 TEST(Go, ResumeWithOptions) {

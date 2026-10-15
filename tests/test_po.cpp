@@ -295,17 +295,21 @@ TEST(PoSolver, TwoBounceBlockedExitSkipped) {
         EXPECT_EQ(shut.samples[i].scattering, shut_po.samples[i].scattering);
 }
 
-TEST(PoSolver, TwoBounceCudaRefused) {
-    const Case c = load_case("valid_minimal.json");
+TEST(PoSolver, TwoBounceCudaSupported) {
+#ifdef SCEM_ENABLE_CUDA
+    if (!strikecem::cuda::cuda_available()) GTEST_SKIP() << "no CUDA device; backend untested";
+    const Case c = load_case("valid_dihedral.json");
     auto cuda_cfg = c.rc.value;
     cuda_cfg["execution"]["accelerator"] = "cuda";
     const auto plan = make_plan({10e9}, {{0.0, -90.0}}, {"HH"});
     const strikecem::GoOptions bounce{false, 2};
-    EXPECT_THROW(strikecem::solve_po(c.mesh, plan, cuda_cfg, {}, bounce),
-                 strikecem::cuda::CudaError);
-    const strikecem::GoOptions shade{true, 1};
-    EXPECT_THROW(strikecem::solve_po(c.mesh, plan, cuda_cfg, {}, shade),
-                 strikecem::cuda::CudaError);
+    const auto cpu_res = strikecem::solve_po(c.mesh, plan, c.rc.value, {}, bounce);
+    const auto gpu_res = strikecem::solve_po(c.mesh, plan, cuda_cfg, {}, bounce);
+    ASSERT_EQ(gpu_res.samples.size(), cpu_res.samples.size());
+    for (size_t i = 0; i < cpu_res.samples.size(); ++i) {
+        EXPECT_NEAR(std::abs(gpu_res.samples[i].scattering - cpu_res.samples[i].scattering), 0.0, 1e-9);
+    }
+#endif
 }
 
 TEST(PoSolver, MaxBouncesValidated) {
