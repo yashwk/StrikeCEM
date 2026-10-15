@@ -63,6 +63,7 @@ NormalizedMesh subdivide_1to4(const NormalizedMesh& in) {
         if (len > 1e-15) cross = cross * (1.0 / len);
         out.normals[t] = cross;
     }
+    out.report = in.report;
     out.report.triangle_count = out.triangles.size();
     out.report.vertex_count = out.vertices.size();
     return out;
@@ -83,7 +84,8 @@ SamplePlan make_sweep_plan(double freq_hz, size_t num_azimuths) {
 }
 
 nlohmann::json make_solver_config(const std::string& precision, const std::string& accelerator,
-                                 unsigned threads = 1, int device_id = 0) {
+                                 unsigned threads = 1, int device_id = 0,
+                                 bool shadowing = false, int max_bounces = 1) {
     return nlohmann::json{
         {"solver", {
             {"type", "PO"},
@@ -92,8 +94,8 @@ nlohmann::json make_solver_config(const std::string& precision, const std::strin
             {"po_options", {
                 {"edge_correction", "none"},
                 {"curvature_correction", false},
-                {"shadowing", false},
-                {"max_bounces", 1}
+                {"shadowing", shadowing},
+                {"max_bounces", max_bounces}
             }}
         }},
         {"physics", {
@@ -127,6 +129,10 @@ int main(int argc, char** argv) {
     std::string json_output;
     int iters = 2;
 
+    std::string material_choice = "pec";
+    int max_bounces = 1;
+    bool shadowing = false;
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--mesh" && i + 1 < argc) {
@@ -141,6 +147,12 @@ int main(int argc, char** argv) {
             json_output = argv[++i];
         } else if (arg == "--iters" && i + 1 < argc) {
             iters = std::stoi(argv[++i]);
+        } else if (arg == "--material" && i + 1 < argc) {
+            material_choice = argv[++i];
+        } else if (arg == "--bounces" && i + 1 < argc) {
+            max_bounces = std::stoi(argv[++i]);
+        } else if (arg == "--shadowing") {
+            shadowing = true;
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "Usage: scem_gpubench [options]\n"
                       << "Comprehensive native CUDA PO benchmark tool\n\n"
@@ -149,6 +161,9 @@ int main(int argc, char** argv) {
                       << "  --subdiv <N>      Subdivide mesh 4^N times (0 to 4)\n"
                       << "  --dirs <N>        Azimuth directions (default: 360)\n"
                       << "  --freq <Hz>       Frequency in Hz (default: 10e9)\n"
+                      << "  --material <type> Material wall: pec, ram (SIBC), coated (default: pec)\n"
+                      << "  --bounces <N>     Max SBR ray bounces: 1, 2, or 3 (default: 1)\n"
+                      << "  --shadowing       Enable GO line-of-sight self-shadowing\n"
                       << "  --iters <N>       Benchmark iterations (default: 2)\n"
                       << "  --json <path>     Write results as JSON\n"
                       << "  --help, -h        Show help\n";
@@ -203,12 +218,40 @@ int main(int argc, char** argv) {
     std::cout << "Workload:      " << std::fixed << std::setprecision(2)
               << (facet_directions / 1.0e6) << " Million Facet-Directions per run\n\n";
 
+    // Configure materials and multi-bounce options
+    MaterialOptions mat_opts;
+    if (material_choice == "ram" || material_choice == "sibc") {
+        MaterialModel ram_model;
+        ram_model.tag = "ram_sibc";
+        ram_model.type = WallType::Impedance;
+        ram_model.surface_impedance = {1.0, 0.0};
+        mat_opts = MaterialOptions{true, WallType::Impedance, ram_model};
+    } else if (material_choice == "coated") {
+        MaterialModel coated_model;
+        coated_model.tag = "ram_coated";
+        coated_model.type = WallType::Coated;
+        CoatingLayer layer;
+        layer.thickness_m = 0.002;
+        layer.medium.eps_r = {4.0, -0.8};
+        layer.medium.mu_r = {1.0, 0.0};
+        coated_model.layers.push_back(layer);
+        mat_opts = MaterialOptions{true, WallType::Coated, coated_model};
+    }
+
+    GoOptions go_opts;
+    go_opts.shadowing = shadowing;
+    go_opts.max_bounces = max_bounces;
+
+    std::cout << "Material:      " << material_choice << (mat_opts.enabled ? " (active)" : " (PEC)") << "\n"
+              << "Multi-Bounce:  " << max_bounces << " bounce(s)\n"
+              << "Shadowing:     " << (shadowing ? "true" : "false") << "\n";
+
     // 1. Warm up CUDA context
     std::cout << "Warming up CUDA device context... ";
     std::cout.flush();
     const auto t_warm0 = std::chrono::steady_clock::now();
-    const auto cfg_warm = make_solver_config("float64", "cuda", 1, 0);
-    (void)solve_po(mesh, plan, cfg_warm);
+    const auto cfg_warm = make_solver_config("float64", "cuda", 1, 0, shadowing, max_bounces);
+    (void)solve_po(mesh, plan, cfg_warm, {}, go_opts, mat_opts);
     const double t_warm = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_warm0).count();
     std::cout << "Done (" << (t_warm * 1000.0) << " ms init time)\n\n";
 
@@ -218,11 +261,11 @@ int main(int argc, char** argv) {
     PoResult cpu_ref;
 
     for (unsigned th : cpu_threads) {
-        const auto cfg_cpu = make_solver_config("float64", "cpu", th);
+        const auto cfg_cpu = make_solver_config("float64", "cpu", th, 0, shadowing, max_bounces);
         double best_sec = 1e9;
         for (int it = 0; it < iters; ++it) {
             const auto t0 = std::chrono::steady_clock::now();
-            PoResult res = solve_po(mesh, plan, cfg_cpu);
+            PoResult res = solve_po(mesh, plan, cfg_cpu, {}, go_opts, mat_opts);
             const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (sec < best_sec) best_sec = sec;
             if (th == 16 && it == 0) cpu_ref = std::move(res);
@@ -236,11 +279,11 @@ int main(int argc, char** argv) {
     std::map<std::string, PoResult> gpu_results;
 
     for (const auto& prec : precisions) {
-        const auto cfg_gpu = make_solver_config(prec, "cuda", 1, 0);
+        const auto cfg_gpu = make_solver_config(prec, "cuda", 1, 0, shadowing, max_bounces);
         double best_sec = 1e9;
         for (int it = 0; it < iters + 1; ++it) {
             const auto t0 = std::chrono::steady_clock::now();
-            PoResult res = solve_po(mesh, plan, cfg_gpu);
+            PoResult res = solve_po(mesh, plan, cfg_gpu, {}, go_opts, mat_opts);
             const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (sec < best_sec) best_sec = sec;
             if (it == 0) gpu_results[prec] = std::move(res);
