@@ -1,0 +1,85 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {
+    "path": "b21_stealth.obj",
+    "units": "m",
+    "mesh_repair": "report"
+  },
+  "materials": {
+    "default_material": "pec",
+    "tag_coverage": "warn",
+    "definitions": [
+      {
+        "tag": "pec",
+        "type": "pec"
+      },
+      {
+        "tag": "carbon_composite_skin",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_leading_edge",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_trailing_edge",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_canopy",
+        "type": "pec"
+      },
+      {
+        "tag": "ram_intake_duct",
+        "type": "pec"
+      }
+    ]
+  },
+  "frequency": {
+    "frequency_hz": 10000000000
+  },
+  "physics": {
+    "monostatic": true,
+    "polarization_basis": "linear",
+    "incident_amplitude": 1.0,
+    "phase_reference": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "angles": {
+    "azimuth": {
+      "start": 0,
+      "stop": 360,
+      "step": 1
+    },
+    "elevation": {
+      "start": 5,
+      "stop": 5,
+      "step": 1
+    }
+  },
+  "polarization": [
+    "HH",
+    "VV"
+  ],
+  "solver": {
+    "type": "PO",
+    "precision": "float64",
+    "rcs_units": "dBsm",
+    "po_options": {
+      "edge_correction": "ptd_lite",
+      "curvature_correction": true,
+      "shadowing": true,
+      "max_bounces": 1
+    }
+  },
+  "execution": {
+    "accelerator": "cuda"
+  },
+  "output": {
+    "format": "hdf5",
+    "path": "examples/flying_wing_stealth/b21_bare_pec.h5"
+  }
+}

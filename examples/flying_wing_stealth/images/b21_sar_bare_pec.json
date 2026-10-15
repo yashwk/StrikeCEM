@@ -1,0 +1,28 @@
+{
+  "altitude_m": 12000.0,
+  "azimuth_max_m": 37.25242462444974,
+  "azimuth_min_m": -35.075737753087125,
+  "bandwidth_hz": 1000000000.0,
+  "center_frequency_hz": 10000000000.0,
+  "ground_range_max_m": 18.53354462444974,
+  "ground_range_min_m": -16.360857753087128,
+  "incidence_angle_deg": 55.0,
+  "mesh_triangles": 2956,
+  "mode": "spotlight",
+  "peak_scatterer": {
+    "azimuth_m": 14.86177279468491,
+    "ground_range_m": -5.490433574928671,
+    "rcs_dbsm": -6.273961373530445
+  },
+  "platform": "airborne",
+  "platform_velocity_mps": 220.0,
+  "resolutions": {
+    "azimuth_m": 0.28628070955421653,
+    "ground_range_m": 0.18298950731436803,
+    "slant_range_m": 0.149896229
+  },
+  "shadow_area_fraction": 0.03678131103515625,
+  "sidelobe_suppression_db": 30.0,
+  "sidelobe_window": "taylor",
+  "vehicle_name": "b21_bare_pec"
+}

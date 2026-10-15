@@ -1,0 +1,28 @@
+{
+  "altitude_m": 500000.0,
+  "azimuth_max_m": 35.40941837604373,
+  "azimuth_min_m": -36.463923903807334,
+  "bandwidth_hz": 1500000000.0,
+  "center_frequency_hz": 35000000000.0,
+  "ground_range_max_m": 16.69053837604373,
+  "ground_range_min_m": -17.749043903807333,
+  "incidence_angle_deg": 40.0,
+  "mesh_triangles": 2956,
+  "mode": "spotlight",
+  "peak_scatterer": {
+    "azimuth_m": 16.388250643778463,
+    "ground_range_m": -7.356630891625713,
+    "rcs_dbsm": -10.858559659646874
+  },
+  "platform": "spaceborne",
+  "platform_velocity_mps": 7600.0,
+  "resolutions": {
+    "azimuth_m": 0.09815338613287425,
+    "ground_range_m": 0.15546475667454984,
+    "slant_range_m": 0.09993081933333334
+  },
+  "shadow_area_fraction": 0.0341796875,
+  "sidelobe_suppression_db": 30.0,
+  "sidelobe_window": "taylor",
+  "vehicle_name": "b21_stealth"
+}
