@@ -171,6 +171,7 @@ add_executable(scem_tests tests/test_conventions.cpp tests/test_config.cpp tests
         tests/test_remesh.cpp tests/test_curvature.cpp tests/test_bundle.cpp
         tests/test_cluster.cpp tests/test_similitude.cpp tests/test_prescan.cpp
         tests/test_isar.cpp tests/test_render.cpp tests/test_report.cpp tests/test_sar.cpp
+        tests/test_golden_benchmarks.cpp
         src/strikecem/app/CLI.cpp)
 target_link_libraries(scem_tests PRIVATE scem_core GTest::gtest_main)
 target_compile_definitions(scem_tests PRIVATE

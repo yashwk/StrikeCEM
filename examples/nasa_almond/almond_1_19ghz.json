@@ -1,0 +1,51 @@
+{
+  "scem_schema_version": "1.0",
+  "model": {
+    "path": "nasa_almond.obj",
+    "units": "m",
+    "mesh_repair": "report"
+  },
+  "frequency": {
+    "frequency_hz": 1190000000.0
+  },
+  "physics": {
+    "monostatic": true,
+    "polarization_basis": "linear",
+    "incident_amplitude": 1.0,
+    "phase_reference": [0.0, 0.0, 0.0]
+  },
+  "angles": {
+    "azimuth": {
+      "start": 0.0,
+      "stop": 180.0,
+      "step": 1.0
+    },
+    "elevation": {
+      "start": 0.0,
+      "stop": 0.0,
+      "step": 1.0
+    }
+  },
+  "polarization": [
+    "HH",
+    "VV"
+  ],
+  "solver": {
+    "type": "PO",
+    "precision": "float64",
+    "rcs_units": "dBsm",
+    "shadowing": true,
+    "po_options": {
+      "shadowing": true,
+      "curvature_correction": true,
+      "edge_correction": "ptd_full"
+    }
+  },
+  "execution": {
+    "accelerator": "cuda"
+  },
+  "output": {
+    "format": "hdf5",
+    "path": "examples/nasa_almond/almond_1_19ghz.h5"
+  }
+}
