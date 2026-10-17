@@ -101,13 +101,24 @@ WedgeCoefficients utd_coefficient(double k, double rho, double n, double phi, do
         const double nm = std::round((beta - kPi) / (2.0 * n * kPi));
         const double ap = 2.0 * std::pow(std::cos((2.0 * n * kPi * np - beta) / 2.0), 2);
         const double am = 2.0 * std::pow(std::cos((2.0 * n * kPi * nm - beta) / 2.0), 2);
-        std::complex<double> out{0.0, 0.0};
         const double tp = (kPi + beta) / (2.0 * n);
         const double tm = (kPi - beta) / (2.0 * n);
-        const double cp = std::cos(tp) / std::sin(tp);
-        const double cm = std::cos(tm) / std::sin(tm);
-        if (std::isfinite(cp)) out += cp * utd_transition(k * rho * ap);
-        if (std::isfinite(cm)) out += cm * utd_transition(k * rho * am);
+
+        auto eval_cot_transition = [&](double t, double a) -> std::complex<double> {
+            const double sin_t = std::sin(t);
+            if (std::abs(sin_t) < 1e-7) {
+                // Analytical limit: sgn(sin_t) * n * sqrt(2*pi*k*rho) * exp(j*pi/4)
+                const double sgn = (sin_t >= 0.0) ? 1.0 : -1.0;
+                return sgn * n * std::sqrt(2.0 * kPi * k * rho) *
+                       std::complex<double>(std::cos(kPi / 4.0), std::sin(kPi / 4.0));
+            }
+            const double cot_t = std::cos(t) / sin_t;
+            return cot_t * utd_transition(k * rho * a);
+        };
+
+        std::complex<double> out{0.0, 0.0};
+        out += eval_cot_transition(tp, ap);
+        out += eval_cot_transition(tm, am);
         return out;
     };
     const double beta_m = phi - phi_prime;

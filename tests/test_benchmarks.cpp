@@ -433,8 +433,7 @@ TEST(MaterialSolver, NonPecGuards) {
     }
 #endif
     const strikecem::GoOptions chains{false, 2};
-    EXPECT_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, chains, glass),
-                 std::invalid_argument);
+    EXPECT_NO_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, chains, glass));
     const strikecem::GoOptions shade{true, 1};
     EXPECT_NO_THROW(strikecem::solve_po(mesh, plan, rc.value, {}, shade, glass));
     const auto edges = strikecem::extract_edges(mesh);

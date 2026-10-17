@@ -382,10 +382,13 @@ TEST(Material, MultiMaterialGuards) {
     }
 #endif
 
-    // Multi-bounce GO with non-PEC facet throws invalid_argument
+    // Multi-bounce GO with non-PEC facet succeeds with material reflection scaling
     resolved["execution"]["accelerator"] = "cpu";
     strikecem::GoOptions go{false, 2};
-    EXPECT_THROW(strikecem::solve_po(mesh, plan, resolved, {}, go, mixed_opts), std::invalid_argument);
+    EXPECT_NO_THROW({
+        const auto res_mb = strikecem::solve_po(mesh, plan, resolved, {}, go, mixed_opts);
+        EXPECT_FALSE(res_mb.samples.empty());
+    });
 }
 
 TEST(Material, OutputProvenanceCsvAndHdf5) {

@@ -138,16 +138,15 @@ RcsQueryEngine::RcsQueryEngine(ScemDatabase db)
         export_id_ = d.value("export_id", "");
     }
 
-    const size_t nfreq = frequencies_.size();
-    const size_t npol = polarizations_.size();
-    const size_t ndir = directions_.size();
+    num_freq_ = frequencies_.size();
+    num_pol_ = polarizations_.size();
+    num_dir_ = directions_.size();
 
-    grid_samples_.resize(nfreq, std::vector<std::vector<std::complex<double>>>(
-                                    npol, std::vector<std::complex<double>>(ndir)));
+    flat_samples_.assign(num_freq_ * num_pol_ * num_dir_, std::complex<double>{0.0, 0.0});
 
     for (const auto& r : db.rows) {
-        if (r.frequency_index < nfreq && r.polarization_index < npol && r.direction_index < ndir) {
-            grid_samples_[r.frequency_index][r.polarization_index][r.direction_index] =
+        if (r.frequency_index < num_freq_ && r.polarization_index < num_pol_ && r.direction_index < num_dir_) {
+            sample(r.frequency_index, r.polarization_index, r.direction_index) =
                 {r.scattering_real, r.scattering_imag};
         }
     }
@@ -168,16 +167,15 @@ RcsQueryEngine::RcsQueryEngine(Hdf5Database db)
         directions_[i].k_hat = direction_from_az_el(db.azimuth_deg[i], db.elevation_deg[i]);
     }
 
-    const size_t nfreq = frequencies_.size();
-    const size_t npol = polarizations_.size();
-    const size_t ndir = directions_.size();
+    num_freq_ = frequencies_.size();
+    num_pol_ = polarizations_.size();
+    num_dir_ = directions_.size();
 
-    grid_samples_.resize(nfreq, std::vector<std::vector<std::complex<double>>>(
-                                    npol, std::vector<std::complex<double>>(ndir)));
+    flat_samples_.assign(num_freq_ * num_pol_ * num_dir_, std::complex<double>{0.0, 0.0});
 
     for (const auto& r : db.rows) {
-        if (r.frequency_index < nfreq && r.polarization_index < npol && r.direction_index < ndir) {
-            grid_samples_[r.frequency_index][r.polarization_index][r.direction_index] =
+        if (r.frequency_index < num_freq_ && r.polarization_index < num_pol_ && r.direction_index < num_dir_) {
+            sample(r.frequency_index, r.polarization_index, r.direction_index) =
                 {r.scattering_real, r.scattering_imag};
         }
     }
@@ -209,7 +207,7 @@ void RcsQueryEngine::init_index() {
         is_regular_grid_ = true;
         unique_az_ = std::move(azs);
         unique_el_ = std::move(els);
-        az_el_to_dir_.assign(unique_az_.size(), std::vector<size_t>(unique_el_.size(), 0));
+        az_el_to_dir_.assign(unique_az_.size() * unique_el_.size(), 0);
 
         for (size_t di = 0; di < directions_.size(); ++di) {
             const auto& d = directions_[di];
@@ -218,7 +216,7 @@ void RcsQueryEngine::init_index() {
             if (it_az != unique_az_.end() && it_el != unique_el_.end()) {
                 const size_t ai = std::distance(unique_az_.begin(), it_az);
                 const size_t ei = std::distance(unique_el_.begin(), it_el);
-                az_el_to_dir_[ai][ei] = di;
+                az_el_to_dir_[ai * unique_el_.size() + ei] = di;
             }
         }
     } else {
@@ -246,19 +244,19 @@ std::complex<double> RcsQueryEngine::interpolate_regular_bicubic(size_t fi, size
     const size_t Nel = unique_el_.size();
 
     if (Naz == 1 && Nel == 1) {
-        return grid_samples_[fi][pol_idx][az_el_to_dir_[0][0]];
+        return sample(fi, pol_idx, az_el_dir(0, 0));
     }
     if (Naz > 1 && Nel == 1) {
         std::vector<std::complex<double>> Y_az(Naz);
         for (size_t a = 0; a < Naz; ++a) {
-            Y_az[a] = grid_samples_[fi][pol_idx][az_el_to_dir_[a][0]];
+            Y_az[a] = sample(fi, pol_idx, az_el_dir(a, 0));
         }
         return eval_1d_cubic_spline(unique_az_, Y_az, az_clamped);
     }
     if (Naz == 1 && Nel > 1) {
         std::vector<std::complex<double>> Y_el(Nel);
         for (size_t e = 0; e < Nel; ++e) {
-            Y_el[e] = grid_samples_[fi][pol_idx][az_el_to_dir_[0][e]];
+            Y_el[e] = sample(fi, pol_idx, az_el_dir(0, e));
         }
         return eval_1d_cubic_spline(unique_el_, Y_el, el_clamped);
     }
@@ -289,7 +287,7 @@ std::complex<double> RcsQueryEngine::interpolate_regular_bicubic(size_t fi, size
         const size_t col = az_cols[ci];
         sub_az[ci] = unique_az_[col];
         for (size_t e = 0; e < Nel; ++e) {
-            col_Y[e] = grid_samples_[fi][pol_idx][az_el_to_dir_[col][e]];
+            col_Y[e] = sample(fi, pol_idx, az_el_dir(col, e));
         }
         sub_val[ci] = eval_1d_cubic_spline(unique_el_, col_Y, el_clamped);
     }
@@ -301,47 +299,66 @@ std::complex<double> RcsQueryEngine::interpolate_spherical(size_t fi, size_t pol
                                                           double az_deg, double el_deg) const {
     const size_t N = directions_.size();
     if (N == 0) return std::complex<double>{};
-    if (N == 1) return grid_samples_[fi][pol_idx][0];
+    if (N == 1) return sample(fi, pol_idx, 0);
 
     const geom::Vec3d v = direction_from_az_el(az_deg, el_deg);
 
-    std::vector<std::pair<double, size_t>> dists;
-    dists.reserve(N);
+    // Find up to 8 nearest directions by maximizing dot product v . kd
+    // Stack-allocated top-8 list to eliminate dynamic heap allocations
+    struct Candidate {
+        double dot;
+        size_t idx;
+    };
+    const size_t K = std::min<size_t>(8, N);
+    Candidate top[8];
+    size_t count = 0;
 
     for (size_t di = 0; di < N; ++di) {
         const auto& kd = directions_[di].k_hat;
-        const double dot = clamp(v.x * kd.x + v.y * kd.y + v.z * kd.z, -1.0, 1.0);
-        const double theta = std::acos(dot);
-        if (theta < 1e-7) {
-            return grid_samples_[fi][pol_idx][di];
+        const double dot_val = v.x * kd.x + v.y * kd.y + v.z * kd.z;
+        if (dot_val >= 1.0 - 1e-14) {
+            return sample(fi, pol_idx, di);
         }
-        dists.emplace_back(theta, di);
+        if (count < K) {
+            top[count++] = {dot_val, di};
+            for (size_t s = count - 1; s > 0 && top[s].dot > top[s - 1].dot; --s) {
+                std::swap(top[s], top[s - 1]);
+            }
+        } else if (dot_val > top[K - 1].dot) {
+            top[K - 1] = {dot_val, di};
+            for (size_t s = K - 1; s > 0 && top[s].dot > top[s - 1].dot; --s) {
+                std::swap(top[s], top[s - 1]);
+            }
+        }
     }
 
-    const size_t K = std::min<size_t>(8, N);
-    std::partial_sort(dists.begin(), dists.begin() + K, dists.end(),
-                      [](const auto& a, const auto& b) { return a.first < b.first; });
+    // Compute true angular distances for the top K candidates
+    double dists_theta[8];
+    for (size_t k = 0; k < count; ++k) {
+        const double cl = clamp(top[k].dot, -1.0, 1.0);
+        dists_theta[k] = std::acos(cl);
+    }
 
-    const double theta_max = dists[K - 1].first;
+    const double theta_max = dists_theta[count - 1];
     const double R = std::max(1.5 * theta_max, 1e-4);
 
     double w_sum = 0.0;
     std::complex<double> val_sum{0.0, 0.0};
 
-    for (size_t k = 0; k < K; ++k) {
-        const double th = dists[k].first;
-        const size_t idx = dists[k].second;
+    for (size_t k = 0; k < count; ++k) {
+        const double th = dists_theta[k];
+        const size_t idx = top[k].idx;
         const double q = clamp(th / R, 0.0, 1.0);
         const double wendland = (1.0 - q) * (1.0 - q) * (1.0 - q) * (1.0 - q) * (4.0 * q + 1.0);
         const double w = wendland / (th * th + 1e-9);
         w_sum += w;
-        val_sum += w * grid_samples_[fi][pol_idx][idx];
+        val_sum += w * sample(fi, pol_idx, idx);
     }
 
     if (w_sum > 1e-15) {
         return val_sum / w_sum;
     }
-    return grid_samples_[fi][pol_idx][dists[0].second];
+    return sample(fi, pol_idx, top[0].idx);
 }
 
 std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
@@ -363,7 +380,7 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
             if (ei > 0 && std::abs(unique_el_[ei - 1] - el_clamped) < std::abs(unique_el_[ei] - el_clamped)) {
                 ei--;
             }
-            return grid_samples_[fi][pol_idx][az_el_to_dir_[ai][ei]];
+            return sample(fi, pol_idx, az_el_dir(ai, ei));
         } else {
             size_t best_idx = 0;
             double min_dist_sq = 1e30;
@@ -376,7 +393,7 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
                     best_idx = di;
                 }
             }
-            return grid_samples_[fi][pol_idx][best_idx];
+            return sample(fi, pol_idx, best_idx);
         }
     }
 
@@ -400,15 +417,15 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
                 const double del = unique_el_[e1] - unique_el_[e0];
                 const double v = (del > 1e-9) ? (el_clamped - unique_el_[e0]) / del : 0.0;
 
-                const size_t d00 = az_el_to_dir_[a0][e0];
-                const size_t d10 = az_el_to_dir_[a1][e0];
-                const size_t d01 = az_el_to_dir_[a0][e1];
-                const size_t d11 = az_el_to_dir_[a1][e1];
+                const size_t d00 = az_el_dir(a0, e0);
+                const size_t d10 = az_el_dir(a1, e0);
+                const size_t d01 = az_el_dir(a0, e1);
+                const size_t d11 = az_el_dir(a1, e1);
 
-                const auto& s00 = grid_samples_[fi][pol_idx][d00];
-                const auto& s10 = grid_samples_[fi][pol_idx][d10];
-                const auto& s01 = grid_samples_[fi][pol_idx][d01];
-                const auto& s11 = grid_samples_[fi][pol_idx][d11];
+                const auto& s00 = sample(fi, pol_idx, d00);
+                const auto& s10 = sample(fi, pol_idx, d10);
+                const auto& s01 = sample(fi, pol_idx, d01);
+                const auto& s11 = sample(fi, pol_idx, d11);
 
                 return (1.0 - u) * (1.0 - v) * s00 +
                        u * (1.0 - v) * s10 +
@@ -421,9 +438,9 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
                 size_t a0 = (a1 == 0) ? 0 : a1 - 1;
                 const double daz = unique_az_[a1] - unique_az_[a0];
                 const double u = (daz > 1e-9) ? (az_clamped - unique_az_[a0]) / daz : 0.0;
-                const size_t d0 = az_el_to_dir_[a0][0];
-                const size_t d1 = az_el_to_dir_[a1][0];
-                return (1.0 - u) * grid_samples_[fi][pol_idx][d0] + u * grid_samples_[fi][pol_idx][d1];
+                const size_t d0 = az_el_dir(a0, 0);
+                const size_t d1 = az_el_dir(a1, 0);
+                return (1.0 - u) * sample(fi, pol_idx, d0) + u * sample(fi, pol_idx, d1);
             } else if (unique_az_.size() == 1 && unique_el_.size() > 1) {
                 const double el_clamped = clamp(el_deg, unique_el_.front(), unique_el_.back());
                 auto it_el = std::upper_bound(unique_el_.begin(), unique_el_.end(), el_clamped);
@@ -431,11 +448,11 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
                 size_t e0 = (e1 == 0) ? 0 : e1 - 1;
                 const double del = unique_el_[e1] - unique_el_[e0];
                 const double v = (del > 1e-9) ? (el_clamped - unique_el_[e0]) / del : 0.0;
-                const size_t d0 = az_el_to_dir_[0][e0];
-                const size_t d1 = az_el_to_dir_[0][e1];
-                return (1.0 - v) * grid_samples_[fi][pol_idx][d0] + v * grid_samples_[fi][pol_idx][d1];
+                const size_t d0 = az_el_dir(0, e0);
+                const size_t d1 = az_el_dir(0, e1);
+                return (1.0 - v) * sample(fi, pol_idx, d0) + v * sample(fi, pol_idx, d1);
             } else {
-                return grid_samples_[fi][pol_idx][az_el_to_dir_[0][0]];
+                return sample(fi, pol_idx, az_el_dir(0, 0));
             }
         } else {
             return interpolate_spherical(fi, pol_idx, az_deg, el_deg);

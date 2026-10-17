@@ -89,6 +89,15 @@ __device__ inline Cplx<Real> c_div(Cplx<Real> a, Cplx<Real> b) {
 __device__ inline void fsincos(float a, float* s, float* c) { sincosf(a, s, c); }
 __device__ inline void fsincos(double a, double* s, double* c) { sincos(a, s, c); }
 
+template <typename T>
+__device__ inline T warp_reduce_sum(T val) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
 template <typename Real>
 __device__ inline Cplx<Real> c_sqrt(Cplx<Real> a) {
     Real r = sqrt(a.re * a.re + a.im * a.im);
@@ -164,6 +173,8 @@ template <typename Real> struct UnitParams {
 };
 
 constexpr int kBlock = 256;
+constexpr int kWarpSize = 32;
+constexpr int kNumWarps = kBlock / kWarpSize;
 
 // --- GPU Edge / PTD Structures & Device Functions ---
 
@@ -243,6 +254,19 @@ __device__ inline ComplexD dev_utd_transition(double x) {
     return c_mul(ifactor, c_mul(phase, rest));
 }
 
+__device__ inline ComplexD dev_eval_cot_transition(double s_val, double c_val, double a,
+                                                   double k, double rho, double n) {
+    constexpr double pi = 3.14159265358979323846;
+    constexpr double cos_pi_4 = 0.7071067811865475244;
+    if (fabs(s_val) < 1e-7) {
+        double sgn = (s_val >= 0.0) ? 1.0 : -1.0;
+        double lim = sgn * n * sqrt(2.0 * pi * k * rho);
+        return {lim * cos_pi_4, lim * cos_pi_4};
+    }
+    double cot_val = c_val / s_val;
+    return c_scale(dev_utd_transition(k * rho * a), cot_val);
+}
+
 __device__ inline void dev_utd_term(double beta, double k, double rho, double n, ComplexD& out) {
     constexpr double pi = 3.14159265358979323846;
     double np = round((beta + pi) / (2.0 * n * pi));
@@ -251,23 +275,14 @@ __device__ inline void dev_utd_term(double beta, double k, double rho, double n,
     double c_m = cos((2.0 * n * pi * nm - beta) * 0.5);
     double ap = 2.0 * c_p * c_p;
     double am = 2.0 * c_m * c_m;
-    out = {0.0, 0.0};
     double tp = (pi + beta) / (2.0 * n);
     double tm = (pi - beta) / (2.0 * n);
     double sp_val, cp_val;
     fsincos(tp, &sp_val, &cp_val);
     double sm_val, cm_val;
     fsincos(tm, &sm_val, &cm_val);
-    double cp = cp_val / sp_val;
-    if (isfinite(cp)) {
-        ComplexD trans_p = dev_utd_transition(k * rho * ap);
-        out = c_add(out, c_scale(trans_p, cp));
-    }
-    double cm = cm_val / sm_val;
-    if (isfinite(cm)) {
-        ComplexD trans_m = dev_utd_transition(k * rho * am);
-        out = c_add(out, c_scale(trans_m, cm));
-    }
+    out = c_add(dev_eval_cot_transition(sp_val, cp_val, ap, k, rho, n),
+                dev_eval_cot_transition(sm_val, cm_val, am, k, rho, n));
 }
 
 __device__ inline bool dev_transverse_basis(const double* face_dir, const double* t,
@@ -666,17 +681,18 @@ __device__ inline void dev_material_facet_field(
 
 // --- GPU Ray Tracing Device Functions ---
 
-__device__ inline bool gpu_slab_hit(const GpuBvhNode& node, const double* o, const double* d,
+__device__ inline bool gpu_slab_hit(const GpuBvhNode& node, const double* o,
+                                    const double* inv_d, const bool* d_is_zero,
                                     double t_min, double& entry) {
     double t0 = t_min;
     double t1 = 1e30;
+    #pragma unroll
     for (int i = 0; i < 3; ++i) {
-        if (d[i] == 0.0) {
+        if (d_is_zero[i]) {
             if (o[i] < node.bmin[i] || o[i] > node.bmax[i]) return false;
         } else {
-            const double inv = 1.0 / d[i];
-            double a = (node.bmin[i] - o[i]) * inv;
-            double b = (node.bmax[i] - o[i]) * inv;
+            double a = (node.bmin[i] - o[i]) * inv_d[i];
+            double b = (node.bmax[i] - o[i]) * inv_d[i];
             if (a > b) { double tmp = a; a = b; b = tmp; }
             if (a > t0) t0 = a;
             if (b < t1) t1 = b;
@@ -685,6 +701,18 @@ __device__ inline bool gpu_slab_hit(const GpuBvhNode& node, const double* o, con
     }
     entry = t0;
     return true;
+}
+
+__device__ inline bool gpu_slab_hit(const GpuBvhNode& node, const double* o, const double* d,
+                                    double t_min, double& entry) {
+    double inv_d[3];
+    bool d_is_zero[3];
+    #pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        d_is_zero[i] = (d[i] == 0.0);
+        inv_d[i] = d_is_zero[i] ? 0.0 : (1.0 / d[i]);
+    }
+    return gpu_slab_hit(node, o, inv_d, d_is_zero, t_min, entry);
 }
 
 __device__ inline bool gpu_ray_triangle(const double* o, const double* d,
@@ -716,13 +744,20 @@ __device__ inline bool gpu_occluded_bvh(const GpuBvhNode* nodes, const uint32_t*
                                         const double* tri_verts,
                                         const double* o, const double* d,
                                         double t_min, double max_t, uint32_t self_tri) {
+    double inv_d[3];
+    bool d_is_zero[3];
+    #pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        d_is_zero[i] = (d[i] == 0.0);
+        inv_d[i] = d_is_zero[i] ? 0.0 : (1.0 / d[i]);
+    }
     int stack[64];
     int sp = 0;
     stack[sp++] = 0;
     while (sp > 0) {
         const GpuBvhNode& node = nodes[stack[--sp]];
         double entry = 0.0;
-        if (!gpu_slab_hit(node, o, d, t_min, entry)) continue;
+        if (!gpu_slab_hit(node, o, inv_d, d_is_zero, t_min, entry)) continue;
         if (!(entry < max_t)) continue;
         if (node.count > 0) {
             for (uint32_t k = 0; k < node.count; ++k) {
@@ -749,6 +784,13 @@ __device__ inline bool gpu_ray_bvh(const GpuBvhNode* nodes, const uint32_t* orde
                                    const double* o, const double* d,
                                    double t_min, uint32_t skip_tri,
                                    uint32_t& hit_tri, double& best_t) {
+    double inv_d[3];
+    bool d_is_zero[3];
+    #pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        d_is_zero[i] = (d[i] == 0.0);
+        inv_d[i] = d_is_zero[i] ? 0.0 : (1.0 / d[i]);
+    }
     int stack[64];
     int sp = 0;
     stack[sp++] = 0;
@@ -757,7 +799,7 @@ __device__ inline bool gpu_ray_bvh(const GpuBvhNode* nodes, const uint32_t* orde
     while (sp > 0) {
         const GpuBvhNode& node = nodes[stack[--sp]];
         double entry = 0.0;
-        if (!gpu_slab_hit(node, o, d, t_min, entry)) continue;
+        if (!gpu_slab_hit(node, o, inv_d, d_is_zero, t_min, entry)) continue;
         if (found && entry > best_t) continue;
         if (node.count > 0) {
             for (uint32_t k = 0; k < node.count; ++k) {
@@ -804,8 +846,8 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
                           int n_mesh_tris) {
     const int u = static_cast<int>(blockIdx.x);
     const UnitParams<Real> p = units[u];
-    __shared__ Real sh[2][3][2 * kBlock]; // [tx][xyz][re/im interleave]
-    __shared__ int lit_sh[kBlock];
+    __shared__ Real warp_sh[2][3][2][kNumWarps]; // [tx][xyz][re(0)/im(1)][warp_id]
+    __shared__ int warp_lit[kNumWarps];
     Cplx<Real> sum[2][3] = {};
     int lit = 0;
 
@@ -1225,31 +1267,69 @@ __global__ void po_kernel(const Real* __restrict__ centroids, // [3N]
     }
 
     const int lane = static_cast<int>(threadIdx.x);
-    for (int tx = 0; tx < 2; ++tx)
+    const int warp_id = lane / kWarpSize;
+    const int lane_id = lane % kWarpSize;
+
+    #pragma unroll
+    for (int tx = 0; tx < 2; ++tx) {
+        #pragma unroll
         for (int i = 0; i < 3; ++i) {
-            sh[tx][i][2 * lane] = sum[tx][i].re;
-            sh[tx][i][2 * lane + 1] = sum[tx][i].im;
+            sum[tx][i].re = warp_reduce_sum(sum[tx][i].re);
+            sum[tx][i].im = warp_reduce_sum(sum[tx][i].im);
         }
-    lit_sh[lane] = lit;
-    __syncthreads();
-    for (int stride = kBlock / 2; stride > 0; stride >>= 1) {
-        if (lane < stride) {
-            for (int tx = 0; tx < 2; ++tx)
-                for (int i = 0; i < 3; ++i) {
-                    sh[tx][i][2 * lane] += sh[tx][i][2 * (lane + stride)];
-                    sh[tx][i][2 * lane + 1] += sh[tx][i][2 * (lane + stride) + 1];
-                }
-            lit_sh[lane] += lit_sh[lane + stride];
-        }
-        __syncthreads();
     }
-    if (lane == 0) {
-        for (int tx = 0; tx < 2; ++tx)
+    lit = warp_reduce_sum(lit);
+
+    if (lane_id == 0) {
+        #pragma unroll
+        for (int tx = 0; tx < 2; ++tx) {
+            #pragma unroll
             for (int i = 0; i < 3; ++i) {
-                out[6 * u + 3 * tx + i].re = sh[tx][i][0];
-                out[6 * u + 3 * tx + i].im = sh[tx][i][1];
+                warp_sh[tx][i][0][warp_id] = sum[tx][i].re;
+                warp_sh[tx][i][1][warp_id] = sum[tx][i].im;
             }
-        lit_out[u] = lit_sh[0];
+        }
+        warp_lit[warp_id] = lit;
+    }
+
+    __syncthreads();
+
+    if (warp_id == 0) {
+        Real r_val[2][3][2];
+        #pragma unroll
+        for (int tx = 0; tx < 2; ++tx) {
+            #pragma unroll
+            for (int i = 0; i < 3; ++i) {
+                r_val[tx][i][0] = (lane_id < kNumWarps) ? warp_sh[tx][i][0][lane_id] : Real(0);
+                r_val[tx][i][1] = (lane_id < kNumWarps) ? warp_sh[tx][i][1][lane_id] : Real(0);
+            }
+        }
+        int l_val = (lane_id < kNumWarps) ? warp_lit[lane_id] : 0;
+
+        #pragma unroll
+        for (int offset = kNumWarps / 2; offset > 0; offset >>= 1) {
+            #pragma unroll
+            for (int tx = 0; tx < 2; ++tx) {
+                #pragma unroll
+                for (int i = 0; i < 3; ++i) {
+                    r_val[tx][i][0] += __shfl_down_sync(0xffffffff, r_val[tx][i][0], offset);
+                    r_val[tx][i][1] += __shfl_down_sync(0xffffffff, r_val[tx][i][1], offset);
+                }
+            }
+            l_val += __shfl_down_sync(0xffffffff, l_val, offset);
+        }
+
+        if (lane_id == 0) {
+            #pragma unroll
+            for (int tx = 0; tx < 2; ++tx) {
+                #pragma unroll
+                for (int i = 0; i < 3; ++i) {
+                    out[6 * u + 3 * tx + i].re = r_val[tx][i][0];
+                    out[6 * u + 3 * tx + i].im = r_val[tx][i][1];
+                }
+            }
+            lit_out[u] = l_val;
+        }
     }
 }
 
@@ -1272,21 +1352,21 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
                                 int n_mesh_tris) {
     const int u = static_cast<int>(blockIdx.x);
     const UnitParams<double> p = units[u];
-    __shared__ double sh[2][3][2 * kBlock];
-    __shared__ int lit_sh[kBlock];
+    __shared__ double warp_sh[2][3][2][kNumWarps]; // [tx][xyz][re(0)/im(1)][warp_id]
+    __shared__ int warp_lit[kNumWarps];
     Cplx<double> sum[2][3] = {};
     int lit = 0;
 
     const double to_inc_x = -p.kx, to_inc_y = -p.ky, to_inc_z = -p.kz;
 
     for (int t = static_cast<int>(threadIdx.x); t < ntris; t += kBlock) {
-        const double nx = static_cast<double>(normals[3 * t]);
-        const double ny = static_cast<double>(normals[3 * t + 1]);
-        const double nz = static_cast<double>(normals[3 * t + 2]);
-        const double cx = static_cast<double>(centroids[3 * t]);
-        const double cy = static_cast<double>(centroids[3 * t + 1]);
-        const double cz = static_cast<double>(centroids[3 * t + 2]);
-        const double area_t = static_cast<double>(areas[t]);
+        const double nx = (mesh_normals != nullptr && t < n_mesh_tris) ? mesh_normals[3 * t] : static_cast<double>(normals[3 * t]);
+        const double ny = (mesh_normals != nullptr && t < n_mesh_tris) ? mesh_normals[3 * t + 1] : static_cast<double>(normals[3 * t + 1]);
+        const double nz = (mesh_normals != nullptr && t < n_mesh_tris) ? mesh_normals[3 * t + 2] : static_cast<double>(normals[3 * t + 2]);
+        const double cx = (mesh_centroids != nullptr && t < n_mesh_tris) ? mesh_centroids[3 * t] : static_cast<double>(centroids[3 * t]);
+        const double cy = (mesh_centroids != nullptr && t < n_mesh_tris) ? mesh_centroids[3 * t + 1] : static_cast<double>(centroids[3 * t + 1]);
+        const double cz = (mesh_centroids != nullptr && t < n_mesh_tris) ? mesh_centroids[3 * t + 2] : static_cast<double>(centroids[3 * t + 2]);
+        const double area_t = (mesh_areas != nullptr && t < n_mesh_tris) ? mesh_areas[t] : static_cast<double>(areas[t]);
 
         bool faces = (nx * to_inc_x + ny * to_inc_y + nz * to_inc_z > 0.0);
         bool is_lit = faces;
@@ -1677,31 +1757,69 @@ __global__ void po_mixed_kernel(const float* __restrict__ centroids, // [3N]
     }
 
     const int lane = static_cast<int>(threadIdx.x);
-    for (int tx = 0; tx < 2; ++tx)
+    const int warp_id = lane / kWarpSize;
+    const int lane_id = lane % kWarpSize;
+
+    #pragma unroll
+    for (int tx = 0; tx < 2; ++tx) {
+        #pragma unroll
         for (int i = 0; i < 3; ++i) {
-            sh[tx][i][2 * lane] = sum[tx][i].re;
-            sh[tx][i][2 * lane + 1] = sum[tx][i].im;
+            sum[tx][i].re = warp_reduce_sum(sum[tx][i].re);
+            sum[tx][i].im = warp_reduce_sum(sum[tx][i].im);
         }
-    lit_sh[lane] = lit;
-    __syncthreads();
-    for (int stride = kBlock / 2; stride > 0; stride >>= 1) {
-        if (lane < stride) {
-            for (int tx = 0; tx < 2; ++tx)
-                for (int i = 0; i < 3; ++i) {
-                    sh[tx][i][2 * lane] += sh[tx][i][2 * (lane + stride)];
-                    sh[tx][i][2 * lane + 1] += sh[tx][i][2 * (lane + stride) + 1];
-                }
-            lit_sh[lane] += lit_sh[lane + stride];
-        }
-        __syncthreads();
     }
-    if (lane == 0) {
-        for (int tx = 0; tx < 2; ++tx)
+    lit = warp_reduce_sum(lit);
+
+    if (lane_id == 0) {
+        #pragma unroll
+        for (int tx = 0; tx < 2; ++tx) {
+            #pragma unroll
             for (int i = 0; i < 3; ++i) {
-                out[6 * u + 3 * tx + i].re = sh[tx][i][0];
-                out[6 * u + 3 * tx + i].im = sh[tx][i][1];
+                warp_sh[tx][i][0][warp_id] = sum[tx][i].re;
+                warp_sh[tx][i][1][warp_id] = sum[tx][i].im;
             }
-        lit_out[u] = lit_sh[0];
+        }
+        warp_lit[warp_id] = lit;
+    }
+
+    __syncthreads();
+
+    if (warp_id == 0) {
+        double r_val[2][3][2];
+        #pragma unroll
+        for (int tx = 0; tx < 2; ++tx) {
+            #pragma unroll
+            for (int i = 0; i < 3; ++i) {
+                r_val[tx][i][0] = (lane_id < kNumWarps) ? warp_sh[tx][i][0][lane_id] : 0.0;
+                r_val[tx][i][1] = (lane_id < kNumWarps) ? warp_sh[tx][i][1][lane_id] : 0.0;
+            }
+        }
+        int l_val = (lane_id < kNumWarps) ? warp_lit[lane_id] : 0;
+
+        #pragma unroll
+        for (int offset = kNumWarps / 2; offset > 0; offset >>= 1) {
+            #pragma unroll
+            for (int tx = 0; tx < 2; ++tx) {
+                #pragma unroll
+                for (int i = 0; i < 3; ++i) {
+                    r_val[tx][i][0] += __shfl_down_sync(0xffffffff, r_val[tx][i][0], offset);
+                    r_val[tx][i][1] += __shfl_down_sync(0xffffffff, r_val[tx][i][1], offset);
+                }
+            }
+            l_val += __shfl_down_sync(0xffffffff, l_val, offset);
+        }
+
+        if (lane_id == 0) {
+            #pragma unroll
+            for (int tx = 0; tx < 2; ++tx) {
+                #pragma unroll
+                for (int i = 0; i < 3; ++i) {
+                    out[6 * u + 3 * tx + i].re = r_val[tx][i][0];
+                    out[6 * u + 3 * tx + i].im = r_val[tx][i][1];
+                }
+            }
+            lit_out[u] = l_val;
+        }
     }
 }
 

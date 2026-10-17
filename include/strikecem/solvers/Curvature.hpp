@@ -22,4 +22,7 @@ std::vector<CurvatureInfo> estimate_mesh_curvatures(const NormalizedMesh& mesh,
 // Compute asymptotic Fock/Ufimtsev Physical Optics curvature correction multiplier
 std::complex<double> po_curvature_factor(double mean_curvature, double k, double cos_inc);
 
+// Universal Fock creeping wave function g(xi) with continuous Airy transition
+std::complex<double> fock_creeping_wave(double mean_curvature, double k, double cos_inc);
+
 } // namespace strikecem

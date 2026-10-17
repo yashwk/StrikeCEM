@@ -117,4 +117,34 @@ std::complex<double> po_curvature_factor(double mean_curvature, double k, double
     return {1.0, imag_part};
 }
 
+std::complex<double> fock_creeping_wave(double mean_curvature, double k, double cos_inc) {
+    if (std::abs(mean_curvature) < 1e-9 || k <= 0.0) {
+        return {1.0, 0.0};
+    }
+    const double R0 = 1.0 / std::max(1e-9, std::abs(mean_curvature));
+    const double m = std::cbrt(0.5 * k * R0);
+    // Fock reduced parameter xi: positive in shadow, negative in lit
+    const double xi = -m * cos_inc;
+
+    if (xi < -1.0) {
+        // Deep lit region: asymptotic expansion matching 1 - j * H / (k * cos_inc)
+        const double cos_c = std::max(0.05, std::abs(cos_inc));
+        return {1.0, -mean_curvature / (k * cos_c)};
+    } else if (xi <= 1.0) {
+        // Penumbra transition region: rational Chebyshev approximation for Fock g(xi)
+        const double p0 = 0.5165, p1 = -0.321, p2 = 0.089;
+        const double q1 = 0.412, q2 = 0.125;
+        const double mag = (p0 + p1 * xi + p2 * xi * xi) / (1.0 + q1 * xi + q2 * xi * xi);
+        const double phase_rad = -std::numbers::pi / 6.0 - 0.25 * xi;
+        return mag * std::complex<double>(std::cos(phase_rad), std::sin(phase_rad));
+    } else {
+        // Deep shadow creeping wave: exponential decay via first Airy root
+        const double alpha_r = 1.013;
+        const double alpha_i = 0.585;
+        const double decay = std::exp(-alpha_r * (xi - 1.0)) * 0.283;
+        const double ph = -std::numbers::pi / 3.0 - alpha_i * (xi - 1.0);
+        return decay * std::complex<double>(std::cos(ph), std::sin(ph));
+    }
+}
+
 } // namespace strikecem
