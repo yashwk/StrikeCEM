@@ -47,7 +47,16 @@ public:
                               InterpolationMode mode) const;
 
 private:
+    struct SphericalNode {
+        size_t direction_index = 0;
+        int left = -1;
+        int right = -1;
+        uint8_t axis = 0;
+        double split = 0.0;
+    };
+
     void init_index();
+    int build_spherical_index(size_t begin, size_t end, uint8_t axis);
     std::complex<double> query_direction(size_t fi, size_t pol_idx, double az_deg, double el_deg,
                                          InterpolationMode mode) const;
     std::complex<double> interpolate_regular_bicubic(size_t fi, size_t pol_idx, double az_deg, double el_deg) const;
@@ -83,6 +92,9 @@ private:
     std::vector<double> unique_el_;
     // Mapping from (az_idx, el_idx) -> dir_idx (flat 1D: az_idx * Nel + el_idx)
     std::vector<size_t> az_el_to_dir_;
+    std::vector<size_t> spherical_order_;
+    std::vector<SphericalNode> spherical_tree_;
+    int spherical_root_ = -1;
 
     std::atomic<InterpolationMode> interp_mode_{InterpolationMode::Bicubic};
 };

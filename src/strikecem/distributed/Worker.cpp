@@ -1,6 +1,7 @@
 #include "strikecem/distributed/Worker.hpp"
 
 #include <arpa/inet.h>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -137,7 +138,23 @@ nlohmann::json WorkerDaemon::send_request(const std::string& method, const std::
                << body_str;
 
     const std::string req_str = req_stream.str();
-    send(sock_fd, req_str.data(), req_str.size(), 0);
+    size_t sent = 0;
+    while (sent < req_str.size()) {
+        const ssize_t n = send(sock_fd, req_str.data() + sent, req_str.size() - sent,
+                               MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
+        if (n == 0) {
+            ::close(sock_fd);
+            throw OutputError("Coordinator closed the connection while receiving a request");
+        }
+        if (n < 0) {
+            const int send_error = errno;
+            ::close(sock_fd);
+            throw OutputError("Failed to send request to coordinator: " +
+                              std::string(std::strerror(send_error)));
+        }
+        sent += static_cast<size_t>(n);
+    }
 
     std::string raw_res;
     char recv_buf[4096];
@@ -212,6 +229,10 @@ WorkerResult WorkerDaemon::run() {
             std::this_thread::sleep_for(std::chrono::milliseconds(options_.poll_interval_ms));
             continue;
         }
+        if (status == "merge_in_progress") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(options_.poll_interval_ms));
+            continue;
+        }
 
         if (status == "acquired") {
             const size_t shard_id = task_res["shard_id"].get<size_t>();
@@ -219,12 +240,15 @@ WorkerResult WorkerDaemon::run() {
             const std::string out_path = task_res["output_path"].get<std::string>();
             const std::string lease_token = task_res.at("lease_token").get<std::string>();
             const int lease_sec = task_res.value("lease_duration_seconds", 30);
+            const std::string leased_out_path = out_path + ".lease-" + lease_token;
+            const std::string leased_cfg_path = cfg_path + ".lease-" + lease_token + ".json";
+            std::atomic<bool> lease_lost{false};
 
             // Heartbeat thread to keep lease alive during execution
             std::atomic<bool> task_running{true};
             std::mutex cv_mtx;
             std::condition_variable cv;
-            std::thread heartbeat_thread([this, shard_id, lease_token, lease_sec,
+            std::thread heartbeat_thread([this, shard_id, lease_token, lease_sec, &lease_lost,
                                           &task_running, &cv_mtx, &cv]() {
                 const int hb_interval = std::max(1, lease_sec / 3);
                 while (task_running.load()) {
@@ -234,11 +258,21 @@ WorkerResult WorkerDaemon::run() {
                     }
                     if (!task_running.load()) break;
                     try {
-                        send_request("POST", "/api/v1/task/heartbeat", {
+                        const auto response = send_request("POST", "/api/v1/task/heartbeat", {
                             {"shard_id", shard_id},
                             {"worker_id", worker_id_},
                             {"lease_token", lease_token}
                         });
+                        if (response.value("status", "") != "ok") {
+                            lease_lost.store(true);
+                            break;
+                        }
+                    } catch (const std::exception& e) {
+                        if (std::string(e.what()).find("HTTP 400") != std::string::npos) {
+                            lease_lost.store(true);
+                            break;
+                        }
+                        // Suppress transient heartbeat network glitches
                     } catch (...) {
                         // Suppress transient heartbeat network glitches
                     }
@@ -249,28 +283,30 @@ WorkerResult WorkerDaemon::run() {
             bool solve_ok = false;
             std::string solve_err;
             try {
-                // If device override requested, adjust shard config
+                std::ifstream in(cfg_path);
+                if (!in) throw OutputError("Cannot open shard config: " + cfg_path);
+                nlohmann::json j;
+                in >> j;
+                j["output"]["path"] = leased_out_path;
                 if (!options_.device.empty() && options_.device != "default") {
-                    std::ifstream in(cfg_path);
-                    if (in) {
-                        nlohmann::json j;
-                        in >> j;
-                        in.close();
-                        if (options_.device.rfind("cuda:", 0) == 0) {
-                            j["execution"]["accelerator"] = "cuda";
-                            j["execution"]["cuda_device_id"] = std::stoi(options_.device.substr(5));
-                        } else if (options_.device == "cuda") {
-                            j["execution"]["accelerator"] = "cuda";
-                            j["execution"]["cuda_device_id"] = 0;
-                        } else {
-                            j["execution"]["accelerator"] = "cpu";
-                        }
-                        std::ofstream out(cfg_path);
-                        out << j.dump(2) << "\n";
+                    if (options_.device.rfind("cuda:", 0) == 0) {
+                        j["execution"]["accelerator"] = "cuda";
+                        j["execution"]["cuda_device_id"] = std::stoi(options_.device.substr(5));
+                    } else if (options_.device == "cuda") {
+                        j["execution"]["accelerator"] = "cuda";
+                        j["execution"]["cuda_device_id"] = 0;
+                    } else {
+                        j["execution"]["accelerator"] = "cpu";
                     }
                 }
+                std::ofstream out(leased_cfg_path);
+                if (!out) throw OutputError("Cannot write leased shard config: " + leased_cfg_path);
+                out << j.dump(2) << "\n";
+                out.flush();
+                if (!out) throw OutputError("Failed writing leased shard config: " + leased_cfg_path);
+                out.close();
 
-                std::vector<std::string> args = {"strikecem", "run", cfg_path};
+                std::vector<std::string> args = {"strikecem", "run", leased_cfg_path};
                 if (!options_.schema_path.empty()) {
                     args.push_back("--schema");
                     args.push_back(options_.schema_path);
@@ -295,18 +331,34 @@ WorkerResult WorkerDaemon::run() {
                 heartbeat_thread.join();
             }
 
+            auto cleanup_lease_files = [&]() {
+                std::error_code ec;
+                fs::remove(leased_cfg_path, ec);
+                fs::remove(leased_out_path, ec);
+                fs::remove(leased_out_path + ".json", ec);
+            };
+
+            if (lease_lost.load()) {
+                cleanup_lease_files();
+                continue;
+            }
+
             if (solve_ok) {
-                const std::string checksum = compute_sha256(out_path);
+                const std::string checksum = compute_sha256(leased_out_path);
                 try {
                     send_request("POST", "/api/v1/task/complete", {
                         {"shard_id", shard_id},
                         {"worker_id", worker_id_},
                         {"lease_token", lease_token},
-                        {"output_path", out_path},
+                        {"output_path", leased_out_path},
                         {"checksum", checksum}
                     });
                     res.tasks_completed++;
                 } catch (const std::exception& e) {
+                    if (std::string(e.what()).find("HTTP 400") != std::string::npos) {
+                        cleanup_lease_files();
+                        continue;
+                    }
                     res.success = false;
                     res.error_message = "Failed to report task completion: " + std::string(e.what());
                     running_.store(false);
@@ -321,6 +373,7 @@ WorkerResult WorkerDaemon::run() {
                     });
                 } catch (...) {}
             }
+            cleanup_lease_files();
 
             if (options_.max_tasks > 0 && res.tasks_completed >= options_.max_tasks) {
                 break;

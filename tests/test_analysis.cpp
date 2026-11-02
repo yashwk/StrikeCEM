@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <tuple>
@@ -200,4 +203,53 @@ TEST(RcsQueryEngine, IrregularNearestUsesAngularDistance) {
     const auto nearest = engine.query(0.0, 80.0, 10.0e9, "HH",
                                       strikecem::InterpolationMode::Nearest);
     EXPECT_DOUBLE_EQ(nearest.scattering_real, 300.0);
+}
+
+TEST(RcsQueryEngine, SphericalIndexMatchesBruteForceInterpolation) {
+    strikecem::ScemDatabase db;
+    db.frequencies_hz = {10.0e9};
+    db.polarizations = {"HH"};
+    std::vector<std::pair<geom::Vec3d, double>> directions;
+    for (size_t i = 0; i < 31; ++i) {
+        const double az = std::fmod(17.0 + 47.0 * i, 360.0);
+        const double el = -70.0 + std::fmod(31.0 * i, 140.0);
+        const double value = 1.0 + static_cast<double>(i);
+        const auto k = strikecem::direction_from_az_el(az, el);
+        directions.emplace_back(k, value);
+        db.directions.emplace_back(static_cast<uint32_t>(i), az, el, k);
+        strikecem::Hdf5SampleRow row;
+        row.direction_index = static_cast<uint32_t>(i);
+        row.scattering_real = value;
+        db.rows.push_back(row);
+    }
+
+    const double query_az = 43.0;
+    const double query_el = 13.0;
+    const auto q = strikecem::direction_from_az_el(query_az, query_el);
+    struct Candidate { double dot; double value; };
+    std::vector<Candidate> candidates;
+    for (const auto& [k, value] : directions)
+        candidates.push_back({q.x * k.x + q.y * k.y + q.z * k.z, value});
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+        return a.dot > b.dot;
+    });
+    candidates.resize(8);
+    std::array<double, 8> theta{};
+    for (size_t i = 0; i < theta.size(); ++i)
+        theta[i] = std::acos(std::clamp(candidates[i].dot, -1.0, 1.0));
+    const double radius = std::max(1.5 * theta.back(), 1e-4);
+    double weight_sum = 0.0;
+    double value_sum = 0.0;
+    for (size_t i = 0; i < theta.size(); ++i) {
+        const double u = std::clamp(theta[i] / radius, 0.0, 1.0);
+        const double w = std::pow(1.0 - u, 4.0) * (4.0 * u + 1.0) /
+                         (theta[i] * theta[i] + 1e-9);
+        weight_sum += w;
+        value_sum += w * candidates[i].value;
+    }
+
+    strikecem::RcsQueryEngine engine(std::move(db));
+    const auto result = engine.query(query_az, query_el, 10.0e9, "HH",
+                                     strikecem::InterpolationMode::Spherical);
+    EXPECT_NEAR(result.scattering_real, value_sum / weight_sum, 1e-9);
 }

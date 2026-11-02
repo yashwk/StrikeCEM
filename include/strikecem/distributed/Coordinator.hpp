@@ -71,9 +71,12 @@ public:
                                  const std::string& checksum);
     nlohmann::json fail_task(size_t shard_id, const std::string& worker_id,
                              const std::string& lease_token, const std::string& error);
+    nlohmann::json retry_merge();
     nlohmann::json get_status() const;
 
     bool is_campaign_complete() const;
+    bool has_merge_failed() const;
+    std::string merge_error() const;
 
 private:
     void init_tasks_from_manifest();
@@ -83,6 +86,8 @@ private:
     void check_expired_leases_locked();
     bool has_lease(const CoordinatorTask& task, const std::string& worker_id,
                    const std::string& lease_token) const;
+    void start_merge_locked();
+    void merge_worker();
 
     CoordinatorOptions options_;
     std::string run_id_;
@@ -102,6 +107,9 @@ private:
     std::vector<CoordinatorTask> tasks_;
     size_t completed_count_ = 0;
     bool merge_executed_ = false;
+    bool merge_in_progress_ = false;
+    std::string merge_error_;
+    std::thread merge_thread_;
 };
 
 } // namespace strikecem

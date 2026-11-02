@@ -87,6 +87,28 @@ TEST(AssetBundle, RejectsUnsafeAndDuplicateEntryNames) {
                  strikecem::OutputError);
 }
 
+TEST(AssetBundle, ReaderRejectsOversizedEntryCount) {
+    const fs::path dir = temp_dir("oversized_count");
+    const fs::path bundle_path = dir / "oversized.scempack";
+    strikecem::AssetBundleWriter writer;
+    writer.add_entry_text("safe.bin", "application/octet-stream", "payload");
+    writer.write_to_file(bundle_path.string());
+
+    strikecem::ScemPackHeader header{};
+    {
+        std::fstream file(bundle_path, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(file.good());
+        file.read(reinterpret_cast<char*>(&header), sizeof(header));
+        ASSERT_TRUE(file.good());
+        header.entry_count = 100'001;
+        file.seekp(0);
+        file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    }
+    EXPECT_THROW(strikecem::AssetBundleReader::open_file(bundle_path.string(), false),
+                 strikecem::OutputError);
+    fs::remove_all(dir);
+}
+
 TEST(AssetBundle, ReaderRejectsTraversalEntryName) {
     const fs::path dir = temp_dir("traversal");
     const fs::path bundle_path = dir / "malicious.scempack";

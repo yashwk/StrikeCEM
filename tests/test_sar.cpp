@@ -143,6 +143,79 @@ TEST(SarImaging, SarImageGenerationAndJson) {
     fs::remove(json_tmp);
 }
 
+TEST(SarImaging, PhaseHistoryBackprojectionFocusesPointTarget) {
+    NormalizedMesh mesh;
+    mesh.vertices = {{0.2, -0.3, 0.0}, {0.4, -0.3, 0.0}, {0.3, -0.1, 0.0}};
+    mesh.triangles = {{0, 1, 2}};
+    mesh.normals = {{0, 0, 1}};
+    mesh.areas = {0.02};
+    mesh.report.bbox_min = {0.2, -0.3, 0.0};
+    mesh.report.bbox_max = {0.4, -0.1, 0.0};
+
+    SarConfig cfg = SarProcessor::make_preset("airborne-x");
+    cfg.image_formation = SarImageFormation::PhaseHistoryBackprojection;
+    cfg.center_frequency_hz = 5.0e9;
+    cfg.bandwidth_hz = 1.0e9;
+    cfg.altitude_m = 1000.0;
+    cfg.aperture_angle_deg = 5.0;
+    cfg.num_pulses = 32;
+    cfg.num_frequencies = 64;
+    cfg.ground_type = SarGroundType::None;
+    cfg.grid_samples_range = 96;
+    cfg.grid_samples_azimuth = 96;
+
+    const SarImage image = SarProcessor::compute(mesh, cfg, "point target");
+    const double target_x = (mesh.vertices[0].x + mesh.vertices[1].x + mesh.vertices[2].x) / 3.0;
+    const double target_y = (mesh.vertices[0].y + mesh.vertices[1].y + mesh.vertices[2].y) / 3.0;
+    EXPECT_NEAR(image.peak_ground_range_m, target_x, 0.25);
+    EXPECT_NEAR(image.peak_azimuth_m, target_y, 0.25);
+    EXPECT_TRUE(std::isfinite(image.peak_rcs_dbsm));
+    EXPECT_EQ(image.to_json()["image_formation"], "phase_history_backprojection");
+    EXPECT_TRUE(image.to_json()["fidelity"]["coherent_phase_history"]);
+}
+
+TEST(SarImaging, PhaseHistoryHandlesTwoFrequencySamples) {
+    NormalizedMesh mesh;
+    mesh.vertices = {{0.2, -0.3, 0.0}, {0.4, -0.3, 0.0}, {0.3, -0.1, 0.0}};
+    mesh.triangles = {{0, 1, 2}};
+    mesh.normals = {{0, 0, 1}};
+    mesh.areas = {0.02};
+    mesh.report.bbox_min = {0.2, -0.3, 0.0};
+    mesh.report.bbox_max = {0.4, -0.1, 0.0};
+
+    SarConfig cfg = SarProcessor::make_preset("airborne-x");
+    cfg.image_formation = SarImageFormation::PhaseHistoryBackprojection;
+    cfg.altitude_m = 1000.0;
+    cfg.num_pulses = 8;
+    cfg.num_frequencies = 2;
+    cfg.max_scattering_centers = 1;
+    cfg.grid_samples_range = 32;
+    cfg.grid_samples_azimuth = 32;
+
+    const SarImage image = SarProcessor::compute(mesh, cfg);
+    EXPECT_TRUE(std::isfinite(image.peak_rcs_dbsm));
+}
+
+TEST(SarImaging, PhaseHistoryRejectsWorkEstimateIncludingRangeCompression) {
+    NormalizedMesh mesh;
+    mesh.vertices = {{0.2, -0.3, 0.0}, {0.4, -0.3, 0.0}, {0.3, -0.1, 0.0}};
+    mesh.triangles = {{0, 1, 2}};
+    mesh.normals = {{0, 0, 1}};
+    mesh.areas = {0.02};
+    mesh.report.bbox_min = {0.2, -0.3, 0.0};
+    mesh.report.bbox_max = {0.4, -0.1, 0.0};
+
+    SarConfig cfg = SarProcessor::make_preset("airborne-x");
+    cfg.image_formation = SarImageFormation::PhaseHistoryBackprojection;
+    cfg.num_pulses = 256;
+    cfg.num_frequencies = 512;
+    cfg.max_scattering_centers = 1;
+    cfg.grid_samples_range = 512;
+    cfg.grid_samples_azimuth = 512;
+
+    EXPECT_THROW(SarProcessor::compute(mesh, cfg), std::invalid_argument);
+}
+
 TEST(SarImaging, ImageRenderingAndFileExport) {
     NormalizedMesh mesh;
     mesh.vertices = {{-2, -1, 0}, {2, -1, 0}, {0, 2, 1}};

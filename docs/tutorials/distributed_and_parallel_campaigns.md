@@ -27,7 +27,7 @@ strikecem run-parallel configs/full_sphere_xband.json \
 
 ## 2. Distributed HTTP REST Campaign Coordinator (`coordinate` & `worker`)
 
-For multi-node cluster networks without a shared filesystem or centralized job queue, StrikeCEM provides a lightweight, self-contained HTTP REST coordinator and headless worker daemon.
+StrikeCEM provides a lightweight HTTP REST coordinator and headless worker daemon. The current protocol passes shard config and output paths, so coordinator and workers must see the manifest, configs, model assets, and output directory through a shared filesystem with matching paths.
 
 ```
        [Worker Node 1] ─── POST /api/v1/task/acquire ───┐
@@ -58,6 +58,8 @@ strikecem coordinate --manifest ./shards/manifest.json \
 - `--lease 300`: Each shard is leased for 300 seconds. If a worker node crashes or disconnects, the lease expires and the shard is automatically returned to the pending queue.
 - `--auto-exit`: Coordinator terminates cleanly after 100% of shards are solved and merged.
 - `POST /api/v1/task/acquire` returns a random `lease_token`; clients must send it with heartbeat, completion, and failure requests. Expired or reassigned leases reject old tokens.
+- Workers write to lease-specific staged output paths. The coordinator promotes a result only after it verifies the active token and checksum.
+- If reduction fails, `GET /api/v1/status` reports `merge_error`; retry it with `POST /api/v1/merge/retry` after correcting the cause.
 
 ### Step 3: Launch Headless Workers
 

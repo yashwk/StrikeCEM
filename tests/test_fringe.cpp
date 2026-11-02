@@ -871,7 +871,21 @@ TEST(Fringe, PtdNonPecFaceWarning) {
     const strikecem::FringeOptions fringe{true, &edge_model, "ptd_full"};
     const auto plan = make_fringe_plan({10e9}, {{0.0, 0.0}}, {"HH"});
 
-    const auto res = strikecem::solve_po(mesh, plan, rc.value, fringe);
+    strikecem::MaterialModel pec;
+    pec.tag = "pec";
+    pec.type = strikecem::WallType::Pec;
+    strikecem::MaterialModel dielectric;
+    dielectric.tag = "dielectric_foam";
+    dielectric.type = strikecem::WallType::Dielectric;
+    dielectric.table.push_back({10e9, {{2.0, 0.0}, {1.0, 0.0}}, 0.0});
+    strikecem::MaterialOptions material;
+    material.enabled = true;
+    material.models = {pec, dielectric};
+    material.facet_material_indices.resize(mesh.triangles.size(), 0);
+    ASSERT_FALSE(material.facet_material_indices.empty());
+    material.facet_material_indices[0] = 1;
+
+    const auto res = strikecem::solve_po(mesh, plan, rc.value, fringe, {}, material);
     bool found_warning = false;
     for (const auto& w : res.warnings) {
         if (w.find("non-PEC faces; PTD assumes PEC wedge") != std::string::npos) {

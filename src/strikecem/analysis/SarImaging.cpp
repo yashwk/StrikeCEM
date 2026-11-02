@@ -4,6 +4,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <initializer_list>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -30,8 +31,7 @@ double uniform_random(int x, int y, uint32_t seed = 1337) {
 // Convert decibels to grayscale color (0..255)
 rendering::Rgba dbsm_to_sar_grayscale(double db, double min_db = -40.0, double max_db = 0.0) {
     double norm = std::clamp((db - min_db) / (max_db - min_db), 0.0, 1.0);
-    // Empirically calibrated against real spaceborne satellite SAR reconnaissance imagery:
-    // Shadow noise floor ~35..45, tarmac clutter ~95..110, airframe body ~125..150, glints ~220..255
+    // Display mapping only; the visualization mode is not radiometrically calibrated.
     double val_curve = 25.0 + 230.0 * std::pow(norm, 1.35);
     uint8_t val = static_cast<uint8_t>(std::clamp(val_curve, 0.0, 255.0));
     return {val, val, val, 255};
@@ -285,10 +285,223 @@ static void splat_sar_scatterer(
     }
 }
 
+static void form_phase_history_image(
+    SarImage& img, const NormalizedMesh& mesh, const SarConfig& config,
+    const std::vector<double>& facet_refl,
+    const geom::Vec3d& scene_center, size_t nx, size_t ny) {
+    struct Scatterer {
+        geom::Vec3d position;
+        std::complex<double> amplitude;
+    };
+
+    const double lambda = kSpeedOfLight / config.center_frequency_hz;
+    const size_t stride = std::max<size_t>(
+        1, (mesh.triangles.size() + config.max_scattering_centers - 1) /
+               config.max_scattering_centers);
+    std::vector<Scatterer> scatterers;
+    scatterers.reserve(std::min(config.max_scattering_centers, mesh.triangles.size()));
+    for (size_t t = 0; t < mesh.triangles.size(); t += stride) {
+        const auto& tri = mesh.triangles[t];
+        const auto& a = mesh.vertices[tri[0]];
+        const auto& b = mesh.vertices[tri[1]];
+        const auto& c = mesh.vertices[tri[2]];
+        const geom::Vec3d center{(a.x + b.x + c.x) / 3.0,
+                                 (a.y + b.y + c.y) / 3.0,
+                                 (a.z + b.z + c.z) / 3.0};
+        const double area = t < mesh.areas.size()
+                                ? mesh.areas[t]
+                                : geom::triangleArea(a, b, c);
+        if (!(area > 0.0)) continue;
+        const geom::Vec3d normal = t < mesh.normals.size()
+                                       ? mesh.normals[t]
+                                       : geom::cross(b - a, c - a).normalized();
+        const double projection = std::abs(geom::dot(normal, geom::Vec3d{
+            std::cos(config.radar_azimuth_deg * M_PI / 180.0) *
+                std::sin(config.incidence_angle_deg * M_PI / 180.0),
+            std::sin(config.radar_azimuth_deg * M_PI / 180.0) *
+                std::sin(config.incidence_angle_deg * M_PI / 180.0),
+            -std::cos(config.incidence_angle_deg * M_PI / 180.0)}));
+        const double reflectivity = t < facet_refl.size() ? facet_refl[t] : 1.0;
+        const double rcs = 4.0 * M_PI * area * area / (lambda * lambda) *
+                           projection * projection * reflectivity;
+        if (rcs > 1e-20)
+            scatterers.push_back({center, {std::sqrt(rcs), 0.0}});
+    }
+    img.scattering_centers.reserve(scatterers.size());
+    for (const auto& scatterer : scatterers)
+        img.scattering_centers.push_back(scatterer.position);
+
+    const size_t pulses = config.num_pulses;
+    const size_t frequencies = config.num_frequencies;
+    const double frequency_step = config.bandwidth_hz / static_cast<double>(frequencies);
+    const double range_resolution = kSpeedOfLight / (2.0 * config.bandwidth_hz);
+    const double aperture_range = config.altitude_m / std::max(1e-6, std::cos(
+        config.incidence_angle_deg * M_PI / 180.0));
+    const double aperture_length = 2.0 * aperture_range * std::tan(
+        config.aperture_angle_deg * M_PI / 360.0);
+    const double heading = config.heading_deg * M_PI / 180.0;
+    const double track_x = std::sin(heading);
+    const double track_y = std::cos(heading);
+    const double look_az = config.radar_azimuth_deg * M_PI / 180.0;
+    const double horizontal_offset = config.altitude_m * std::tan(
+        config.incidence_angle_deg * M_PI / 180.0);
+    std::vector<geom::Vec3d> platform(pulses);
+    std::vector<double> reference_range(pulses);
+    for (size_t p = 0; p < pulses; ++p) {
+        const double u = static_cast<double>(p) / static_cast<double>(pulses - 1) - 0.5;
+        if (config.mode == SarMode::Circular) {
+            const double angle = 2.0 * M_PI * static_cast<double>(p) / pulses;
+            platform[p] = {scene_center.x + horizontal_offset * std::cos(angle),
+                           scene_center.y + horizontal_offset * std::sin(angle),
+                           scene_center.z + config.altitude_m};
+        } else {
+            const double along = u * aperture_length;
+            platform[p] = {scene_center.x - horizontal_offset * std::cos(look_az) + along * track_x,
+                           scene_center.y - horizontal_offset * std::sin(look_az) + along * track_y,
+                           scene_center.z + config.altitude_m};
+        }
+        const double dx = scene_center.x - platform[p].x;
+        const double dy = scene_center.y - platform[p].y;
+        const double dz = scene_center.z - platform[p].z;
+        reference_range[p] = std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    std::vector<double> window(frequencies, 1.0);
+    if (frequencies > 2 && config.sidelobe_window != "uniform" &&
+        config.sidelobe_window != "unweighted") {
+        for (size_t f = 0; f < frequencies; ++f)
+            window[f] = 0.5 - 0.5 * std::cos(2.0 * M_PI * f / (frequencies - 1));
+    }
+    const double window_sum = std::accumulate(window.begin(), window.end(), 0.0);
+    const double normalization = static_cast<double>(pulses) * window_sum;
+
+    std::vector<std::complex<double>> range_profiles(pulses * frequencies);
+    for (size_t p = 0; p < pulses; ++p) {
+        std::vector<std::complex<double>> history(frequencies);
+        for (size_t f = 0; f < frequencies; ++f) {
+            const double freq = config.center_frequency_hz +
+                (static_cast<double>(f) - 0.5 * static_cast<double>(frequencies - 1)) *
+                    frequency_step;
+            std::complex<double> value{};
+            for (const auto& scatterer : scatterers) {
+                const double dx = scatterer.position.x - platform[p].x;
+                const double dy = scatterer.position.y - platform[p].y;
+                const double dz = scatterer.position.z - platform[p].z;
+                const double range = std::sqrt(dx * dx + dy * dy + dz * dz);
+                value += scatterer.amplitude * std::polar(1.0, -4.0 * M_PI * freq * range /
+                                                                   kSpeedOfLight);
+            }
+            history[f] = value * std::polar(1.0, 4.0 * M_PI * freq *
+                                                       reference_range[p] / kSpeedOfLight);
+        }
+
+        for (size_t r = 0; r < frequencies; ++r) {
+            const double delta_range = (static_cast<double>(r) -
+                                        0.5 * static_cast<double>(frequencies)) *
+                                       range_resolution;
+            std::complex<double> compressed{};
+            for (size_t f = 0; f < frequencies; ++f) {
+                const double delta_frequency = (static_cast<double>(f) -
+                                                0.5 * static_cast<double>(frequencies - 1)) *
+                                               frequency_step;
+                compressed += history[f] * window[f] *
+                    std::polar(1.0, 4.0 * M_PI * delta_frequency * delta_range /
+                                       kSpeedOfLight);
+            }
+            range_profiles[p * frequencies + r] = compressed;
+        }
+    }
+
+    std::vector<std::vector<double>> power(nx, std::vector<double>(ny, 0.0));
+    double peak_power = 0.0;
+    size_t peak_i = 0, peak_j = 0;
+    for (size_t i = 0; i < nx; ++i) {
+        const double x = img.ground_range_axis_m[i];
+        for (size_t j = 0; j < ny; ++j) {
+            const double y = img.azimuth_axis_m[j];
+            std::complex<double> focused{};
+            for (size_t p = 0; p < pulses; ++p) {
+                const double dx = x - platform[p].x;
+                const double dy = y - platform[p].y;
+                const double dz = scene_center.z - platform[p].z;
+                const double range = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const double delta_range = range - reference_range[p];
+                const long bin = std::lround(delta_range / range_resolution +
+                                              0.5 * static_cast<double>(frequencies));
+                if (bin < 0 || bin >= static_cast<long>(frequencies)) continue;
+                focused += range_profiles[p * frequencies + static_cast<size_t>(bin)] *
+                    std::polar(1.0, 4.0 * M_PI * config.center_frequency_hz * delta_range /
+                                       kSpeedOfLight);
+            }
+            const double value = std::norm(focused) / (normalization * normalization);
+            power[i][j] = value;
+            if (value > peak_power) {
+                peak_power = value;
+                peak_i = i;
+                peak_j = j;
+            }
+        }
+    }
+
+    img.intensity_db.assign(nx, std::vector<double>(ny, -config.dynamic_range_db));
+    if (peak_power <= 0.0) return;
+    img.peak_ground_range_m = img.ground_range_axis_m[peak_i];
+    img.peak_azimuth_m = img.azimuth_axis_m[peak_j];
+    img.peak_rcs_dbsm = 10.0 * std::log10(peak_power);
+    const double floor_db = -std::abs(config.dynamic_range_db);
+    for (size_t i = 0; i < nx; ++i) {
+        for (size_t j = 0; j < ny; ++j) {
+            img.intensity_db[i][j] = std::max(
+                floor_db, 10.0 * std::log10(std::max(power[i][j], peak_power * 1e-30) /
+                                            peak_power));
+        }
+    }
+}
+
 SarImage SarProcessor::compute(const NormalizedMesh& mesh,
                                const SarConfig& config,
                                const std::string& vehicle_name,
                                const ResolvedMaterials* materials) {
+    constexpr size_t kMaxImagePixels = 4'194'304;
+    if (!std::isfinite(config.center_frequency_hz) || !std::isfinite(config.bandwidth_hz) ||
+        !std::isfinite(config.altitude_m) || !std::isfinite(config.incidence_angle_deg) ||
+        !std::isfinite(config.aperture_angle_deg) || !std::isfinite(config.platform_velocity_mps) ||
+        !std::isfinite(config.heading_deg) || !std::isfinite(config.radar_azimuth_deg) ||
+        !std::isfinite(config.dynamic_range_db) ||
+        !(config.center_frequency_hz > 0.0) || !(config.bandwidth_hz > 0.0) ||
+        !(config.bandwidth_hz < 2.0 * config.center_frequency_hz) ||
+        !(config.altitude_m > 0.0) || !(config.platform_velocity_mps > 0.0) ||
+        !(config.incidence_angle_deg > 0.0 &&
+                                        config.incidence_angle_deg < 89.9) ||
+        !(config.aperture_angle_deg > 0.0 && config.aperture_angle_deg < 180.0) ||
+        !(config.dynamic_range_db > 0.0))
+        throw std::invalid_argument("invalid SAR frequency, platform, angle, or dynamic range");
+    const size_t nx = config.grid_samples_range;
+    const size_t ny = config.grid_samples_azimuth;
+    if (nx < 2 || ny < 2 || nx > 4096 || ny > 4096 || nx > kMaxImagePixels / ny)
+        throw std::invalid_argument("SAR image dimensions exceed the 4M-pixel limit");
+    if (config.image_formation == SarImageFormation::PhaseHistoryBackprojection) {
+        if (config.num_pulses < 2 || config.num_pulses > 4096 ||
+            config.num_frequencies < 2 || config.num_frequencies > 512 ||
+            config.max_scattering_centers == 0 || config.max_scattering_centers > 65536)
+            throw std::invalid_argument("phase-history SAR settings exceed supported limits");
+        size_t remaining_work = 80'000'000;
+        const auto consume_work = [&remaining_work](std::initializer_list<size_t> factors) {
+            size_t work = 1;
+            for (const size_t factor : factors) {
+                if (factor != 0 && work > remaining_work / factor) return false;
+                work *= factor;
+            }
+            remaining_work -= work;
+            return true;
+        };
+        const size_t centers = std::min(mesh.triangles.size(), config.max_scattering_centers);
+        if (!consume_work({nx, ny, config.num_pulses}) ||
+            !consume_work({config.num_pulses, config.num_frequencies, config.num_frequencies}) ||
+            !consume_work({config.num_pulses, config.num_frequencies, centers}))
+            throw std::invalid_argument("phase-history SAR work estimate exceeds the 80M-operation limit");
+    }
+
     SarImage img;
     img.config = config;
     img.vehicle_name = vehicle_name;
@@ -379,9 +592,6 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
     img.azimuth_min_m = bound_y_min - margin_y;
     img.azimuth_max_m = bound_y_max + margin_y;
 
-    const size_t nx = config.grid_samples_range;
-    const size_t ny = config.grid_samples_azimuth;
-
     img.ground_range_axis_m.resize(nx);
     const double dx = (img.ground_range_max_m - img.ground_range_min_m) / static_cast<double>(nx);
     for (size_t i = 0; i < nx; ++i) {
@@ -392,6 +602,15 @@ SarImage SarProcessor::compute(const NormalizedMesh& mesh,
     const double dy = (img.azimuth_max_m - img.azimuth_min_m) / static_cast<double>(ny);
     for (size_t j = 0; j < ny; ++j) {
         img.azimuth_axis_m[j] = img.azimuth_min_m + (j + 0.5) * dy;
+    }
+
+    if (config.image_formation == SarImageFormation::PhaseHistoryBackprojection) {
+        const geom::Vec3d scene_center{0.5 * (bmin.x + bmax.x),
+                                       0.5 * (bmin.y + bmax.y),
+                                       0.5 * (bmin.z + bmax.z)};
+        form_phase_history_image(img, mesh, config, facet_refl,
+                                 scene_center, nx, ny);
+        return img;
     }
 
     // 1. Geometric Ground Shadow Mask
@@ -737,11 +956,43 @@ nlohmann::json SarImage::to_json() const {
     nlohmann::json j;
     j["vehicle_name"] = vehicle_name;
     j["mesh_triangles"] = mesh_triangles;
-    j["platform"] = (config.platform == SarPlatform::Spaceborne) ? "spaceborne" : "airborne";
-    j["mode"] = (config.mode == SarMode::Spotlight) ? "spotlight" : "stripmap";
+    j["platform"] = config.platform == SarPlatform::Spaceborne ? "spaceborne" :
+                     config.platform == SarPlatform::Airborne ? "airborne" : "terrestrial";
+    j["mode"] = config.mode == SarMode::Spotlight ? "spotlight" :
+                 config.mode == SarMode::Stripmap ? "stripmap" : "circular";
+    const bool phase_history =
+        config.image_formation == SarImageFormation::PhaseHistoryBackprojection;
+    j["image_formation"] = phase_history ? "phase_history_backprojection"
+                                         : "synthetic_visualization";
+    j["fidelity"] = {
+        {"coherent_phase_history", phase_history},
+        {"scatter_model", phase_history ? "scalar_facet_rcs_approximation" : "heuristic_display_model"},
+        {"calibration", phase_history ? "facet_rcs_estimate; image normalized to peak"
+                                      : "display-relative; not calibrated RCS"},
+        {"platform_trajectory", phase_history ? "constant_velocity_aperture" : "not_modeled"},
+        {"ground_scene", phase_history ? "target_facets_only; no clutter or multipath"
+                                       : "heuristic_clutter_shadow_and_multipath"}
+    };
+    const double aperture_duration = phase_history
+        ? (2.0 * config.altitude_m /
+           std::max(1e-6, std::cos(config.incidence_angle_deg * M_PI / 180.0)) *
+           std::tan(config.aperture_angle_deg * M_PI / 360.0) /
+           std::max(1e-6, config.platform_velocity_mps))
+        : 0.0;
+    j["sampling"] = {
+        {"pulses", phase_history ? config.num_pulses : 0},
+        {"frequencies", phase_history ? config.num_frequencies : 0},
+        {"center_frequency_hz", config.center_frequency_hz},
+        {"bandwidth_hz", config.bandwidth_hz},
+        {"max_scattering_centers", phase_history ? config.max_scattering_centers : 0},
+        {"used_scattering_centers", phase_history ? scattering_centers.size() : 0},
+        {"aperture_duration_s", aperture_duration}
+    };
     j["center_frequency_hz"] = config.center_frequency_hz;
     j["bandwidth_hz"] = config.bandwidth_hz;
     j["incidence_angle_deg"] = config.incidence_angle_deg;
+    j["radar_azimuth_deg"] = config.radar_azimuth_deg;
+    j["heading_deg"] = config.heading_deg;
     j["altitude_m"] = config.altitude_m;
     j["platform_velocity_mps"] = config.platform_velocity_mps;
 

@@ -77,6 +77,15 @@ fs::path write_json(const fs::path& path, const nlohmann::json& j) {
 
 } // namespace
 
+TEST(Cli, VersionOptionPrintsBuildIdentity) {
+    testing::internal::CaptureStdout();
+    EXPECT_EQ(call_cli({"--version"}), 0);
+    const std::string output = testing::internal::GetCapturedStdout();
+    EXPECT_NE(output.find("StrikeCEM"), std::string::npos);
+    EXPECT_NE(output.find(SCEM_VERSION), std::string::npos);
+    EXPECT_NE(output.find(SCEM_GIT_REVISION), std::string::npos);
+}
+
 TEST(LocalParallelRunner, DirectVersusParallelExecutionMatch) {
     Workdir w;
     const fs::path mono_out = w.dir / "monolithic.h5";
@@ -192,12 +201,14 @@ TEST(Coordinator, HttpRestEndpoints) {
 
     // 5. POST /api/v1/task/complete rejects an incorrect checksum.
     const fs::path shard_path = shards_dir / "shard_0000.h5";
+    const fs::path leased_shard_path = shard_path.string() + ".lease-" + lease_token;
     ASSERT_EQ(call_cli({"run", (shards_dir / "shard_0000.json").string()}), 0);
+    fs::copy_file(shard_path, leased_shard_path);
     EXPECT_THROW(client.send_request("POST", "/api/v1/task/complete", {
         {"shard_id", 0},
         {"worker_id", "test_worker_1"},
         {"lease_token", lease_token},
-        {"output_path", shard_path.string()},
+        {"output_path", leased_shard_path.string()},
         {"checksum", "deadbeef"}
     }), std::runtime_error);
 
@@ -206,21 +217,83 @@ TEST(Coordinator, HttpRestEndpoints) {
     ASSERT_TRUE(shard_file.good());
     const std::string shard_bytes((std::istreambuf_iterator<char>(shard_file)),
                                   std::istreambuf_iterator<char>());
+    EXPECT_THROW(client.send_request("POST", "/api/v1/task/complete", {
+        {"shard_id", 0}, {"worker_id", "test_worker_1"},
+        {"lease_token", lease_token}, {"output_path", shard_path.string()},
+        {"checksum", strikecem::sha256_hex(shard_bytes)}
+    }), std::runtime_error);
     const auto comp_res = client.send_request("POST", "/api/v1/task/complete", {
         {"shard_id", 0},
         {"worker_id", "test_worker_1"},
         {"lease_token", lease_token},
-        {"output_path", shard_path.string()},
+        {"output_path", leased_shard_path.string()},
         {"checksum", strikecem::sha256_hex(shard_bytes)}
     });
     EXPECT_EQ(comp_res.value("status", ""), "ok");
     EXPECT_EQ(comp_res.value("completed_count", 0), 1);
+    EXPECT_TRUE(fs::exists(shard_path));
+    EXPECT_FALSE(fs::exists(leased_shard_path));
 
     // 6. Check updated status
     status_res = client.send_request("GET", "/api/v1/status");
     EXPECT_EQ(status_res.value("completed_shards", 0), 1);
     EXPECT_EQ(status_res.value("pending_shards", 0), 1);
 
+    server.stop();
+}
+
+TEST(Coordinator, MergeFailureIsVisibleAndRetryable) {
+    Workdir w;
+    const fs::path requested_out = w.dir / "final.h5";
+    const fs::path cfg_file = write_json(w.dir / "config.json", make_test_config(requested_out, 2, 1));
+    const fs::path shards_dir = w.dir / "shards";
+    ASSERT_EQ(call_cli({"shard", "--num-shards", "1", "--out-dir", shards_dir.string(),
+                        cfg_file.string()}), 0);
+
+    strikecem::CoordinatorOptions opts;
+    opts.manifest_path = (shards_dir / "shard_manifest.json").string();
+    opts.output_path = (w.dir / "missing" / "final.h5").string();
+    opts.port = 0;
+    opts.auto_merge = true;
+    opts.schema_path = SCEM_SCHEMA_PATH;
+    strikecem::CoordinatorServer server(opts);
+    server.start(true);
+
+    strikecem::WorkerOptions wopts;
+    wopts.coordinator_url = "http://127.0.0.1:" + std::to_string(server.bound_port());
+    strikecem::WorkerDaemon client(wopts);
+    const auto acquired = client.send_request("POST", "/api/v1/task/acquire", {
+        {"worker_id", "merge_test_worker"}, {"device", "cpu"}
+    });
+    const std::string token = acquired.at("lease_token").get<std::string>();
+    const fs::path shard_config = shards_dir / "shard_0000.json";
+    const fs::path shard_path = shards_dir / "shard_0000.h5";
+    ASSERT_EQ(call_cli({"run", shard_config.string()}), 0);
+    const fs::path leased_path = shard_path.string() + ".lease-" + token;
+    fs::copy_file(shard_path, leased_path);
+    std::ifstream shard_file(leased_path, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(shard_file)),
+                            std::istreambuf_iterator<char>());
+    const auto completed = client.send_request("POST", "/api/v1/task/complete", {
+        {"shard_id", 0}, {"worker_id", "merge_test_worker"}, {"lease_token", token},
+        {"output_path", leased_path.string()}, {"checksum", strikecem::sha256_hex(bytes)}
+    });
+    EXPECT_EQ(completed.value("status", ""), "ok");
+    EXPECT_FALSE(server.is_campaign_complete());
+
+    for (int i = 0; i < 100 && !server.has_merge_failed(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(server.has_merge_failed());
+    EXPECT_FALSE(server.is_campaign_complete());
+    EXPECT_FALSE(server.merge_error().empty());
+
+    fs::create_directories(fs::path(opts.output_path).parent_path());
+    const auto retry = client.send_request("POST", "/api/v1/merge/retry");
+    EXPECT_EQ(retry.value("status", ""), "ok");
+    for (int i = 0; i < 300 && !server.is_campaign_complete(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_TRUE(server.is_campaign_complete());
+    EXPECT_TRUE(fs::exists(opts.output_path));
     server.stop();
 }
 
@@ -377,6 +450,7 @@ TEST(Coordinator, WorkerHeartbeatAndLeaseExpiry) {
         {"device", "cpu"}
     });
     EXPECT_EQ(res1.value("status", ""), "acquired");
+    const std::string token_a = res1.at("lease_token").get<std::string>();
 
     // Immediately try to lease again -> none available
     auto res2 = client.send_request("POST", "/api/v1/task/acquire", {
@@ -395,6 +469,7 @@ TEST(Coordinator, WorkerHeartbeatAndLeaseExpiry) {
     });
     EXPECT_EQ(res3.value("status", ""), "acquired");
     EXPECT_EQ(res3.value("shard_id", 999), 0);
+    const std::string token_b = res3.at("lease_token").get<std::string>();
 
     const fs::path shard_config = shards_dir / "shard_0000.json";
     const fs::path shard_path = shards_dir / "shard_0000.h5";
@@ -404,28 +479,41 @@ TEST(Coordinator, WorkerHeartbeatAndLeaseExpiry) {
     const std::string shard_bytes((std::istreambuf_iterator<char>(shard_file)),
                                   std::istreambuf_iterator<char>());
     const std::string checksum = strikecem::sha256_hex(shard_bytes);
+    const fs::path leased_shard_path = shard_path.string() + ".lease-" + token_b;
+    fs::copy_file(shard_path, leased_shard_path);
+    const fs::path stale_shard_path = shard_path.string() + ".lease-" + token_a;
+    {
+        std::ofstream stale(stale_shard_path, std::ios::binary);
+        stale << "stale worker output";
+    }
 
     // The expired worker cannot renew, fail, or complete a shard reassigned to B.
     EXPECT_THROW(client.send_request("POST", "/api/v1/task/heartbeat", {
-        {"shard_id", 0}, {"worker_id", "worker_A"}
+        {"shard_id", 0}, {"worker_id", "worker_A"}, {"lease_token", token_a}
     }), std::runtime_error);
     EXPECT_THROW(client.send_request("POST", "/api/v1/task/fail", {
-        {"shard_id", 0}, {"worker_id", "worker_A"}, {"error", "stale worker"}
+        {"shard_id", 0}, {"worker_id", "worker_A"}, {"lease_token", token_a},
+        {"error", "stale worker"}
     }), std::runtime_error);
     EXPECT_THROW(client.send_request("POST", "/api/v1/task/complete", {
-        {"shard_id", 0}, {"worker_id", "worker_A"},
-        {"output_path", shard_path.string()}, {"checksum", checksum}
+        {"shard_id", 0}, {"worker_id", "worker_A"}, {"lease_token", token_a},
+        {"output_path", stale_shard_path.string()},
+        {"checksum", strikecem::sha256_hex("stale worker output")}
     }), std::runtime_error);
     auto still_leased = client.send_request("GET", "/api/v1/status");
     EXPECT_EQ(still_leased.value("completed_shards", 99), 0);
     EXPECT_EQ(still_leased.value("leased_shards", 99), 1);
 
     const auto completed = client.send_request("POST", "/api/v1/task/complete", {
-        {"shard_id", 0}, {"worker_id", "worker_B"},
-        {"output_path", shard_path.string()}, {"checksum", checksum}
+        {"shard_id", 0}, {"worker_id", "worker_B"}, {"lease_token", token_b},
+        {"output_path", leased_shard_path.string()}, {"checksum", checksum}
     });
     EXPECT_EQ(completed.value("status", ""), "ok");
     EXPECT_EQ(completed.value("completed_count", 0), 1);
+    EXPECT_FALSE(fs::exists(leased_shard_path));
+    EXPECT_TRUE(fs::exists(stale_shard_path));
+    const auto published_db = strikecem::read_hdf5_database(shard_path.string());
+    EXPECT_EQ(published_db.rows.size(), 4u);
 
     server.stop();
 }

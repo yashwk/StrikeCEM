@@ -41,7 +41,13 @@ enum class SarGroundType {
     Pec         // Perfect Electric Conductor ground plane
 };
 
+enum class SarImageFormation {
+    SyntheticVisualization,
+    PhaseHistoryBackprojection
+};
+
 struct SarConfig {
+    SarImageFormation image_formation = SarImageFormation::SyntheticVisualization;
     // Platform & trajectory
     SarPlatform platform = SarPlatform::Spaceborne;
     SarMode mode = SarMode::Spotlight;
@@ -59,6 +65,7 @@ struct SarConfig {
     std::string polarization = "VV";
     size_t num_pulses = 128;                  // Number of synthetic aperture pulses
     size_t num_frequencies = 32;              // Frequency steps across bandwidth
+    size_t max_scattering_centers = 4096;     // Mesh facets sampled by phase-history mode
 
     // Synthetic aperture angle
     double aperture_angle_deg = 2.5;          // Angular synthetic aperture sweep span
@@ -102,7 +109,7 @@ struct SarImage {
     std::vector<double> ground_range_axis_m;
     std::vector<double> azimuth_axis_m;
 
-    // Calibrated 2D dB intensity grid: [range_idx][az_idx] (peak normalized to 0 dB)
+    // Display intensity grid in dB: [range_idx][az_idx], peak normalized to 0 dB.
     std::vector<std::vector<double>> intensity_db;
 
     // Peak scatterer metadata

@@ -1,14 +1,17 @@
 #include "strikecem/api/RcsQueryEngine.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include "strikecem/core/Conventions.hpp"
 #include "strikecem/solvers/PhysicalOptics.hpp"
@@ -59,57 +62,58 @@ T cubic_hermite_interp(double u, double h, const T& y0, const T& y1, const T& m0
     return h00 * y0 + h10 * (h * m0) + h01 * y1 + h11 * (h * m1);
 }
 
-template <typename T>
-T eval_1d_cubic_spline(const std::vector<double>& X, const std::vector<T>& Y, double x) {
-    const size_t N = X.size();
+template <typename ValueAt>
+auto eval_1d_cubic_spline(const double* X, size_t N, ValueAt value_at, double x)
+    -> std::remove_cvref_t<std::invoke_result_t<ValueAt, size_t>> {
+    using T = std::remove_cvref_t<std::invoke_result_t<ValueAt, size_t>>;
     if (N == 0) return T{};
-    if (N == 1) return Y[0];
-    if (x <= X.front()) return Y.front();
-    if (x >= X.back()) return Y.back();
+    if (N == 1) return value_at(0);
+    if (x <= X[0]) return value_at(0);
+    if (x >= X[N - 1]) return value_at(N - 1);
 
-    auto it = std::upper_bound(X.begin(), X.end(), x);
-    size_t i1 = (it == X.end()) ? N - 1 : std::distance(X.begin(), it);
+    auto it = std::upper_bound(X, X + N, x);
+    size_t i1 = (it == X + N) ? N - 1 : std::distance(X, it);
     size_t i0 = (i1 == 0) ? 0 : i1 - 1;
 
     const double h = X[i1] - X[i0];
-    if (h < 1e-12) return Y[i0];
+    if (h < 1e-12) return value_at(i0);
     const double u = (x - X[i0]) / h;
 
     // Compute tangent m0 at i0
     T m0{};
     if (N == 2) {
-        m0 = (Y[1] - Y[0]) / h;
+        m0 = (value_at(1) - value_at(0)) / h;
     } else if (i0 == 0) {
         const double h0 = X[1] - X[0];
         const double h1 = X[2] - X[1];
         if (std::abs(h0 - h1) < 1e-7) {
-            m0 = (-3.0 * Y[0] + 4.0 * Y[1] - Y[2]) / (2.0 * h0);
+            m0 = (-3.0 * value_at(0) + 4.0 * value_at(1) - value_at(2)) / (2.0 * h0);
         } else {
-            m0 = (Y[1] - Y[0]) / h0;
+            m0 = (value_at(1) - value_at(0)) / h0;
         }
     } else {
         const double h_span = X[i0 + 1] - X[i0 - 1];
-        m0 = (Y[i0 + 1] - Y[i0 - 1]) / h_span;
+        m0 = (value_at(i0 + 1) - value_at(i0 - 1)) / h_span;
     }
 
     // Compute tangent m1 at i1
     T m1{};
     if (N == 2) {
-        m1 = (Y[1] - Y[0]) / h;
+        m1 = (value_at(1) - value_at(0)) / h;
     } else if (i1 == N - 1) {
         const double h_last = X[N - 1] - X[N - 2];
         const double h_prev = X[N - 2] - X[N - 3];
         if (std::abs(h_last - h_prev) < 1e-7) {
-            m1 = (3.0 * Y[N - 1] - 4.0 * Y[N - 2] + Y[N - 3]) / (2.0 * h_last);
+            m1 = (3.0 * value_at(N - 1) - 4.0 * value_at(N - 2) + value_at(N - 3)) / (2.0 * h_last);
         } else {
-            m1 = (Y[N - 1] - Y[N - 2]) / h_last;
+            m1 = (value_at(N - 1) - value_at(N - 2)) / h_last;
         }
     } else {
         const double h_span = X[i1 + 1] - X[i1 - 1];
-        m1 = (Y[i1 + 1] - Y[i1 - 1]) / h_span;
+        m1 = (value_at(i1 + 1) - value_at(i1 - 1)) / h_span;
     }
 
-    return cubic_hermite_interp(u, h, Y[i0], Y[i1], m0, m1);
+    return cubic_hermite_interp(u, h, value_at(i0), value_at(i1), m0, m1);
 }
 
 } // namespace
@@ -243,6 +247,37 @@ void RcsQueryEngine::init_index() {
     } else {
         is_regular_grid_ = false;
     }
+    spherical_order_.resize(directions_.size());
+    std::iota(spherical_order_.begin(), spherical_order_.end(), 0);
+    spherical_tree_.reserve(directions_.size());
+    spherical_root_ = build_spherical_index(0, spherical_order_.size(), 0);
+}
+
+int RcsQueryEngine::build_spherical_index(size_t begin, size_t end, uint8_t axis) {
+    if (begin >= end) return -1;
+    const size_t middle = begin + (end - begin) / 2;
+    auto coordinate = [axis](const geom::Vec3d& v) {
+        return axis == 0 ? v.x : axis == 1 ? v.y : v.z;
+    };
+    std::nth_element(spherical_order_.begin() + begin,
+                     spherical_order_.begin() + middle,
+                     spherical_order_.begin() + end,
+                     [&](size_t lhs, size_t rhs) {
+                         const double a = coordinate(directions_[lhs].k_hat);
+                         const double b = coordinate(directions_[rhs].k_hat);
+                         return a == b ? lhs < rhs : a < b;
+                     });
+
+    const int node_index = static_cast<int>(spherical_tree_.size());
+    const size_t direction_index = spherical_order_[middle];
+    const double split = coordinate(directions_[direction_index].k_hat);
+    spherical_tree_.push_back({direction_index, -1, -1, axis, split});
+    const int left = build_spherical_index(begin, middle, static_cast<uint8_t>((axis + 1) % 3));
+    const int right = build_spherical_index(middle + 1, end,
+                                            static_cast<uint8_t>((axis + 1) % 3));
+    spherical_tree_[node_index].left = left;
+    spherical_tree_[node_index].right = right;
+    return node_index;
 }
 
 bool RcsQueryEngine::verify_design(const std::string& expected_id,
@@ -263,10 +298,9 @@ std::complex<double> RcsQueryEngine::interpolate_regular_bicubic(size_t fi, size
         const double el = clamp(el_deg, unique_el_.front(), unique_el_.back());
         auto interpolate_column = [&](size_t az_index) {
             if (unique_el_.size() == 1) return sample(fi, pol_idx, az_el_dir(az_index, 0));
-            std::vector<std::complex<double>> values(unique_el_.size());
-            for (size_t ei = 0; ei < unique_el_.size(); ++ei)
-                values[ei] = sample(fi, pol_idx, az_el_dir(az_index, ei));
-            return eval_1d_cubic_spline(unique_el_, values, el);
+            return eval_1d_cubic_spline(
+                unique_el_.data(), unique_el_.size(),
+                [&](size_t ei) { return sample(fi, pol_idx, az_el_dir(az_index, ei)); }, el);
         };
         const auto last = interpolate_column(unique_az_.size() - 1);
         const auto first = interpolate_column(0);
@@ -283,18 +317,14 @@ std::complex<double> RcsQueryEngine::interpolate_regular_bicubic(size_t fi, size
         return sample(fi, pol_idx, az_el_dir(0, 0));
     }
     if (Naz > 1 && Nel == 1) {
-        std::vector<std::complex<double>> Y_az(Naz);
-        for (size_t a = 0; a < Naz; ++a) {
-            Y_az[a] = sample(fi, pol_idx, az_el_dir(a, 0));
-        }
-        return eval_1d_cubic_spline(unique_az_, Y_az, az_clamped);
+        return eval_1d_cubic_spline(
+            unique_az_.data(), Naz,
+            [&](size_t a) { return sample(fi, pol_idx, az_el_dir(a, 0)); }, az_clamped);
     }
     if (Naz == 1 && Nel > 1) {
-        std::vector<std::complex<double>> Y_el(Nel);
-        for (size_t e = 0; e < Nel; ++e) {
-            Y_el[e] = sample(fi, pol_idx, az_el_dir(0, e));
-        }
-        return eval_1d_cubic_spline(unique_el_, Y_el, el_clamped);
+        return eval_1d_cubic_spline(
+            unique_el_.data(), Nel,
+            [&](size_t e) { return sample(fi, pol_idx, az_el_dir(0, e)); }, el_clamped);
     }
 
     // 2D regular grid
@@ -302,33 +332,32 @@ std::complex<double> RcsQueryEngine::interpolate_regular_bicubic(size_t fi, size
     size_t a1 = (it_az == unique_az_.end()) ? Naz - 1 : std::distance(unique_az_.begin(), it_az);
     size_t a0 = (a1 == 0) ? 0 : a1 - 1;
 
-    std::vector<size_t> az_cols;
+    std::array<size_t, 4> az_cols{};
+    size_t az_col_count = 0;
     if (Naz <= 4) {
-        for (size_t i = 0; i < Naz; ++i) az_cols.push_back(i);
+        for (size_t i = 0; i < Naz; ++i) az_cols[az_col_count++] = i;
     } else {
         size_t start_col = (a0 == 0) ? 0 : a0 - 1;
         size_t end_col = (a1 == Naz - 1) ? Naz - 1 : a1 + 1;
         if (a0 == 0 && end_col + 1 < Naz) end_col++;
         if (a1 == Naz - 1 && start_col > 0) start_col--;
-        for (size_t i = start_col; i <= end_col; ++i) {
-            az_cols.push_back(i);
-        }
+        for (size_t i = start_col; i <= end_col; ++i) az_cols[az_col_count++] = i;
     }
 
-    std::vector<double> sub_az(az_cols.size());
-    std::vector<std::complex<double>> sub_val(az_cols.size());
-    std::vector<std::complex<double>> col_Y(Nel);
+    std::array<double, 4> sub_az{};
+    std::array<std::complex<double>, 4> sub_val{};
 
-    for (size_t ci = 0; ci < az_cols.size(); ++ci) {
+    for (size_t ci = 0; ci < az_col_count; ++ci) {
         const size_t col = az_cols[ci];
         sub_az[ci] = unique_az_[col];
-        for (size_t e = 0; e < Nel; ++e) {
-            col_Y[e] = sample(fi, pol_idx, az_el_dir(col, e));
-        }
-        sub_val[ci] = eval_1d_cubic_spline(unique_el_, col_Y, el_clamped);
+        sub_val[ci] = eval_1d_cubic_spline(
+            unique_el_.data(), Nel,
+            [&](size_t e) { return sample(fi, pol_idx, az_el_dir(col, e)); }, el_clamped);
     }
 
-    return eval_1d_cubic_spline(sub_az, sub_val, az_clamped);
+    return eval_1d_cubic_spline(
+        sub_az.data(), az_col_count,
+        [&](size_t i) { return sub_val[i]; }, az_clamped);
 }
 
 std::complex<double> RcsQueryEngine::interpolate_spherical(size_t fi, size_t pol_idx,
@@ -339,39 +368,57 @@ std::complex<double> RcsQueryEngine::interpolate_spherical(size_t fi, size_t pol
 
     const geom::Vec3d v = direction_from_az_el(az_deg, el_deg);
 
-    // Find up to 8 nearest directions by maximizing dot product v . kd
-    // Stack-allocated top-8 list to eliminate dynamic heap allocations
+    // Keep the nearest eight chord distances in a stack-allocated list.
     struct Candidate {
-        double dot;
+        double distance_sq;
         size_t idx;
     };
     const size_t K = std::min<size_t>(8, N);
-    Candidate top[8];
+    std::array<Candidate, 8> top{};
     size_t count = 0;
+    size_t exact_index = 0;
+    bool exact_match = false;
+    auto insert = [&](double distance_sq, size_t direction_index) {
+        if (distance_sq <= 2e-14) {
+            exact_index = direction_index;
+            exact_match = true;
+            return;
+        }
+        if (count == K && distance_sq >= top[count - 1].distance_sq) return;
+        size_t position = count < K ? count++ : K - 1;
+        while (position > 0 && distance_sq < top[position - 1].distance_sq) {
+            top[position] = top[position - 1];
+            --position;
+        }
+        top[position] = {distance_sq, direction_index};
+    };
+    auto search = [&](auto&& self, int node_index) -> void {
+        if (node_index < 0 || exact_match) return;
+        const SphericalNode& node = spherical_tree_[static_cast<size_t>(node_index)];
+        const auto& kd = directions_[node.direction_index].k_hat;
+        const double dx = v.x - kd.x;
+        const double dy = v.y - kd.y;
+        const double dz = v.z - kd.z;
+        insert(dx * dx + dy * dy + dz * dz, node.direction_index);
+        if (exact_match) return;
 
-    for (size_t di = 0; di < N; ++di) {
-        const auto& kd = directions_[di].k_hat;
-        const double dot_val = v.x * kd.x + v.y * kd.y + v.z * kd.z;
-        if (dot_val >= 1.0 - 1e-14) {
-            return sample(fi, pol_idx, di);
-        }
-        if (count < K) {
-            top[count++] = {dot_val, di};
-            for (size_t s = count - 1; s > 0 && top[s].dot > top[s - 1].dot; --s) {
-                std::swap(top[s], top[s - 1]);
-            }
-        } else if (dot_val > top[K - 1].dot) {
-            top[K - 1] = {dot_val, di};
-            for (size_t s = K - 1; s > 0 && top[s].dot > top[s - 1].dot; --s) {
-                std::swap(top[s], top[s - 1]);
-            }
-        }
-    }
+        const double query_axis = node.axis == 0 ? v.x : node.axis == 1 ? v.y : v.z;
+        const double delta = query_axis - node.split;
+        const int near_child = delta < 0.0 ? node.left : node.right;
+        const int far_child = delta < 0.0 ? node.right : node.left;
+        self(self, near_child);
+        if (!exact_match &&
+            (count < K || delta * delta <= top[count - 1].distance_sq))
+            self(self, far_child);
+    };
+    search(search, spherical_root_);
+    if (exact_match) return sample(fi, pol_idx, exact_index);
+    if (count == 0) return std::complex<double>{};
 
     // Compute true angular distances for the top K candidates
-    double dists_theta[8];
+    std::array<double, 8> dists_theta{};
     for (size_t k = 0; k < count; ++k) {
-        const double cl = clamp(top[k].dot, -1.0, 1.0);
+        const double cl = clamp(1.0 - top[k].distance_sq * 0.5, -1.0, 1.0);
         dists_theta[k] = std::acos(cl);
     }
 
@@ -568,10 +615,11 @@ scem_query_result_t RcsQueryEngine::query(double az_deg, double el_deg, double f
         final_s = query_direction(frequencies_.size() - 1, pol_idx, az_deg, el_deg, mode);
     } else if (mode == InterpolationMode::Bicubic || mode == InterpolationMode::Spherical) {
         std::vector<std::complex<double>> s_freq(frequencies_.size());
-        for (size_t fi = 0; fi < frequencies_.size(); ++fi) {
+        for (size_t fi = 0; fi < frequencies_.size(); ++fi)
             s_freq[fi] = query_direction(fi, pol_idx, az_deg, el_deg, mode);
-        }
-        final_s = eval_1d_cubic_spline(frequencies_, s_freq, freq_hz);
+        final_s = eval_1d_cubic_spline(
+            frequencies_.data(), frequencies_.size(),
+            [&](size_t fi) { return s_freq[fi]; }, freq_hz);
     } else {
         auto it_f = std::upper_bound(frequencies_.begin(), frequencies_.end(), freq_hz);
         const size_t f1 = std::distance(frequencies_.begin(), it_f);

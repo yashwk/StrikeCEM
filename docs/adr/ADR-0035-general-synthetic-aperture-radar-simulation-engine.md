@@ -40,28 +40,26 @@ Simulating realistic SAR images requires physics beyond free-space target scatte
      $$\mathbf{p}_{\text{proj}} = \mathbf{v} - \frac{v_z - z_{\text{ground}}}{k_z} \mathbf{\hat{k}}$$
    - Rasterizes the shadow convex hulls onto the 2D ground grid, creating sharp geometric radar shadow silhouettes where ground clutter backscatter is completely suppressed ($I_{\text{clutter}} = 0$).
 
-4. **Scattering Synthesis & Clutter Formulation**:
-   - **Ground Clutter**: Generates backscatter intensity with mean radar clutter coefficient $\sigma_0$ (e.g. $-20\,\text{dB}$ for tarmac, $-15\,\text{dB}$ for soil, $-35\,\text{dB}$ for water) modulated by two-degrees-of-freedom coherent Rayleigh speckle:
-     $$A_{\text{speckle}} = \sqrt{-2 \ln(U_1)}, \quad \sigma_{\text{clutter}} = 10^{\sigma_0 / 10} \cdot A_{\text{speckle}}^2 \cdot \Delta R_{\text{ground}} \Delta \text{Az}$$
-   - **Target PO & PTD Backscatter**: Synthesizes Physical Optics specular facet glints and Physical Theory of Diffraction edge scatterers based on incidence aspect.
-   - **Dihedral Vehicle-Ground Multipath**: Identifies near-ground vertical surfaces ($n_z \approx 0$) close to the ground boundary and applies multipath enhancement factors ($+12\,\text{dB}$) simulating double-bounce return.
-   - **2D Sinc PSF Convolution**: Distributes target point returns into the SAR image grid using separable sinc point spread functions matching $\Delta R_{\text{ground}}$ and $\Delta \text{Az}$.
+4. **Synthetic Visualization Synthesis**:
+   - The default preview path draws a seeded, heuristic clutter and speckle scene, projected target footprint, approximate shadow, and display-shaped facet and edge returns.
+   - Its point-spread shape and ground-multipath enhancement are visualization effects; this mode does not form a calibrated radar measurement or coherently simulate target and clutter phase history.
 
-5. **Diagnostic Visual Image Generation (`write_image`)**:
+5. **Coherent Phase-History Backprojection**:
+   - The opt-in `phase_history_backprojection` formation samples mesh facets as scalar-RCS point scatterers, computes coherent wideband returns along a constant-velocity synthetic aperture, range-compresses them, and backprojects onto the image grid.
+   - It is checked against a point-target focus fixture. The image is normalized to its peak and the facet scattering model is approximate; vector physical-optics phase history, calibration, clutter, multipath, and platform-motion errors remain future work.
+
+6. **Diagnostic Visual Image Generation (`write_image`)**:
    - Exports high-resolution 8-bit PNG and 24-bit BMP images without external graphics libraries.
    - Colormaps: Standard Military IMINT Radar Grayscale (`gray`) with configurable radar gamma ($0.65$ default for dynamic contrast enhancement), plus scientific false-color maps (`turbo`, `jet`, `viridis`).
    - Diagnostic HUD Overlay: Center frequency, bandwidth, ground/slant resolution, platform orbit/flight parameters, look angle, metric cross-track and along-track tick marks, flight path / radar look direction arrows, and peak scatterer crosshair reticle.
 
-6. **CLI Subcommand (`strikecem sar`)**:
+7. **CLI Subcommand (`strikecem sar`)**:
    - Integrated `strikecem sar <cad.obj>` command with flags:
-     `--preset <satellite-ka|satellite-x|airborne-ka|airborne-x>`, `--output <image.png>`, `--json <data.json>`, `--freq <Hz>`, `--bandwidth <Hz>`, `--incidence <deg>`, `--altitude <m>`, `--velocity <m/s>`, `--ground <tarmac|soil|water|pec|none>`, `--no-shadow`, `--colormap <gray|turbo|jet|viridis>`, `--width <N>`, `--height <N>`.
+     `--preset <satellite-ka|satellite-x|airborne-ka|airborne-x>`, `--formation <visualization|backprojection>`, `--heading <deg>`, `--aperture <deg>`, `--pulses <N>`, `--frequencies <N>`, `--max-scatterers <N>`, `--output <image.png>`, `--json <data.json>`, `--freq <Hz>`, `--bandwidth <Hz>`, `--incidence <deg>`, `--altitude <m>`, `--velocity <m/s>`, `--ground <tarmac|soil|water|pec|none>`, `--no-shadow`, `--colormap <gray|turbo|jet|viridis>`, `--width <N>`, `--height <N>`.
 
-7. **Verification (`tests/test_sar.cpp`)**:
-   - 5 comprehensive tests validating preset parameters, resolution calculations, ray-traced ground shadow projection, image generation, JSON serialization, and image export.
-   - Verified on `examples/ucav/ucav.obj` producing $10\,\text{cm}$ resolution Ka-band satellite SAR images.
+8. **Verification (`tests/test_sar.cpp`)**:
+   - Tests cover presets, resolution calculations, shadow projection, preview rendering, JSON serialization, coherent point-target focusing, and invalid work estimates.
 
 ## Consequences
-- StrikeCEM can now model realistic operational satellite and airborne SAR reconnaissance scenarios directly from CAD geometries.
-- Delivers realistic military-standard SAR imagery with ground clutter speckle, sharp occluded radar shadows, and dihedral multipath.
-- Operates entirely standalone in C++ with sub-second execution speeds.
-- Test suite expanded to 351 tests with 100% pass rate.
+- StrikeCEM provides both a fast synthetic preview and a coherent scalar-facet backprojection mode for satellite and airborne geometry experiments.
+- Output metadata identifies the image-formation mode, calibration limits, trajectory model, and ground-scene model so preview imagery is not mistaken for measurement-calibrated data.

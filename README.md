@@ -54,7 +54,7 @@ strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...
 | `vtk` | `strikecem vtk config.json --output surface.vtu` | Exports 3D per-facet induced currents and lit/shadow diagnostics to ParaView VTU. |
 | `export-mesh` | `strikecem export-mesh config.json -o out.obj --format obj` | Exports procedural or normalized geometry to standalone OBJ/STL format. |
 | `isar` | `strikecem isar database.h5 --image isar.png` | Forms a 2D range-Doppler ISAR image from a frequency-azimuth sweep. |
-| `sar` | `strikecem sar config.json --output sar.png` | Synthesizes a SAR image using the selected platform and scene settings. |
+| `sar` | `strikecem sar config.json --output sar.png` | Creates a SAR visualization or coherent phase-history backprojection using the selected platform settings. |
 | `render` | `strikecem render config.json --mode currents` | Renders surface currents, lit/shadow state, or shaded geometry. |
 | `report` | `strikecem report database.h5 -o report.html` | Creates a standalone HTML radar-signature report. |
 
@@ -103,6 +103,16 @@ Bundle the simulation database alongside target 3D meshes for simulation engines
 ```bash
 strikecem bundle --rcs uav_tuned.h5 --mesh models/uav.obj -o uav_target.scempack
 ```
+
+### SAR Image Formation
+
+The SAR command defaults to a synthetic visualization model for quick scene previews. Select `--formation backprojection` to form an image from coherent wideband phase history and a moving aperture; set the aperture heading, pulse count, frequency count, and scatterer cap with `--heading`, `--aperture`, `--pulses`, `--frequencies`, and `--max-scatterers`.
+
+```bash
+strikecem sar models/uav.obj --formation backprojection --pulses 128 --frequencies 64 --json sar.json
+```
+
+Backprojection uses a scalar facet-RCS approximation, normalizes image intensity to its peak, and omits ground clutter and multipath. It supports coherent point-target experiments, but does not represent measurement-calibrated radar data or a full vector physical-optics scattering model. The JSON output records the selected image formation and fidelity limits.
 
 ---
 

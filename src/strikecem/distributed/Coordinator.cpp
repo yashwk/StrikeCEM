@@ -137,6 +137,10 @@ bool same_normalized_path(const std::string& a, const std::string& b) {
     return !ec_a && !ec_b && path_a == path_b;
 }
 
+std::string leased_output_path(const std::string& output_path, const std::string& token) {
+    return output_path + ".lease-" + token;
+}
+
 bool has_authorization(const std::string& request, const std::string& token) {
     const size_t headers_end = request.find("\r\n\r\n");
     if (headers_end == std::string::npos) return false;
@@ -193,6 +197,8 @@ void CoordinatorServer::init_tasks_from_manifest() {
     tasks_.clear();
     completed_count_ = 0;
     merge_executed_ = false;
+    merge_in_progress_ = false;
+    merge_error_.clear();
 
     if (!j.contains("shards") || !j["shards"].is_array()) {
         throw OutputError("Manifest missing valid 'shards' array: " + options_.manifest_path);
@@ -236,6 +242,11 @@ nlohmann::json CoordinatorServer::acquire_task(const std::string& worker_id,
     check_expired_leases_locked();
 
     if (completed_count_ == tasks_.size() && !tasks_.empty()) {
+        if (options_.auto_merge && merge_in_progress_)
+            return {{"status", "merge_in_progress"}, {"all_complete", false}, {"run_id", run_id_}};
+        if (options_.auto_merge && !merge_error_.empty())
+            return {{"status", "merge_failed"}, {"all_complete", true},
+                    {"merge_error", merge_error_}, {"run_id", run_id_}};
         return {
             {"status", "campaign_complete"},
             {"all_complete", true},
@@ -313,35 +324,50 @@ nlohmann::json CoordinatorServer::complete_task(size_t shard_id, const std::stri
             if (!has_lease(task, worker_id, lease_token)) {
                 return {{"status", "error"}, {"message", "Task not leased to this worker"}};
             }
-            if (output_path.empty() || !same_normalized_path(task.output_path, output_path)) {
-                return {{"status", "error"}, {"message", "Reported output path does not match shard"}};
+            const std::string expected_lease_output = leased_output_path(task.output_path, lease_token);
+            if (output_path.empty() || !same_normalized_path(expected_lease_output, output_path)) {
+                return {{"status", "error"}, {"message", "Reported output path does not match lease"}};
             }
             std::string reported_checksum = checksum;
             std::transform(reported_checksum.begin(), reported_checksum.end(),
                            reported_checksum.begin(), [](unsigned char ch) {
                                return static_cast<char>(std::tolower(ch));
                            });
-            const std::string actual_checksum = sha256_file(task.output_path);
+            const std::string actual_checksum = sha256_file(expected_lease_output);
             if (actual_checksum.empty() || reported_checksum != actual_checksum) {
                 return {{"status", "error"}, {"message", "Shard output checksum mismatch"}};
+            }
+
+            const bool csv_output = fs::path(task.output_path).extension() == ".csv";
+            const std::string leased_sidecar = expected_lease_output + ".json";
+            const std::string final_sidecar = task.output_path + ".json";
+            if (csv_output && !fs::exists(leased_sidecar))
+                return {{"status", "error"}, {"message", "CSV shard sidecar is missing"}};
+
+            std::error_code rename_error;
+            if (csv_output) {
+                fs::rename(leased_sidecar, final_sidecar, rename_error);
+                if (rename_error) {
+                    return {{"status", "error"},
+                            {"message", "Cannot publish CSV shard sidecar: " + rename_error.message()}};
+                }
+            }
+            fs::rename(expected_lease_output, task.output_path, rename_error);
+            if (rename_error) {
+                if (csv_output) {
+                    std::error_code rollback_error;
+                    fs::rename(final_sidecar, leased_sidecar, rollback_error);
+                }
+                return {{"status", "error"},
+                        {"message", "Cannot publish shard output: " + rename_error.message()}};
             }
             task.state = TaskState::Completed;
             task.checksum = actual_checksum;
             completed_count_++;
 
-            bool merged = false;
-            if (completed_count_ == tasks_.size() && options_.auto_merge && !merge_executed_) {
-                try {
-                    merge_shards(options_.manifest_path, {}, options_.output_path, options_.schema_path);
-                    merged = true;
-                    merge_executed_ = true;
-                } catch (const std::exception& e) {
-                    return {
-                        {"status", "error"},
-                        {"message", "Merge failed: " + std::string(e.what())}
-                    };
-                }
-            }
+            if (completed_count_ == tasks_.size() && options_.auto_merge && !merge_executed_ &&
+                !merge_in_progress_ && merge_error_.empty())
+                start_merge_locked();
 
             return {
                 {"status", "ok"},
@@ -349,11 +375,66 @@ nlohmann::json CoordinatorServer::complete_task(size_t shard_id, const std::stri
                 {"completed_count", completed_count_},
                 {"total_shards", tasks_.size()},
                 {"all_complete", completed_count_ == tasks_.size()},
-                {"auto_merged", merged}
+                {"auto_merged", merge_executed_},
+                {"merge_in_progress", merge_in_progress_}
             };
         }
     }
     return {{"status", "error"}, {"message", "Shard ID not found"}};
+}
+
+void CoordinatorServer::start_merge_locked() {
+    merge_in_progress_ = true;
+    merge_error_.clear();
+    try {
+        merge_thread_ = std::thread(&CoordinatorServer::merge_worker, this);
+    } catch (const std::exception& e) {
+        merge_in_progress_ = false;
+        merge_error_ = e.what();
+    }
+}
+
+void CoordinatorServer::merge_worker() {
+    std::string error;
+    try {
+        merge_shards(options_.manifest_path, {}, options_.output_path, options_.schema_path);
+    } catch (const std::exception& e) {
+        error = e.what();
+    } catch (...) {
+        error = "unknown merge error";
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    merge_in_progress_ = false;
+    if (error.empty()) merge_executed_ = true;
+    else merge_error_ = std::move(error);
+}
+
+nlohmann::json CoordinatorServer::retry_merge() {
+    std::thread previous;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (completed_count_ != tasks_.size() || tasks_.empty())
+            return {{"status", "error"}, {"message", "All shards must complete before merging"}};
+        if (merge_executed_)
+            return {{"status", "ok"}, {"already_merged", true}};
+        if (merge_in_progress_)
+            return {{"status", "error"}, {"message", "Merge is already in progress"}};
+        if (merge_thread_.joinable()) previous = std::move(merge_thread_);
+    }
+    if (previous.joinable()) previous.join();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (completed_count_ != tasks_.size() || tasks_.empty())
+        return {{"status", "error"}, {"message", "All shards must complete before merging"}};
+    if (merge_executed_)
+        return {{"status", "ok"}, {"already_merged", true}};
+    if (merge_in_progress_)
+        return {{"status", "error"}, {"message", "Merge is already in progress"}};
+    start_merge_locked();
+    if (!merge_error_.empty())
+        return {{"status", "error"}, {"message", "Cannot start merge: " + merge_error_}};
+    return {{"status", "ok"}, {"merge_in_progress", true}};
 }
 
 nlohmann::json CoordinatorServer::fail_task(size_t shard_id, const std::string& worker_id,
@@ -405,13 +486,26 @@ nlohmann::json CoordinatorServer::get_status() const {
         {"pending_shards", pending},
         {"progress_percent", progress},
         {"all_complete", completed == tasks_.size()},
-        {"merged", merge_executed_}
+        {"merged", merge_executed_},
+        {"merge_in_progress", merge_in_progress_},
+        {"merge_error", merge_error_}
     };
 }
 
 bool CoordinatorServer::is_campaign_complete() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return !tasks_.empty() && completed_count_ == tasks_.size();
+    return !tasks_.empty() && completed_count_ == tasks_.size() &&
+           (!options_.auto_merge || merge_executed_);
+}
+
+bool CoordinatorServer::has_merge_failed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !merge_error_.empty();
+}
+
+std::string CoordinatorServer::merge_error() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return merge_error_;
 }
 
 void CoordinatorServer::start(bool background) {
@@ -507,6 +601,7 @@ void CoordinatorServer::stop() {
     for (auto& thread : client_threads_)
         if (thread.joinable()) thread.join();
     client_threads_.clear();
+    if (merge_thread_.joinable()) merge_thread_.join();
 }
 
 void CoordinatorServer::server_loop() {
@@ -635,6 +730,8 @@ void CoordinatorServer::handle_client(int client_fd) {
             res_json = {{"status", "ok"}, {"run_id", run_id_}, {"version", "1.0"}};
         } else if (path == "/api/v1/status") {
             res_json = get_status();
+        } else if (path == "/api/v1/merge/retry" && method == "POST") {
+            res_json = retry_merge();
         } else if (path == "/api/v1/task/acquire" && method == "POST") {
             const std::string wid = req_json.value("worker_id", "anon_worker");
             const std::string dev = req_json.value("device", "cpu");

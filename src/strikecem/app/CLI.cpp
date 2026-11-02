@@ -52,6 +52,7 @@ namespace fs = std::filesystem;
 
 constexpr const char* kUsage =
     "usage: strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...>\n"
+    "  --version    print version and build revision\n"
     "  validate     resolve config, inspect mesh, print hashes\n"
     "  estimate     validate plus plan counts and resource estimates\n"
     "  run          full pipeline (PO solver, CSV/HDF5 output) [--scale S] [--cuda] [--cpu] [--threads N] [--cuda-device D]\n"
@@ -92,6 +93,8 @@ constexpr const char* kUsage =
     "                        [--mode currents|lit_shadow|shaded] [--colormap turbo|jet|viridis]\n"
     "  sar          simulate spaceborne or airborne Synthetic Aperture Radar (SAR) 2D imaging\n"
     "               options: <config.json|mesh> [--output sar.png] [--preset satellite-ka|satellite-x|airborne-ka|airborne-x]\n"
+    "                        [--formation visualization|backprojection] [--heading DEG] [--aperture DEG]\n"
+    "                        [--pulses N] [--frequencies N] [--max-scatterers N]\n"
     "                        [--freq HZ] [--bandwidth HZ] [--incidence DEG] [--altitude M] [--velocity M/S]\n"
     "                        [--ground tarmac|soil|none] [--no-shadow] [--colormap gray|turbo|jet] [--json sar.json]\n"
     "  --bench-profile PATH (run only) writes a benchmark profile for the run\n";
@@ -359,6 +362,12 @@ int cmd_coordinate(const std::string& manifest_path, const std::string& output_p
 
     while (server.is_running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (auto_exit_on_complete && server.has_merge_failed()) {
+            std::cerr << "strikecem: error: campaign shards completed but merge failed: "
+                      << server.merge_error() << "\n";
+            server.stop();
+            return static_cast<int>(ExitCode::Output);
+        }
         if (auto_exit_on_complete && server.is_campaign_complete()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             std::cout << "status: ok\n";
@@ -681,8 +690,11 @@ int cmd_report(const std::string& input_path, const std::string& output_html,
 
 int cmd_sar(const std::string& input_path, const std::string& output_image,
             const std::string& output_json, const std::string& preset,
+            const std::string& formation,
             double freq_hz, double bw_hz, double incidence_deg,
             double altitude_m, double velocity_mps, const std::string& ground_str,
+            double heading_deg, double aperture_deg, size_t pulses, size_t frequencies,
+            size_t max_scatterers,
             bool enable_shadow, bool overlay_wireframe, double radar_azimuth,
             const std::string& colormap_name,
             const std::string& sidelobe_window, double sidelobe_db, bool show_reticle,
@@ -728,12 +740,21 @@ int cmd_sar(const std::string& input_path, const std::string& output_image,
     } else {
         cfg = analysis::SarProcessor::make_preset("satellite-ka");
     }
+    if (formation == "backprojection" || formation == "phase_history_backprojection")
+        cfg.image_formation = analysis::SarImageFormation::PhaseHistoryBackprojection;
+    else if (!formation.empty() && formation != "visualization" && formation != "synthetic")
+        throw ConfigError("SAR formation must be visualization or backprojection");
 
     if (freq_hz > 0.0) cfg.center_frequency_hz = freq_hz;
     if (bw_hz > 0.0) cfg.bandwidth_hz = bw_hz;
     if (incidence_deg > 0.0) cfg.incidence_angle_deg = incidence_deg;
     if (altitude_m > 0.0) cfg.altitude_m = altitude_m;
     if (velocity_mps > 0.0) cfg.platform_velocity_mps = velocity_mps;
+    if (heading_deg != 0.0) cfg.heading_deg = heading_deg;
+    if (aperture_deg > 0.0) cfg.aperture_angle_deg = aperture_deg;
+    if (pulses > 0) cfg.num_pulses = pulses;
+    if (frequencies > 0) cfg.num_frequencies = frequencies;
+    if (max_scatterers > 0) cfg.max_scattering_centers = max_scatterers;
     if (!enable_shadow) cfg.enable_shadow = false;
     if (overlay_wireframe) cfg.overlay_wireframe = true;
     if (radar_azimuth != 0.0) cfg.radar_azimuth_deg = radar_azimuth;
@@ -852,11 +873,17 @@ int run(int argc, char** argv) {
 
     // SAR parameters
     std::string sar_preset;
+    std::string sar_formation;
     double sar_freq = 0.0;
     double sar_bandwidth = 0.0;
     double sar_incidence = 0.0;
     double sar_altitude = 0.0;
     double sar_velocity = 0.0;
+    double sar_heading = 0.0;
+    double sar_aperture = 0.0;
+    size_t sar_pulses = 0;
+    size_t sar_frequencies = 0;
+    size_t sar_max_scatterers = 0;
     std::string sar_ground;
     std::string sar_colormap;
     bool sar_shadow = true;
@@ -870,7 +897,10 @@ int run(int argc, char** argv) {
     std::vector<std::string> positional;
 
     for (size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == "--schema" && i + 1 < args.size()) {
+        if (args[i] == "--version" || args[i] == "-V") {
+            std::cout << "StrikeCEM " << SCEM_VERSION << " (" << SCEM_GIT_REVISION << ")\n";
+            return 0;
+        } else if (args[i] == "--schema" && i + 1 < args.size()) {
             schema_path = args[++i];
         } else if (args[i] == "--bench-profile" && i + 1 < args.size()) {
             bench_profile = args[++i];
@@ -888,6 +918,8 @@ int run(int argc, char** argv) {
             bundle_mesh = args[++i];
         } else if (args[i] == "--preset" && i + 1 < args.size()) {
             sar_preset = args[++i];
+        } else if (args[i] == "--formation" && i + 1 < args.size()) {
+            sar_formation = args[++i];
         } else if (args[i] == "--bandwidth" && i + 1 < args.size()) {
             sar_bandwidth = std::stod(args[++i]);
         } else if (args[i] == "--incidence" && i + 1 < args.size()) {
@@ -896,6 +928,16 @@ int run(int argc, char** argv) {
             sar_altitude = std::stod(args[++i]);
         } else if (args[i] == "--velocity" && i + 1 < args.size()) {
             sar_velocity = std::stod(args[++i]);
+        } else if (args[i] == "--heading" && i + 1 < args.size()) {
+            sar_heading = std::stod(args[++i]);
+        } else if (args[i] == "--aperture" && i + 1 < args.size()) {
+            sar_aperture = std::stod(args[++i]);
+        } else if (args[i] == "--pulses" && i + 1 < args.size()) {
+            sar_pulses = static_cast<size_t>(std::stoull(args[++i]));
+        } else if (args[i] == "--frequencies" && i + 1 < args.size()) {
+            sar_frequencies = static_cast<size_t>(std::stoull(args[++i]));
+        } else if (args[i] == "--max-scatterers" && i + 1 < args.size()) {
+            sar_max_scatterers = static_cast<size_t>(std::stoull(args[++i]));
         } else if (args[i] == "--ground" && i + 1 < args.size()) {
             sar_ground = args[++i];
         } else if (args[i] == "--no-shadow") {
@@ -1138,8 +1180,10 @@ int run(int argc, char** argv) {
         if (command == "sar") {
             const std::string& input = positional.empty() ? "" : positional[0];
             return cmd_sar(input, output_path, sar_json_out, sar_preset,
+                           sar_formation,
                            sar_freq, sar_bandwidth, sar_incidence,
-                           sar_altitude, sar_velocity, sar_ground,
+                           sar_altitude, sar_velocity, sar_ground, sar_heading,
+                           sar_aperture, sar_pulses, sar_frequencies, sar_max_scatterers,
                            sar_shadow, sar_wireframe, sar_azimuth,
                            sar_colormap, sar_sidelobe_window, sar_sidelobe_db,
                            sar_reticle, render_width,
