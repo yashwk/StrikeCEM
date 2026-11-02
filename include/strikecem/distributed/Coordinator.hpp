@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -73,6 +74,7 @@ public:
 private:
     void init_tasks_from_manifest();
     void server_loop();
+    void client_worker_loop();
     void handle_client(int client_fd);
     void check_expired_leases_locked();
 
@@ -85,7 +87,10 @@ private:
 
     std::mutex clients_mutex_;
     std::condition_variable clients_cv_;
-    size_t active_clients_ = 0;
+    std::deque<int> pending_clients_;
+    std::vector<int> active_client_fds_;
+    std::vector<std::thread> client_threads_;
+    bool stopping_clients_ = false;
 
     mutable std::mutex mutex_;
     std::vector<CoordinatorTask> tasks_;

@@ -308,6 +308,43 @@ TEST(Coordinator, RejectsMalformedAndOversizedContentLength) {
     server.stop();
 }
 
+TEST(Coordinator, StopJoinsAndClosesIncompleteRequestHandlers) {
+    Workdir w;
+    const fs::path dummy_out = w.dir / "final.h5";
+    const fs::path cfg_file = write_json(w.dir / "config.json", make_test_config(dummy_out, 2, 1));
+    const fs::path shards_dir = w.dir / "shards";
+    ASSERT_EQ(call_cli({"shard", "--num-shards", "1", "--out-dir", shards_dir.string(),
+                        cfg_file.string()}), 0);
+
+    strikecem::CoordinatorOptions opts;
+    opts.manifest_path = (shards_dir / "shard_manifest.json").string();
+    opts.port = 0;
+    opts.auto_merge = false;
+    strikecem::CoordinatorServer server(opts);
+    server.start(true);
+
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(fd, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(static_cast<uint16_t>(server.bound_port()));
+    ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &address.sin_addr), 1);
+    ASSERT_EQ(connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+    const std::string partial = "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n";
+    ASSERT_EQ(send(fd, partial.data(), partial.size(), 0),
+              static_cast<ssize_t>(partial.size()));
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+
+    const auto start = std::chrono::steady_clock::now();
+    server.stop();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_LT(elapsed, std::chrono::seconds(2));
+
+    char response[16];
+    EXPECT_LE(recv(fd, response, sizeof(response), 0), 0);
+    close(fd);
+}
+
 TEST(Coordinator, WorkerHeartbeatAndLeaseExpiry) {
     Workdir w;
     const fs::path dummy_out = w.dir / "final.h5";

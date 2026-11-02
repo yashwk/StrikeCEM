@@ -34,6 +34,7 @@ void write_benchmark_profile(const std::string& path, const ResolvedConfig& rc,
 
 struct ResourceEstimate {
     uint64_t mesh_bytes = 0;
+    uint64_t plan_bytes = 0;
     uint64_t output_bytes = 0;
     uint64_t thread_bytes = 0;
     uint64_t total_bytes = 0;
@@ -51,6 +52,10 @@ struct ResourceEstimate {
 };
 
 ResourceEstimate estimate_resources(const nlohmann::json& resolved, const SamplePlan& plan,
+                                    const NormalizedMesh& mesh,
+                                    const std::vector<BenchmarkProfile>& profiles);
+ResourceEstimate estimate_resources(const nlohmann::json& resolved,
+                                    const SamplePlanCounts& counts,
                                     const NormalizedMesh& mesh,
                                     const std::vector<BenchmarkProfile>& profiles);
 

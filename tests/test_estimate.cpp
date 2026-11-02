@@ -39,10 +39,25 @@ TEST(Estimate, ByteAccountingAndFit) {
     EXPECT_EQ(est.mesh_bytes, 4u * 24 + 2u * (12 + 24 + 8));
     EXPECT_EQ(est.output_bytes, 181u * (18 + 4 * 8 + 1 + 4));
     EXPECT_GT(est.thread_bytes, 0u);
-    EXPECT_EQ(est.total_bytes, est.mesh_bytes + est.output_bytes + est.thread_bytes);
+    EXPECT_EQ(est.total_bytes,
+              est.mesh_bytes + est.output_bytes + est.thread_bytes + est.plan_bytes);
     EXPECT_TRUE(est.fits);
     EXPECT_EQ(est.operation_count, 2u * 181u * 200u);
     EXPECT_FALSE(est.calibrated); // no profiles supplied
+}
+
+TEST(Estimate, CountOnlyPreflightIncludesPlanExpansionMemory) {
+    const Case c = load_case("valid_minimal.json");
+    auto counts = strikecem::count_sample_plan(c.rc.value);
+    counts.directions = 500000;
+    counts.samples = counts.frequencies * counts.directions * counts.polarizations;
+    nlohmann::json tight = c.rc.value;
+    tight["execution"]["max_memory_mb"] = 1.0;
+
+    const auto est = strikecem::estimate_resources(tight, counts, c.mesh, {});
+    EXPECT_EQ(est.plan_bytes, 500000u * 256u + counts.frequencies * 32u +
+                                  counts.polarizations * 32u);
+    EXPECT_FALSE(est.fits);
 }
 
 TEST(Estimate, TinyLimitRefuses) {

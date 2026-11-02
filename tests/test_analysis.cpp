@@ -1,5 +1,6 @@
 #include <filesystem>
 #include <fstream>
+#include <tuple>
 #include <gtest/gtest.h>
 #include <unistd.h>
 
@@ -149,4 +150,54 @@ TEST(AnalysisTest, CompareDatabasesSelf) {
     nlohmann::json j = strikecem::analysis::comparison_to_json(metrics);
     EXPECT_TRUE(j["passed"]);
     EXPECT_DOUBLE_EQ(j["max_absolute_error_dbsm"], 0.0);
+}
+
+TEST(RcsQueryEngine, RegularAzimuthInterpolationWrapsAtTheSeam) {
+    strikecem::ScemDatabase db;
+    db.frequencies_hz = {10.0e9};
+    db.polarizations = {"HH"};
+    const std::vector<std::pair<double, double>> samples = {
+        {0.0, 0.0}, {180.0, 180.0}, {350.0, 350.0}};
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const auto [az, value] = samples[i];
+        db.directions.emplace_back(static_cast<uint32_t>(i), az, 0.0,
+                                   strikecem::direction_from_az_el(az, 0.0));
+        strikecem::Hdf5SampleRow row;
+        row.direction_index = static_cast<uint32_t>(i);
+        row.scattering_real = value;
+        db.rows.push_back(row);
+    }
+
+    strikecem::RcsQueryEngine engine(std::move(db));
+    const auto linear = engine.query(359.0, 0.0, 10.0e9, "HH",
+                                     strikecem::InterpolationMode::Linear);
+    const auto bicubic = engine.query(359.0, 0.0, 10.0e9, "HH",
+                                      strikecem::InterpolationMode::Bicubic);
+    const auto nearest = engine.query(359.0, 0.0, 10.0e9, "HH",
+                                      strikecem::InterpolationMode::Nearest);
+    EXPECT_NEAR(linear.scattering_real, 35.0, 1e-9);
+    EXPECT_NEAR(bicubic.scattering_real, 35.0, 1e-9);
+    EXPECT_DOUBLE_EQ(nearest.scattering_real, 0.0);
+}
+
+TEST(RcsQueryEngine, IrregularNearestUsesAngularDistance) {
+    strikecem::ScemDatabase db;
+    db.frequencies_hz = {10.0e9};
+    db.polarizations = {"HH"};
+    const std::vector<std::tuple<double, double, double>> samples = {
+        {5.0, 60.0, 200.0}, {90.0, 80.0, 300.0}, {180.0, 0.0, 100.0}};
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const auto [az, el, value] = samples[i];
+        db.directions.emplace_back(static_cast<uint32_t>(i), az, el,
+                                   strikecem::direction_from_az_el(az, el));
+        strikecem::Hdf5SampleRow row;
+        row.direction_index = static_cast<uint32_t>(i);
+        row.scattering_real = value;
+        db.rows.push_back(row);
+    }
+
+    strikecem::RcsQueryEngine engine(std::move(db));
+    const auto nearest = engine.query(0.0, 80.0, 10.0e9, "HH",
+                                      strikecem::InterpolationMode::Nearest);
+    EXPECT_DOUBLE_EQ(nearest.scattering_real, 300.0);
 }

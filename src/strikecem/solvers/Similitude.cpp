@@ -1,11 +1,35 @@
 #include "strikecem/solvers/Similitude.hpp"
 
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <limits>
+#include <sstream>
 
 #include "strikecem/io/OutputError.hpp"
 
 namespace strikecem {
+namespace {
+
+void refresh_scaled_mesh_hashes(NormalizedMesh& mesh, const std::string& source_hash,
+                                double factor) {
+    std::string normalized_bytes;
+    normalized_bytes.reserve(mesh.vertices.size() * sizeof(geom::Vec3d) +
+                             mesh.triangles.size() * sizeof(std::array<uint32_t, 3>));
+    for (const auto& vertex : mesh.vertices)
+        normalized_bytes.append(reinterpret_cast<const char*>(&vertex), sizeof(vertex));
+    for (const auto& triangle : mesh.triangles)
+        normalized_bytes.append(reinterpret_cast<const char*>(triangle.data()),
+                                sizeof(uint32_t) * triangle.size());
+    mesh.normalized_mesh_hash = sha256_hex(normalized_bytes);
+
+    std::ostringstream identity;
+    identity << source_hash << "|uniform_scale|" << std::setprecision(
+        std::numeric_limits<double>::max_digits10) << factor;
+    mesh.geometry_hash = sha256_hex(identity.str());
+}
+
+} // namespace
 
 double scale_frequency(double freq_hz, double geometric_scale, SimilitudeDirection dir) {
     if (geometric_scale <= 0.0) {
@@ -82,6 +106,9 @@ NormalizedMesh scale_mesh(const NormalizedMesh& mesh, double geometric_scale, Si
         scaled.report.total_area_m2 += a;
     }
 
+    scaled.report.max_edge_length_m *= factor;
+    refresh_scaled_mesh_hashes(scaled, mesh.geometry_hash, factor);
+
     return scaled;
 }
 
@@ -108,6 +135,18 @@ SimilitudeConfig parse_similitude_config(const nlohmann::json& config_json) {
 
 SimilitudeSummary apply_similitude(ResolvedConfig& rc, SamplePlan& plan, NormalizedMesh& mesh,
                                    const SimilitudeConfig& sim_cfg) {
+    if (sim_cfg.enabled) {
+        auto& effective = rc.value["similitude"];
+        effective["enabled"] = true;
+        effective["geometric_scale"] = sim_cfg.geometric_scale;
+        const std::string direction = sim_cfg.direction == SimilitudeDirection::ModelToFull
+                                          ? "model_to_full" : "full_to_model";
+        effective["mode"] = direction;
+        if (effective.contains("direction")) effective["direction"] = direction;
+        effective["auto_rescale_rcs"] = sim_cfg.auto_rescale_rcs;
+        rc.hash = sha256_hex(canonical_json(rc.value));
+    }
+
     SimilitudeSummary sum;
     sum.geometric_scale = sim_cfg.geometric_scale;
     sum.rcs_scale_factor = 1.0 / (sim_cfg.geometric_scale * sim_cfg.geometric_scale);
@@ -138,6 +177,7 @@ SimilitudeSummary apply_similitude(ResolvedConfig& rc, SamplePlan& plan, Normali
         for (auto& f : plan.frequencies_hz) {
             f = scale_frequency(f, sim_cfg.geometric_scale, sim_cfg.direction);
         }
+        refresh_sample_plan_hash(plan);
     } else {
         sum.frequency_scale = 1.0; // Solve model as-is, rescale output only
     }

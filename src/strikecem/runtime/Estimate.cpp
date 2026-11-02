@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 #include "strikecem/core/Conventions.hpp"
 #include "strikecem/solvers/GpuPO.hpp"
@@ -22,6 +23,18 @@ constexpr uint64_t kOpsPerTriSample = 200;
 constexpr uint64_t kThreadScratchBytes = 65536;
 // CSV row width heuristic (fixed columns, default precision).
 constexpr uint64_t kCsvBytesPerRow = 110;
+// Upper bound for expanded directions plus their temporary candidate array.
+constexpr uint64_t kPlanBytesPerDirection = 256;
+
+uint64_t saturated_add(uint64_t a, uint64_t b) {
+    const uint64_t max_value = std::numeric_limits<uint64_t>::max();
+    return a > max_value - b ? max_value : a + b;
+}
+
+uint64_t saturated_multiply(uint64_t a, uint64_t b) {
+    const uint64_t max_value = std::numeric_limits<uint64_t>::max();
+    return b != 0 && a > max_value / b ? max_value : a * b;
+}
 
 std::string cpu_brand() {
 #ifdef __linux__
@@ -99,23 +112,47 @@ void write_benchmark_profile(const std::string& path, const ResolvedConfig& rc,
 ResourceEstimate estimate_resources(const nlohmann::json& resolved, const SamplePlan& plan,
                                     const NormalizedMesh& mesh,
                                     const std::vector<BenchmarkProfile>& profiles) {
+    SamplePlanCounts counts;
+    counts.frequencies = plan.frequencies_hz.size();
+    counts.directions = plan.directions.size();
+    counts.polarizations = plan.polarizations.size();
+    counts.samples = plan.sample_count();
+    if (!plan.frequencies_hz.empty()) {
+        const auto bounds = std::minmax_element(plan.frequencies_hz.begin(), plan.frequencies_hz.end());
+        counts.min_frequency_hz = *bounds.first;
+        counts.max_frequency_hz = *bounds.second;
+    }
+    return estimate_resources(resolved, counts, mesh, profiles);
+}
+
+ResourceEstimate estimate_resources(const nlohmann::json& resolved,
+                                    const SamplePlanCounts& counts,
+                                    const NormalizedMesh& mesh,
+                                    const std::vector<BenchmarkProfile>& profiles) {
     ResourceEstimate est;
     const uint64_t tris = mesh.report.triangle_count;
-    const uint64_t rows = plan.sample_count();
-    est.mesh_bytes = mesh.report.vertex_count * 24 + tris * (12 + 24 + 8);
+    const uint64_t rows = counts.samples;
+    est.mesh_bytes = saturated_add(saturated_multiply(mesh.report.vertex_count, 24),
+                                   saturated_multiply(tris, 12 + 24 + 8));
+    est.plan_bytes = saturated_add(
+        saturated_multiply(counts.directions, kPlanBytesPerDirection),
+        saturated_add(saturated_multiply(counts.frequencies, 32),
+                      saturated_multiply(counts.polarizations, 32)));
     const bool float32 = resolved["solver"]["precision"].get<std::string>() == "float32";
     const uint64_t float_bytes = float32 ? 4 : 8;
     if (resolved["output"]["format"].get<std::string>() == "csv")
-        est.output_bytes = rows * kCsvBytesPerRow;
+        est.output_bytes = saturated_multiply(rows, kCsvBytesPerRow);
     else
-        est.output_bytes = rows * (18 + 4 * float_bytes + 1 + 4);
+        est.output_bytes = saturated_multiply(rows, 18 + 4 * float_bytes + 1 + 4);
     const unsigned workers =
         std::max(1u, resolved["execution"]["cpu_threads"].get<unsigned>());
-    est.thread_bytes = static_cast<uint64_t>(workers) * kThreadScratchBytes;
-    est.total_bytes = est.mesh_bytes + est.output_bytes + est.thread_bytes;
+    est.thread_bytes = saturated_multiply(workers, kThreadScratchBytes);
+    est.total_bytes = saturated_add(
+        saturated_add(est.mesh_bytes, est.output_bytes),
+        saturated_add(est.thread_bytes, est.plan_bytes));
     est.limit_bytes = resolved["execution"]["max_memory_mb"].get<double>() * 1048576.0;
     est.fits = static_cast<double>(est.total_bytes) <= est.limit_bytes;
-    est.operation_count = tris * rows * kOpsPerTriSample;
+    est.operation_count = saturated_multiply(saturated_multiply(tris, rows), kOpsPerTriSample);
     if (resolved["solver"]["po_options"].value("shadowing", false) ||
         configured_max_bounces(resolved) > 1)
         est.warnings.emplace_back("GO corrections are excluded from the operation count; "
@@ -137,19 +174,17 @@ ResourceEstimate estimate_resources(const nlohmann::json& resolved, const Sample
     est.backend = resolved["execution"].value("accelerator", "cpu");
     if (est.backend == "cuda") est.device_bytes = cuda::cuda_footprint_bytes(resolved, tris);
 
-    double max_freq = 0.0;
-    for (double f : plan.frequencies_hz) max_freq = std::max(max_freq, f);
-    const double lambda_min = kSpeedOfLight / max_freq;
+    const double max_freq = counts.max_frequency_hz;
     const auto diag = mesh.report.bbox_max - mesh.report.bbox_min;
-    est.electrical_size_wavelengths = diag.length() / lambda_min;
-    for (double f : plan.frequencies_hz) {
-        const double lambda = kSpeedOfLight / f;
-        if (mesh.report.max_edge_length_m > lambda / 10.0) {
+    if (max_freq > 0.0) {
+        const double lambda_min = kSpeedOfLight / max_freq;
+        est.electrical_size_wavelengths = diag.length() / lambda_min;
+        if (mesh.report.max_edge_length_m > lambda_min / 10.0) {
             char buf[256];
             std::snprintf(buf, sizeof(buf),
                           "mesh may be under-resolved at %.6g Hz: max edge %.6g m vs "
                           "lambda/10 = %.6g m",
-                          f, mesh.report.max_edge_length_m, lambda / 10.0);
+                          max_freq, mesh.report.max_edge_length_m, lambda_min / 10.0);
             est.warnings.emplace_back(buf);
         }
     }

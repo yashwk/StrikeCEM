@@ -25,6 +25,54 @@ namespace strikecem {
 
 namespace {
 
+constexpr size_t kMaxRequestBytes = 1024 * 1024;
+constexpr size_t kMaxHeaderBytes = 64 * 1024;
+
+bool parse_content_length(const std::string& request, size_t header_end,
+                          bool& has_content_length, size_t& expected_body_len) {
+    const size_t request_line_end = request.find("\r\n");
+    if (request_line_end == std::string::npos || request_line_end >= header_end) return false;
+    size_t line_start = request_line_end + 2;
+    while (line_start < header_end) {
+        size_t line_end = request.find("\r\n", line_start);
+        if (line_end == std::string::npos || line_end > header_end) line_end = header_end;
+        const size_t colon = request.find(':', line_start);
+        if (colon == std::string::npos || colon >= line_end || colon == line_start) return false;
+
+        std::string name = request.substr(line_start, colon - line_start);
+        if (std::any_of(name.begin(), name.end(), [](unsigned char ch) {
+                return std::isspace(ch) || ch < 33 || ch > 126;
+            }))
+            return false;
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        if (name == "content-length") {
+            if (has_content_length) return false;
+            size_t begin = colon + 1;
+            size_t end = line_end;
+            while (begin < end && (request[begin] == ' ' || request[begin] == '\t')) ++begin;
+            while (end > begin && (request[end - 1] == ' ' || request[end - 1] == '\t')) --end;
+            if (begin == end) return false;
+
+            uint64_t parsed_len = 0;
+            const char* value_begin = request.data() + begin;
+            const char* value_end = request.data() + end;
+            const auto parsed = std::from_chars(value_begin, value_end, parsed_len);
+            if (parsed.ec != std::errc{} || parsed.ptr != value_end ||
+                header_end + 4 > kMaxRequestBytes ||
+                parsed_len > kMaxRequestBytes - (header_end + 4))
+                return false;
+            has_content_length = true;
+            expected_body_len = static_cast<size_t>(parsed_len);
+        } else if (name == "transfer-encoding") {
+            return false;
+        }
+        line_start = line_end + 2;
+    }
+    return true;
+}
+
 std::string sha256_file(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) return {};
@@ -388,6 +436,15 @@ void CoordinatorServer::start(bool background) {
 
     running_.store(true);
 
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        stopping_clients_ = false;
+    }
+    constexpr size_t kClientWorkerCount = 4;
+    client_threads_.reserve(kClientWorkerCount);
+    for (size_t i = 0; i < kClientWorkerCount; ++i)
+        client_threads_.emplace_back(&CoordinatorServer::client_worker_loop, this);
+
     if (background) {
         server_thread_ = std::make_unique<std::thread>(&CoordinatorServer::server_loop, this);
     } else {
@@ -409,8 +466,19 @@ void CoordinatorServer::stop() {
     }
     server_fd_ = -1;
 
-    std::unique_lock<std::mutex> lock(clients_mutex_);
-    clients_cv_.wait(lock, [this]() { return active_clients_ == 0; });
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex_);
+        stopping_clients_ = true;
+        while (!pending_clients_.empty()) {
+            ::close(pending_clients_.front());
+            pending_clients_.pop_front();
+        }
+        for (int fd : active_client_fds_) shutdown(fd, SHUT_RDWR);
+    }
+    clients_cv_.notify_all();
+    for (auto& thread : client_threads_)
+        if (thread.joinable()) thread.join();
+    client_threads_.clear();
 }
 
 void CoordinatorServer::server_loop() {
@@ -422,32 +490,50 @@ void CoordinatorServer::server_loop() {
             if (!running_.load()) break;
             continue;
         }
-        const timeval timeout{5, 0};
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        bool queued = false;
         {
             std::lock_guard<std::mutex> lock(clients_mutex_);
-            ++active_clients_;
-        }
-        try {
-            std::thread([this, client_fd]() {
-                try {
-                    handle_client(client_fd);
-                } catch (...) {
-                    ::close(client_fd);
-                }
-                {
-                    std::lock_guard<std::mutex> lock(clients_mutex_);
-                    --active_clients_;
-                }
-                clients_cv_.notify_all();
-            }).detach();
-        } catch (...) {
-            ::close(client_fd);
-            {
-                std::lock_guard<std::mutex> lock(clients_mutex_);
-                --active_clients_;
+            if (!stopping_clients_ && pending_clients_.size() < 128) {
+                pending_clients_.push_back(client_fd);
+                queued = true;
             }
-            clients_cv_.notify_all();
+        }
+        if (queued) {
+            clients_cv_.notify_one();
+        } else {
+            ::close(client_fd);
+        }
+    }
+}
+
+void CoordinatorServer::client_worker_loop() {
+    while (true) {
+        int client_fd = -1;
+        {
+            std::unique_lock<std::mutex> lock(clients_mutex_);
+            clients_cv_.wait(lock, [this]() {
+                return stopping_clients_ || !pending_clients_.empty();
+            });
+            if (stopping_clients_ && pending_clients_.empty()) return;
+            client_fd = pending_clients_.front();
+            pending_clients_.pop_front();
+            active_client_fds_.push_back(client_fd);
+        }
+
+        const timeval timeout{5, 0};
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        try {
+            handle_client(client_fd);
+        } catch (...) {
+            // A malformed request must not terminate the coordinator worker.
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            ::close(client_fd);
+            const auto it = std::find(active_client_fds_.begin(), active_client_fds_.end(), client_fd);
+            if (it != active_client_fds_.end()) active_client_fds_.erase(it);
         }
     }
 }
@@ -456,63 +542,39 @@ void CoordinatorServer::handle_client(int client_fd) {
     std::string raw_req;
     char buf[4096];
     ssize_t bytes_read = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     bool request_complete = false;
     bool has_content_length = false;
     size_t expected_body_len = 0;
 
-    while ((bytes_read = recv(client_fd, buf, sizeof(buf), 0)) > 0) {
+    while (std::chrono::steady_clock::now() < deadline &&
+           (bytes_read = recv(client_fd, buf, sizeof(buf), 0)) > 0) {
         raw_req.append(buf, bytes_read);
-        constexpr size_t max_request_bytes = 1024 * 1024;
-        if (raw_req.size() > max_request_bytes) {
-            ::close(client_fd);
+        if (raw_req.size() > kMaxRequestBytes) return;
+        const size_t header_end = raw_req.find("\r\n\r\n");
+        if (header_end == std::string::npos) {
+            if (raw_req.size() > kMaxHeaderBytes) return;
+            continue;
+        }
+        if (header_end > kMaxHeaderBytes ||
+            !parse_content_length(raw_req, header_end, has_content_length,
+                                  expected_body_len))
             return;
-        }
-        if (raw_req.find("\r\n\r\n") != std::string::npos) {
-            // Check if Content-Length body has arrived
-            size_t header_end = raw_req.find("\r\n\r\n");
-            size_t cl_pos = raw_req.find("Content-Length:");
-            if (cl_pos == std::string::npos) cl_pos = raw_req.find("content-length:");
-            if (cl_pos != std::string::npos && cl_pos < header_end) {
-                size_t num_start = raw_req.find(':', cl_pos);
-                if (num_start != std::string::npos) ++num_start;
-                while (num_start < header_end &&
-                       (raw_req[num_start] == ' ' || raw_req[num_start] == '\t')) {
-                    ++num_start;
-                }
-                if (num_start == std::string::npos || num_start >= header_end) {
-                    ::close(client_fd);
-                    return;
-                }
-                size_t num_end = raw_req.find("\r\n", num_start);
-                if (num_end == std::string::npos || num_end > header_end) num_end = header_end;
-                uint64_t content_len = 0;
-                const char* begin = raw_req.data() + num_start;
-                const char* end = raw_req.data() + num_end;
-                const auto parsed = std::from_chars(begin, end, content_len);
-                if (parsed.ec != std::errc{} || parsed.ptr != end ||
-                    header_end + 4 > max_request_bytes ||
-                    content_len > max_request_bytes - (header_end + 4)) {
-                    ::close(client_fd);
-                    return;
-                }
-                has_content_length = true;
-                expected_body_len = static_cast<size_t>(content_len);
-                size_t body_len = raw_req.size() - (header_end + 4);
-                if (body_len < content_len) continue;
-            }
-            request_complete = true;
-            break;
-        }
+        if (has_content_length &&
+            raw_req.size() - (header_end + 4) < expected_body_len)
+            continue;
+        request_complete = true;
+        break;
     }
 
     if (raw_req.empty() || !request_complete) {
-        ::close(client_fd);
         return;
     }
 
     std::istringstream req_stream(raw_req);
     std::string method, path, http_ver;
     req_stream >> method >> path >> http_ver;
+    const bool invalid_request_line = method.empty() || path.empty() || http_ver.empty();
 
     std::string body;
     size_t body_pos = raw_req.find("\r\n\r\n");
@@ -520,45 +582,60 @@ void CoordinatorServer::handle_client(int client_fd) {
         body = raw_req.substr(body_pos + 4, expected_body_len);
     }
 
-    nlohmann::json req_json;
+    nlohmann::json req_json = nlohmann::json::object();
+    bool invalid_json = invalid_request_line;
     if (!body.empty()) {
         try {
             req_json = nlohmann::json::parse(body);
+            if (!req_json.is_object()) invalid_json = true;
         } catch (...) {
-            // Ignore parse errors, body may be empty
+            invalid_json = true;
         }
     }
 
     nlohmann::json res_json;
     int status_code = 200;
 
-    if (!options_.auth_token.empty() && !has_authorization(raw_req, options_.auth_token)) {
-        status_code = 401;
-        res_json = {{"error", "Unauthorized"}};
-    } else if (path == "/api/v1/health") {
-        res_json = {{"status", "ok"}, {"run_id", run_id_}, {"version", "1.0"}};
-    } else if (path == "/api/v1/status") {
-        res_json = get_status();
-    } else if (path == "/api/v1/task/acquire" && method == "POST") {
-        const std::string wid = req_json.value("worker_id", "anon_worker");
-        const std::string dev = req_json.value("device", "cpu");
-        res_json = acquire_task(wid, dev);
-    } else if (path == "/api/v1/task/heartbeat" && method == "POST") {
-        const size_t sid = req_json.value("shard_id", size_t(0));
-        const std::string wid = req_json.value("worker_id", "");
-        res_json = heartbeat_task(sid, wid);
-    } else if (path == "/api/v1/task/complete" && method == "POST") {
-        const size_t sid = req_json.value("shard_id", size_t(0));
-        const std::string wid = req_json.value("worker_id", "");
-        const std::string out_path = req_json.value("output_path", "");
-        const std::string csum = req_json.value("checksum", "");
-        res_json = complete_task(sid, wid, out_path, csum);
-    } else if (path == "/api/v1/task/fail" && method == "POST") {
-        const size_t sid = req_json.value("shard_id", size_t(0));
-        const std::string wid = req_json.value("worker_id", "");
-        const std::string err = req_json.value("error", "unknown error");
-        res_json = fail_task(sid, wid, err);
-    } else {
+    try {
+        if (invalid_json) {
+            status_code = 400;
+            res_json = {{"error", "Malformed HTTP or JSON request"}};
+        } else if (!options_.auth_token.empty() && !has_authorization(raw_req, options_.auth_token)) {
+            status_code = 401;
+            res_json = {{"error", "Unauthorized"}};
+        } else if (path == "/api/v1/health") {
+            res_json = {{"status", "ok"}, {"run_id", run_id_}, {"version", "1.0"}};
+        } else if (path == "/api/v1/status") {
+            res_json = get_status();
+        } else if (path == "/api/v1/task/acquire" && method == "POST") {
+            const std::string wid = req_json.value("worker_id", "anon_worker");
+            const std::string dev = req_json.value("device", "cpu");
+            res_json = acquire_task(wid, dev);
+        } else if (path == "/api/v1/task/heartbeat" && method == "POST") {
+            const size_t sid = req_json.value("shard_id", size_t(0));
+            const std::string wid = req_json.value("worker_id", "");
+            res_json = heartbeat_task(sid, wid);
+        } else if (path == "/api/v1/task/complete" && method == "POST") {
+            const size_t sid = req_json.value("shard_id", size_t(0));
+            const std::string wid = req_json.value("worker_id", "");
+            const std::string out_path = req_json.value("output_path", "");
+            const std::string csum = req_json.value("checksum", "");
+            res_json = complete_task(sid, wid, out_path, csum);
+        } else if (path == "/api/v1/task/fail" && method == "POST") {
+            const size_t sid = req_json.value("shard_id", size_t(0));
+            const std::string wid = req_json.value("worker_id", "");
+            const std::string err = req_json.value("error", "unknown error");
+            res_json = fail_task(sid, wid, err);
+        } else {
+            status_code = 404;
+            res_json = {{"error", "Not Found"}, {"path", path}};
+        }
+    } catch (const nlohmann::json::exception&) {
+        status_code = 400;
+        res_json = {{"error", "Malformed JSON request fields"}};
+    }
+
+    if (res_json.is_null()) {
         status_code = 404;
         res_json = {{"error", "Not Found"}, {"path", path}};
     }
@@ -580,8 +657,13 @@ void CoordinatorServer::handle_client(int client_fd) {
                << res_body;
 
     const std::string res_str = res_stream.str();
-    send(client_fd, res_str.data(), res_str.size(), 0);
-    ::close(client_fd);
+    size_t sent = 0;
+    while (sent < res_str.size()) {
+        const ssize_t n = send(client_fd, res_str.data() + sent, res_str.size() - sent,
+                               MSG_NOSIGNAL);
+        if (n <= 0) break;
+        sent += static_cast<size_t>(n);
+    }
 }
 
 } // namespace strikecem

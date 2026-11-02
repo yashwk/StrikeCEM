@@ -12,6 +12,7 @@
 #include <openssl/sha.h>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 #include <nlohmann/json-schema.hpp>
 
@@ -24,6 +25,8 @@ namespace {
 namespace fs = std::filesystem;
 using nlohmann::json;
 using nlohmann::json_schema::json_validator;
+
+constexpr uint64_t kMaxSamplePlanAxisEntries = 1'000'000;
 
 json read_json_file(const std::string& path, const char* what) {
     std::ifstream in(path);
@@ -306,6 +309,25 @@ std::vector<double> expand_axis(double start, double stop, double step) {
     return values;
 }
 
+uint64_t checked_product(uint64_t a, uint64_t b, const char* what) {
+    if (b != 0 && a > std::numeric_limits<uint64_t>::max() / b)
+        throw ConfigError(std::string("sample plan ") + what + " count overflows uint64");
+    return a * b;
+}
+
+uint64_t checked_axis_count(double start, double stop, double step, const char* what) {
+    if (!std::isfinite(start) || !std::isfinite(stop) || !std::isfinite(step) ||
+        step <= 0.0 || stop < start)
+        throw ConfigError(std::string("invalid sample plan ") + what + " axis");
+    const double tol = 1e-9 * std::max(1.0, std::abs(stop));
+    const double intervals = std::floor((stop - start) / step + tol);
+    if (!std::isfinite(intervals) || intervals < 0.0 ||
+        intervals >= static_cast<double>(kMaxSamplePlanAxisEntries))
+        throw ConfigError(std::string("sample plan ") + what +
+                          " count exceeds the 1000000-entry limit");
+    return static_cast<uint64_t>(intervals) + 1;
+}
+
 } // namespace
 
 std::string canonical_json(const json& value) { return value.dump(); }
@@ -356,7 +378,85 @@ int configured_max_bounces(const nlohmann::json& resolved) {
     return solver.value("po_options", nlohmann::json::object()).value("max_bounces", 1);
 }
 
+SamplePlanCounts count_sample_plan(const json& resolved) {
+    SamplePlanCounts counts;
+    const auto& frequency = resolved.at("frequency");
+    if (frequency.contains("sweep")) {
+        const auto& sweep = frequency.at("sweep");
+        const double start = sweep.at("start").get<double>();
+        const double stop = sweep.at("stop").get<double>();
+        const double step = sweep.at("step").get<double>();
+        if (!std::isfinite(start) || !std::isfinite(stop) || !std::isfinite(step) ||
+            !(stop > start) || !(step > 0.0))
+            throw ConfigError("invalid frequency sweep");
+        const double intervals = (stop - start) / step;
+        if (!std::isfinite(intervals) || intervals < 0.0 ||
+            intervals >= static_cast<double>(kMaxSamplePlanAxisEntries))
+            throw ConfigError("sample plan frequency count exceeds the 1000000-entry limit");
+        const long long rounded = std::llround(intervals);
+        if (std::abs(intervals - static_cast<double>(rounded)) > 1e-9)
+            throw ConfigError("frequency sweep requires an integral number of steps");
+        counts.frequencies = static_cast<uint64_t>(rounded) + 1;
+        counts.min_frequency_hz = start;
+        counts.max_frequency_hz = stop;
+    } else {
+        counts.frequencies = 1;
+        counts.min_frequency_hz = counts.max_frequency_hz =
+            frequency.at("frequency_hz").get<double>();
+    }
+    if (counts.frequencies > kMaxSamplePlanAxisEntries)
+        throw ConfigError("sample plan frequency count exceeds the 1000000-entry limit");
+
+    const auto& angles = resolved.at("angles");
+    if (angles.contains("spherical")) {
+        counts.directions = angles.at("spherical").at("num_points").get<uint64_t>();
+    } else if (angles.contains("azimuth")) {
+        const auto& az = angles.at("azimuth");
+        const auto& el = angles.at("elevation");
+        const double az_step = angles.contains("adaptive")
+                                   ? angles.at("adaptive").at("coarse_step_deg").get<double>()
+                                   : az.at("step").get<double>();
+        const double az_start = az.at("start").get<double>();
+        const double az_stop = az.at("stop").get<double>();
+        uint64_t az_count = checked_axis_count(az_start, az_stop, az_step, "azimuth");
+        const double az_intervals = (az_stop - az_start) / az_step;
+        if (az_start == 0.0 && az_stop == 360.0 &&
+            std::abs(az_intervals - std::round(az_intervals)) <= 1e-9 && az_count > 1)
+            --az_count;
+        const uint64_t el_count = checked_axis_count(el.at("start").get<double>(),
+            el.at("stop").get<double>(), el.at("step").get<double>(), "elevation");
+        counts.directions = checked_product(az_count, el_count, "direction");
+    } else {
+        counts.directions = angles.at("list").size();
+    }
+    if (counts.directions == 0 || counts.directions > kMaxSamplePlanAxisEntries)
+        throw ConfigError("sample plan direction count exceeds the 1000000-entry limit");
+
+    counts.polarizations = resolved.at("polarization").size();
+    if (counts.polarizations == 0 || counts.polarizations > kMaxSamplePlanAxisEntries)
+        throw ConfigError("sample plan polarization count exceeds the 1000000-entry limit");
+    counts.samples = checked_product(
+        checked_product(counts.frequencies, counts.directions, "sample"),
+        counts.polarizations, "sample");
+    return counts;
+}
+
+void refresh_sample_plan_hash(SamplePlan& plan) {
+    std::ostringstream plan_bytes;
+    plan_bytes << std::setprecision(std::numeric_limits<double>::max_digits10);
+    for (double f : plan.frequencies_hz) plan_bytes << "f" << f << ";";
+    for (const auto& d : plan.directions) {
+        plan_bytes << "d" << d.azimuth_deg << "," << d.elevation_deg;
+        if (d.is_bistatic)
+            plan_bytes << ":b" << d.bistatic_azimuth_deg << "," << d.bistatic_elevation_deg;
+        plan_bytes << ";";
+    }
+    for (const auto& p : plan.polarizations) plan_bytes << "p" << p << ";";
+    plan.hash = sha256_hex(plan_bytes.str());
+}
+
 SamplePlan build_sample_plan(const json& resolved) {
+    (void)count_sample_plan(resolved);
     SamplePlan plan;
     if (resolved["frequency"].contains("sweep")) {
         const auto& s = resolved["frequency"]["sweep"];
@@ -381,10 +481,8 @@ SamplePlan build_sample_plan(const json& resolved) {
         bool is_bistatic = false;
 
         bool operator<(const DirCandidate& o) const {
-            if (std::abs(tx_az - o.tx_az) > 1e-9) return tx_az < o.tx_az;
-            if (std::abs(tx_el - o.tx_el) > 1e-9) return tx_el < o.tx_el;
-            if (std::abs(rx_az - o.rx_az) > 1e-9) return rx_az < o.rx_az;
-            return rx_el < o.rx_el;
+            return std::tie(tx_az, tx_el, rx_az, rx_el) <
+                   std::tie(o.tx_az, o.tx_el, o.rx_az, o.rx_el);
         }
         bool operator==(const DirCandidate& o) const {
             return std::abs(tx_az - o.tx_az) < 1e-9 &&
@@ -513,19 +611,7 @@ SamplePlan build_sample_plan(const json& resolved) {
 
     for (const auto& p : resolved["polarization"]) plan.polarizations.push_back(p.get<std::string>());
 
-    // Canonical plan encoding for resume identity (full round-trip precision).
-    std::ostringstream plan_bytes;
-    plan_bytes << std::setprecision(std::numeric_limits<double>::max_digits10);
-    for (double f : plan.frequencies_hz) plan_bytes << "f" << f << ";";
-    for (const auto& d : plan.directions) {
-        plan_bytes << "d" << d.azimuth_deg << "," << d.elevation_deg;
-        if (d.is_bistatic) {
-            plan_bytes << ":b" << d.bistatic_azimuth_deg << "," << d.bistatic_elevation_deg;
-        }
-        plan_bytes << ";";
-    }
-    for (const auto& p : plan.polarizations) plan_bytes << "p" << p << ";";
-    plan.hash = sha256_hex(plan_bytes.str());
+    refresh_sample_plan_hash(plan);
     return plan;
 }
 

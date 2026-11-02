@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -25,6 +26,26 @@ void set_last_error(const std::string& err) {
 
 double clamp(double v, double lo, double hi) {
     return std::max(lo, std::min(v, hi));
+}
+
+double wrap_azimuth(double az_deg) {
+    double wrapped = std::fmod(az_deg, 360.0);
+    if (wrapped < 0.0) wrapped += 360.0;
+    return wrapped;
+}
+
+bool regular_azimuth_seam_fraction(const std::vector<double>& azimuths, double az_deg,
+                                  double& fraction) {
+    if (azimuths.size() < 2) return false;
+    double query = wrap_azimuth(az_deg);
+    const double first = azimuths.front();
+    const double last = azimuths.back();
+    if (query < first) query += 360.0;
+    if (query <= last || query >= first + 360.0) return false;
+    const double gap = first + 360.0 - last;
+    if (gap <= 1e-12) return false;
+    fraction = (query - last) / gap;
+    return true;
 }
 
 template <typename T>
@@ -237,7 +258,22 @@ bool RcsQueryEngine::verify_design(const std::string& expected_id,
 
 std::complex<double> RcsQueryEngine::interpolate_regular_bicubic(size_t fi, size_t pol_idx,
                                                                double az_deg, double el_deg) const {
-    const double az_clamped = clamp(az_deg, unique_az_.front(), unique_az_.back());
+    double seam_fraction = 0.0;
+    if (regular_azimuth_seam_fraction(unique_az_, az_deg, seam_fraction)) {
+        const double el = clamp(el_deg, unique_el_.front(), unique_el_.back());
+        auto interpolate_column = [&](size_t az_index) {
+            if (unique_el_.size() == 1) return sample(fi, pol_idx, az_el_dir(az_index, 0));
+            std::vector<std::complex<double>> values(unique_el_.size());
+            for (size_t ei = 0; ei < unique_el_.size(); ++ei)
+                values[ei] = sample(fi, pol_idx, az_el_dir(az_index, ei));
+            return eval_1d_cubic_spline(unique_el_, values, el);
+        };
+        const auto last = interpolate_column(unique_az_.size() - 1);
+        const auto first = interpolate_column(0);
+        return (1.0 - seam_fraction) * last + seam_fraction * first;
+    }
+
+    const double az_clamped = clamp(wrap_azimuth(az_deg), unique_az_.front(), unique_az_.back());
     const double el_clamped = clamp(el_deg, unique_el_.front(), unique_el_.back());
 
     const size_t Naz = unique_az_.size();
@@ -366,13 +402,18 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
                                                     InterpolationMode mode) const {
     if (mode == InterpolationMode::Nearest) {
         if (is_regular_grid_) {
-            const double az_clamped = clamp(az_deg, unique_az_.front(), unique_az_.back());
             const double el_clamped = clamp(el_deg, unique_el_.front(), unique_el_.back());
 
-            auto it_az = std::lower_bound(unique_az_.begin(), unique_az_.end(), az_clamped);
-            size_t ai = (it_az == unique_az_.end()) ? unique_az_.size() - 1 : std::distance(unique_az_.begin(), it_az);
-            if (ai > 0 && std::abs(unique_az_[ai - 1] - az_clamped) < std::abs(unique_az_[ai] - az_clamped)) {
-                ai--;
+            const double wrapped_az = wrap_azimuth(az_deg);
+            size_t ai = 0;
+            double best_az_distance = std::numeric_limits<double>::infinity();
+            for (size_t candidate = 0; candidate < unique_az_.size(); ++candidate) {
+                const double delta = std::abs(wrap_azimuth(unique_az_[candidate]) - wrapped_az);
+                const double circular_delta = std::min(delta, 360.0 - delta);
+                if (circular_delta < best_az_distance) {
+                    best_az_distance = circular_delta;
+                    ai = candidate;
+                }
             }
 
             auto it_el = std::lower_bound(unique_el_.begin(), unique_el_.end(), el_clamped);
@@ -383,13 +424,14 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
             return sample(fi, pol_idx, az_el_dir(ai, ei));
         } else {
             size_t best_idx = 0;
-            double min_dist_sq = 1e30;
+            double best_dot = -std::numeric_limits<double>::infinity();
+            const geom::Vec3d query = direction_from_az_el(az_deg, el_deg);
             for (size_t di = 0; di < directions_.size(); ++di) {
-                const double daz = directions_[di].azimuth_deg - az_deg;
-                const double del = directions_[di].elevation_deg - el_deg;
-                const double dsq = daz * daz + del * del;
-                if (dsq < min_dist_sq) {
-                    min_dist_sq = dsq;
+                const auto candidate = direction_from_az_el(directions_[di].azimuth_deg,
+                                                            directions_[di].elevation_deg);
+                const double dot = query.x * candidate.x + query.y * candidate.y + query.z * candidate.z;
+                if (dot > best_dot) {
+                    best_dot = dot;
                     best_idx = di;
                 }
             }
@@ -399,8 +441,29 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
 
     if (mode == InterpolationMode::Linear) {
         if (is_regular_grid_) {
+            double seam_fraction = 0.0;
+            if (regular_azimuth_seam_fraction(unique_az_, az_deg, seam_fraction)) {
+                const double el = clamp(el_deg, unique_el_.front(), unique_el_.back());
+                auto interpolate_column = [&](size_t az_index) {
+                    if (unique_el_.size() == 1)
+                        return sample(fi, pol_idx, az_el_dir(az_index, 0));
+                    auto it = std::upper_bound(unique_el_.begin(), unique_el_.end(), el);
+                    const size_t e1 = it == unique_el_.end()
+                                          ? unique_el_.size() - 1
+                                          : std::distance(unique_el_.begin(), it);
+                    const size_t e0 = e1 == 0 ? 0 : e1 - 1;
+                    const double span = unique_el_[e1] - unique_el_[e0];
+                    const double v = span > 1e-9 ? (el - unique_el_[e0]) / span : 0.0;
+                    return (1.0 - v) * sample(fi, pol_idx, az_el_dir(az_index, e0)) +
+                           v * sample(fi, pol_idx, az_el_dir(az_index, e1));
+                };
+                const auto last = interpolate_column(unique_az_.size() - 1);
+                const auto first = interpolate_column(0);
+                return (1.0 - seam_fraction) * last + seam_fraction * first;
+            }
+
             if (unique_az_.size() > 1 && unique_el_.size() > 1) {
-                const double az_clamped = clamp(az_deg, unique_az_.front(), unique_az_.back());
+                const double az_clamped = clamp(wrap_azimuth(az_deg), unique_az_.front(), unique_az_.back());
                 const double el_clamped = clamp(el_deg, unique_el_.front(), unique_el_.back());
 
                 auto it_az = std::upper_bound(unique_az_.begin(), unique_az_.end(), az_clamped);
@@ -432,7 +495,7 @@ std::complex<double> RcsQueryEngine::query_direction(size_t fi, size_t pol_idx,
                        (1.0 - u) * v * s01 +
                        u * v * s11;
             } else if (unique_az_.size() > 1 && unique_el_.size() == 1) {
-                const double az_clamped = clamp(az_deg, unique_az_.front(), unique_az_.back());
+                const double az_clamped = clamp(wrap_azimuth(az_deg), unique_az_.front(), unique_az_.back());
                 auto it_az = std::upper_bound(unique_az_.begin(), unique_az_.end(), az_clamped);
                 size_t a1 = (it_az == unique_az_.end()) ? unique_az_.size() - 1 : std::distance(unique_az_.begin(), it_az);
                 size_t a0 = (a1 == 0) ? 0 : a1 - 1;

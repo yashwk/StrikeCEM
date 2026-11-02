@@ -16,7 +16,7 @@ StrikeCEM is a high-frequency computational electromagnetics (CEM) simulator and
 | **Geometry & Meshing** | **Automated Vehicle Pre-Scan** | Deep geometric scan classifying planar specular, curved, sharp edge, and cavity interior facets with hybrid solver parameter auto-tuning. |
 | | **Bilateral Symmetry** | Spatial hash detection of planar target symmetry ($xz, yz, xy$), cutting solve runtime and memory footprint in half. |
 | | **Dynamic Wavelength Meshing** | Conforming adaptive edge subdivision ensuring $h_{\max} \le \lambda / \rho$ per frequency sweep point without non-conforming T-junctions. |
-| | **CAD & Normalization** | Loads ASCII/Binary STL and OBJ formats; transforms, verifies orientation, repairs non-manifold topology, and caches geometry. |
+| | **CAD & Normalization** | Loads ASCII/Binary STL and OBJ formats; transforms and verifies orientation, removes zero-area facets in repair mode, rejects remaining non-manifold edges, and caches geometry. |
 | **Compute & Acceleration** | **CUDA GPU Acceleration** | Native CUDA kernel dispatch with double-precision and memory-optimized mixed-precision (float32 coordinates, float64 phase). |
 | | **NVTX Profiling Hooks** | Built-in instrumentation markers for NVIDIA Nsight Systems and Compute kernel tracing. |
 | | **Deterministic Multi-Threading** | OpenMP/thread-pool parallel CPU execution guaranteed 100% bit-identical to serial reference runs. |

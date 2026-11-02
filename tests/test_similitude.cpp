@@ -88,6 +88,8 @@ TEST(Similitude, ScalingMath) {
 
 TEST(Similitude, ScaleMesh) {
     NormalizedMesh full_mesh = make_flat_plate(2.0, 1.0);
+    full_mesh.geometry_hash = "source-geometry";
+    full_mesh.normalized_mesh_hash = "source-normalized";
     double sg = 0.5;
 
     NormalizedMesh scaled = scale_mesh(full_mesh, sg, SimilitudeDirection::FullToModel);
@@ -105,6 +107,38 @@ TEST(Similitude, ScaleMesh) {
     // Bounding box
     EXPECT_DOUBLE_EQ(scaled.report.bbox_max.x, 1.0);
     EXPECT_DOUBLE_EQ(scaled.report.bbox_max.y, 0.5);
+    EXPECT_DOUBLE_EQ(scaled.report.max_edge_length_m, full_mesh.report.max_edge_length_m * sg);
+    EXPECT_NE(scaled.geometry_hash, full_mesh.geometry_hash);
+    EXPECT_NE(scaled.normalized_mesh_hash, full_mesh.normalized_mesh_hash);
+    EXPECT_EQ(scaled.geometry_hash.size(), 64u);
+    EXPECT_EQ(scaled.normalized_mesh_hash.size(), 64u);
+}
+
+TEST(Similitude, ApplyRefreshesEffectiveConfigAndPlanIdentity) {
+    ResolvedConfig rc;
+    rc.value = {{"frequency", {{"frequency_hz", 10.0e9}}}};
+    rc.hash = sha256_hex(canonical_json(rc.value));
+    auto plan = make_plan(10.0e9, 0.0, 0.0);
+    refresh_sample_plan_hash(plan);
+    const std::string original_plan_hash = plan.hash;
+    auto mesh = make_flat_plate(2.0, 1.0);
+    mesh.geometry_hash = "source-geometry";
+    mesh.normalized_mesh_hash = "source-normalized";
+
+    SimilitudeConfig cfg;
+    cfg.enabled = true;
+    cfg.geometric_scale = 0.5;
+    const auto summary = apply_similitude(rc, plan, mesh, cfg);
+
+    EXPECT_DOUBLE_EQ(plan.frequencies_hz.front(), 20.0e9);
+    EXPECT_NE(plan.hash, original_plan_hash);
+    EXPECT_DOUBLE_EQ(summary.scaled_frequency_hz, 20.0e9);
+    EXPECT_DOUBLE_EQ(mesh.vertices[1].x, 1.0);
+    EXPECT_NE(mesh.geometry_hash, "source-geometry");
+    EXPECT_NE(mesh.normalized_mesh_hash, "source-normalized");
+    ASSERT_TRUE(rc.value.contains("similitude"));
+    EXPECT_DOUBLE_EQ(rc.value["similitude"]["geometric_scale"].get<double>(), 0.5);
+    EXPECT_EQ(rc.hash, sha256_hex(canonical_json(rc.value)));
 }
 
 TEST(Similitude, ConfigParsing) {

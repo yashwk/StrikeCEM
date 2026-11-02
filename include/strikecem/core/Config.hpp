@@ -60,6 +60,15 @@ struct SamplePlan {
     }
 };
 
+struct SamplePlanCounts {
+    uint64_t frequencies = 0;
+    uint64_t directions = 0;
+    uint64_t polarizations = 0;
+    uint64_t samples = 0;
+    double min_frequency_hz = 0.0;
+    double max_frequency_hz = 0.0;
+};
+
 struct ResolvedConfig {
     nlohmann::json value; // defaults materialized; the execution contract
     std::string hash;     // SHA-256 hex of the canonical serialization
@@ -83,5 +92,7 @@ std::string canonical_json(const nlohmann::json& value);
 std::string sha256_hex(const std::string& bytes);
 
 SamplePlan build_sample_plan(const nlohmann::json& resolved);
+SamplePlanCounts count_sample_plan(const nlohmann::json& resolved);
+void refresh_sample_plan_hash(SamplePlan& plan);
 
 } // namespace strikecem

@@ -1,5 +1,6 @@
 // Config loader tests: schema accept/reject, default resolution,
 // canonical hashing, sweep expansion, and direction-plan rules.
+#include <algorithm>
 #include <fstream>
 #include <filesystem>
 #include <functional>
@@ -79,6 +80,42 @@ TEST(Config, ExplicitListNormalizesAndDedupes) {
     EXPECT_DOUBLE_EQ(plan.directions[0].azimuth_deg, 0.0);
     EXPECT_DOUBLE_EQ(plan.directions[1].azimuth_deg, 45.0);
     EXPECT_FALSE(plan.warnings.empty());
+}
+
+TEST(Config, CountsAndRejectsOversizedPlansBeforeExpansion) {
+    const auto rc = load_fixture("valid_sweep_grid.json");
+    const auto counts = strikecem::count_sample_plan(rc.value);
+    EXPECT_EQ(counts.frequencies, 3u);
+    EXPECT_EQ(counts.directions, 4u);
+    EXPECT_EQ(counts.polarizations, 6u);
+    EXPECT_EQ(counts.samples, 72u);
+
+    auto oversized_frequency = rc.value;
+    oversized_frequency["frequency"]["sweep"] = {
+        {"start", 1.0}, {"stop", 1000001.0}, {"step", 1.0}};
+    EXPECT_THROW(strikecem::count_sample_plan(oversized_frequency), strikecem::ConfigError);
+    EXPECT_THROW(strikecem::build_sample_plan(oversized_frequency), strikecem::ConfigError);
+
+    auto oversized_sphere = rc.value;
+    oversized_sphere["angles"].erase("azimuth");
+    oversized_sphere["angles"].erase("elevation");
+    oversized_sphere["angles"]["spherical"] = {{"num_points", 1000001}};
+    EXPECT_THROW(strikecem::count_sample_plan(oversized_sphere), strikecem::ConfigError);
+}
+
+TEST(Config, DirectionSortUsesStrictOrderingBeforeToleranceGrouping) {
+    auto rc = load_fixture("valid_list_dup.json");
+    auto config = rc.value;
+    config["angles"].erase("azimuth");
+    config["angles"].erase("elevation");
+    config["angles"]["list"] = {
+        {0.0, 1.5e-9}, {0.75e-9, 0.0}, {1.5e-9, -1.5e-9}};
+
+    const auto forward = strikecem::build_sample_plan(config);
+    std::reverse(config["angles"]["list"].begin(), config["angles"]["list"].end());
+    const auto reverse = strikecem::build_sample_plan(config);
+    ASSERT_EQ(forward.directions.size(), 3u);
+    EXPECT_EQ(forward.hash, reverse.hash);
 }
 
 TEST(Config, RejectsUnknownNestedKey) {

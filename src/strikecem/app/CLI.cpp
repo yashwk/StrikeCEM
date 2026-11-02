@@ -178,20 +178,20 @@ int cmd_validate(const ResolvedConfig& rc, const std::string& config_path) {
 
 int cmd_estimate(const ResolvedConfig& rc, const std::string& config_path,
                  const std::vector<BenchmarkProfile>& profiles) {
-    SamplePlan plan = build_sample_plan(rc.value);
-    print_warnings(plan);
+    const SamplePlanCounts counts = count_sample_plan(rc.value);
     const int rc_code = cmd_validate(rc, config_path);
     if (rc_code != 0) return rc_code;
-    std::cout << "frequencies: " << plan.frequencies_hz.size() << "\n";
-    std::cout << "directions: " << plan.directions.size() << "\n";
-    std::cout << "polarizations: " << plan.polarizations.size() << "\n";
-    std::cout << "samples: " << plan.sample_count() << "\n";
+    std::cout << "frequencies: " << counts.frequencies << "\n";
+    std::cout << "directions: " << counts.directions << "\n";
+    std::cout << "polarizations: " << counts.polarizations << "\n";
+    std::cout << "samples: " << counts.samples << "\n";
     NormalizedMesh mesh =
         load_normalized_mesh(rc.value, config_dir_of(config_path), rc.schema_version);
-    const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
+    const ResourceEstimate est = estimate_resources(rc.value, counts, mesh, profiles);
     for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
     std::cout << "electrical_size_wavelengths: " << est.electrical_size_wavelengths << "\n";
     std::cout << "estimated_mesh_mb: " << est.mesh_bytes / 1048576.0 << "\n";
+    std::cout << "estimated_plan_mb: " << est.plan_bytes / 1048576.0 << "\n";
     std::cout << "estimated_output_mb: " << est.output_bytes / 1048576.0 << "\n";
     std::cout << "estimated_total_mb: " << est.total_bytes / 1048576.0 << "\n";
     std::cout << "memory_limit_mb: " << est.limit_bytes / 1048576.0 << "\n";
@@ -1170,8 +1170,7 @@ int run(int argc, char** argv) {
         if (command == "estimate") return cmd_estimate(rc, config_path, profiles);
         if (command == "export-mesh") return cmd_export_mesh(rc, config_path, output_path, mesh_format);
 
-        SamplePlan plan = build_sample_plan(rc.value);
-        print_warnings(plan);
+        const SamplePlanCounts plan_counts = count_sample_plan(rc.value);
         const DesignerIdentity designer = validate_designer_package(rc.value, config_path);
         for (const auto& w : designer.warnings) std::cerr << "strikecem: warning: " << w << "\n";
         NormalizedMesh mesh =
@@ -1182,11 +1181,34 @@ int run(int argc, char** argv) {
             sim_cfg.enabled = true;
             sim_cfg.geometric_scale = scale_override;
         }
-        if (sim_cfg.enabled && sim_cfg.geometric_scale != 1.0) {
+
+        if (command == "run") {
+            SamplePlanCounts effective_counts = plan_counts;
+            NormalizedMesh estimate_mesh = mesh;
+            if (sim_cfg.enabled && sim_cfg.geometric_scale != 1.0 &&
+                sim_cfg.direction == SimilitudeDirection::FullToModel) {
+                effective_counts.min_frequency_hz /= sim_cfg.geometric_scale;
+                effective_counts.max_frequency_hz /= sim_cfg.geometric_scale;
+                estimate_mesh = scale_mesh(mesh, sim_cfg.geometric_scale, sim_cfg.direction);
+            }
+            const ResourceEstimate est =
+                estimate_resources(rc.value, effective_counts, estimate_mesh, profiles);
+            for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
+            if (!est.fits) {
+                std::cerr << "strikecem: error: estimated resource use exceeds limit; refusing run\n";
+                return static_cast<int>(ExitCode::Resource);
+            }
+        }
+
+        SamplePlan plan = build_sample_plan(rc.value);
+        print_warnings(plan);
+        if (sim_cfg.enabled) {
             SimilitudeSummary sim_sum = apply_similitude(rc, plan, mesh, sim_cfg);
-            std::cout << "similitude_geometric_scale: " << sim_sum.geometric_scale << "\n";
-            std::cout << "similitude_frequency_scale: " << sim_sum.frequency_scale << "\n";
-            std::cout << "similitude_rcs_offset_dbsm: " << sim_sum.rcs_offset_dbsm << " dB\n";
+            if (sim_cfg.geometric_scale != 1.0) {
+                std::cout << "similitude_geometric_scale: " << sim_sum.geometric_scale << "\n";
+                std::cout << "similitude_frequency_scale: " << sim_sum.frequency_scale << "\n";
+                std::cout << "similitude_rcs_offset_dbsm: " << sim_sum.rcs_offset_dbsm << " dB\n";
+            }
         }
 
         if (command == "shard") {
@@ -1218,12 +1240,6 @@ int run(int argc, char** argv) {
             return cmd_vtk(rc, plan, mesh, vtu_file, direction_id, fringe, go, material);
         }
 
-        const ResourceEstimate est = estimate_resources(rc.value, plan, mesh, profiles);
-        for (const auto& w : est.warnings) std::cerr << "strikecem: warning: " << w << "\n";
-        if (!est.fits) {
-            std::cerr << "strikecem: error: estimated resource use exceeds limit; refusing run\n";
-            return static_cast<int>(ExitCode::Resource);
-        }
         const std::string format = rc.value["output"]["format"].get<std::string>();
         const fs::path out_path(rc.value["output"]["path"].get<std::string>());
         const bool is_shard = rc.value["run"].contains("shard");

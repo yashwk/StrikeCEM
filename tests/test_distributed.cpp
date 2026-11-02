@@ -12,6 +12,7 @@
 #include "strikecem/distributed/Shard.hpp"
 #include "strikecem/io/Hdf5Reader.hpp"
 #include "strikecem/io/OutputError.hpp"
+#include "strikecem/solvers/Similitude.hpp"
 
 namespace {
 
@@ -102,6 +103,51 @@ TEST(Distributed, PartitionMathAndManifestGeneration) {
     EXPECT_TRUE(fs::exists(manifest.shards[0].config_path));
     EXPECT_TRUE(fs::exists(manifest.shards[1].config_path));
     EXPECT_TRUE(fs::exists(manifest.shards[2].config_path));
+}
+
+TEST(Distributed, ShardPersistsScaleOverrideAndScaledIdentities) {
+    Workdir w;
+    const fs::path cfg_file = write_json(
+        w.dir / "config.json", make_test_config(w.dir / "full.h5", "hdf5", 4, 1));
+    const fs::path shards_dir = w.dir / "scaled_shards";
+    ASSERT_EQ(call_cli({"shard", "--scale", "0.5", "--num-shards", "2",
+                        "--out-dir", shards_dir.string(), cfg_file.string()}), 0);
+
+    std::ifstream manifest_in(shards_dir / "shard_manifest.json");
+    ASSERT_TRUE(manifest_in.good());
+    const auto manifest = nlohmann::json::parse(manifest_in);
+    const auto shard_config_path = manifest["shards"][0]["config_path"].get<std::string>();
+    std::ifstream shard_in(shard_config_path);
+    ASSERT_TRUE(shard_in.good());
+    const auto shard_config = nlohmann::json::parse(shard_in);
+    ASSERT_TRUE(shard_config.contains("similitude"));
+    EXPECT_TRUE(shard_config["similitude"]["enabled"].get<bool>());
+    EXPECT_DOUBLE_EQ(shard_config["similitude"]["geometric_scale"].get<double>(), 0.5);
+
+    auto parent_rc = strikecem::load_config(cfg_file.string(), SCEM_SCHEMA_PATH);
+    auto parent_plan = strikecem::build_sample_plan(parent_rc.value);
+    auto parent_mesh = strikecem::load_normalized_mesh(parent_rc.value, w.dir,
+                                                       parent_rc.schema_version);
+    auto sim = strikecem::parse_similitude_config(shard_config);
+    sim.enabled = true;
+    sim.geometric_scale = 0.5;
+    strikecem::apply_similitude(parent_rc, parent_plan, parent_mesh, sim);
+    EXPECT_EQ(manifest["config_hash"].get<std::string>(), parent_rc.hash);
+    EXPECT_EQ(manifest["sample_plan_hash"].get<std::string>(), parent_plan.hash);
+    EXPECT_EQ(manifest["geometry_hash"].get<std::string>(), parent_mesh.geometry_hash);
+    EXPECT_EQ(manifest["normalized_mesh_hash"].get<std::string>(),
+              parent_mesh.normalized_mesh_hash);
+
+    auto worker_rc = strikecem::load_config(shard_config_path, SCEM_SCHEMA_PATH);
+    auto worker_plan = strikecem::build_sample_plan(worker_rc.value);
+    auto worker_mesh = strikecem::load_normalized_mesh(worker_rc.value,
+        fs::path(shard_config_path).parent_path(), worker_rc.schema_version);
+    strikecem::apply_similitude(worker_rc, worker_plan, worker_mesh,
+                                strikecem::parse_similitude_config(worker_rc.value));
+    EXPECT_EQ(worker_plan.hash, manifest["sample_plan_hash"].get<std::string>());
+    EXPECT_EQ(worker_mesh.geometry_hash, manifest["geometry_hash"].get<std::string>());
+    EXPECT_EQ(worker_mesh.normalized_mesh_hash,
+              manifest["normalized_mesh_hash"].get<std::string>());
 }
 
 TEST(Distributed, EndToEndHdf5DirectMatch) {
