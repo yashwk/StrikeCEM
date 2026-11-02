@@ -75,6 +75,69 @@ TEST(AssetBundle, TamperedPayloadThrows) {
     fs::remove_all(dir);
 }
 
+TEST(AssetBundle, RejectsUnsafeAndDuplicateEntryNames) {
+    strikecem::AssetBundleWriter writer;
+    EXPECT_THROW(writer.add_entry_text("../escape.txt", "text/plain", "bad"),
+                 strikecem::OutputError);
+    EXPECT_THROW(writer.add_entry_text("dir\\escape.txt", "text/plain", "bad"),
+                 strikecem::OutputError);
+
+    writer.add_entry_text("same.txt", "text/plain", "first");
+    EXPECT_THROW(writer.add_entry_text("same.txt", "text/plain", "second"),
+                 strikecem::OutputError);
+}
+
+TEST(AssetBundle, ReaderRejectsTraversalEntryName) {
+    const fs::path dir = temp_dir("traversal");
+    const fs::path bundle_path = dir / "malicious.scempack";
+
+    strikecem::AssetBundleWriter writer;
+    writer.add_entry_text("safe.bin", "application/octet-stream", "payload");
+    writer.write_to_file(bundle_path.string());
+
+    strikecem::ScemPackHeader header{};
+    std::fstream bundle(bundle_path, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(bundle.good());
+    bundle.read(reinterpret_cast<char*>(&header), sizeof(header));
+    ASSERT_TRUE(bundle.good());
+
+    std::string table(header.table_bytes, '\0');
+    bundle.seekg(static_cast<std::streamoff>(header.table_offset));
+    bundle.read(table.data(), static_cast<std::streamsize>(table.size()));
+    ASSERT_TRUE(bundle.good());
+    const size_t name_pos = table.find("safe.bin");
+    ASSERT_NE(name_pos, std::string::npos);
+    ASSERT_EQ(std::string("safe.bin").size(), std::string("../x.bin").size());
+
+    table.replace(name_pos, std::string("safe.bin").size(), "../x.bin");
+    bundle.seekp(static_cast<std::streamoff>(header.table_offset + name_pos));
+    bundle.write(table.data() + name_pos, static_cast<std::streamsize>(std::string("../x.bin").size()));
+    bundle.close();
+
+    EXPECT_THROW(strikecem::AssetBundleReader::open_file(bundle_path.string(), false),
+                 strikecem::OutputError);
+    fs::remove_all(dir);
+}
+
+TEST(AssetBundle, ExtractionRejectsSymlinkedDirectory) {
+    const fs::path dir = temp_dir("symlink");
+    const fs::path bundle_path = dir / "archive.scempack";
+    const fs::path extract_dir = dir / "extracted";
+    const fs::path outside_dir = dir / "outside";
+
+    strikecem::AssetBundleWriter writer;
+    writer.add_entry_text("link/owned.txt", "text/plain", "payload");
+    writer.write_to_file(bundle_path.string());
+    fs::create_directories(extract_dir);
+    fs::create_directories(outside_dir);
+    fs::create_directory_symlink(outside_dir, extract_dir / "link");
+
+    const auto reader = strikecem::AssetBundleReader::open_file(bundle_path.string());
+    EXPECT_THROW(reader.extract_all(extract_dir.string()), strikecem::OutputError);
+    EXPECT_FALSE(fs::exists(outside_dir / "owned.txt"));
+    fs::remove_all(dir);
+}
+
 TEST(AssetBundle, ExtractAllEntries) {
     const fs::path dir = temp_dir("extract");
     const fs::path bundle_path = dir / "archive.scempack";

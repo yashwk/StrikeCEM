@@ -7,6 +7,9 @@
 #include <iterator>
 #include <thread>
 #include <gtest/gtest.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -217,6 +220,94 @@ TEST(Coordinator, HttpRestEndpoints) {
     server.stop();
 }
 
+TEST(Coordinator, RequiresAuthTokenAndWorkerStopsOnUnauthorized) {
+    Workdir w;
+    const fs::path dummy_out = w.dir / "final.h5";
+    const fs::path cfg_file = write_json(w.dir / "config.json", make_test_config(dummy_out, 2, 1));
+    const fs::path shards_dir = w.dir / "shards";
+    ASSERT_EQ(call_cli({"shard", "--num-shards", "1", "--out-dir", shards_dir.string(),
+                        cfg_file.string()}), 0);
+
+    strikecem::CoordinatorOptions unauthenticated_opts;
+    unauthenticated_opts.manifest_path = (shards_dir / "shard_manifest.json").string();
+    unauthenticated_opts.host = "0.0.0.0";
+    strikecem::CoordinatorServer unauthenticated_server(unauthenticated_opts);
+    EXPECT_THROW(unauthenticated_server.start(false), strikecem::OutputError);
+
+    strikecem::CoordinatorOptions opts;
+    opts.manifest_path = unauthenticated_opts.manifest_path;
+    opts.port = 0;
+    opts.auto_merge = false;
+    opts.auth_token = "test-coordinator-token";
+    strikecem::CoordinatorServer server(opts);
+    server.start(true);
+
+    const std::string url = "http://127.0.0.1:" + std::to_string(server.bound_port());
+    strikecem::WorkerOptions no_token_opts;
+    no_token_opts.coordinator_url = url;
+    strikecem::WorkerDaemon no_token_worker(no_token_opts);
+    EXPECT_THROW(no_token_worker.send_request("GET", "/api/v1/health"), std::runtime_error);
+
+    strikecem::WorkerOptions bad_token_opts = no_token_opts;
+    bad_token_opts.auth_token = "wrong-token";
+    bad_token_opts.poll_interval_ms = 1;
+    const auto rejected = strikecem::WorkerDaemon(bad_token_opts).run();
+    EXPECT_FALSE(rejected.success);
+    EXPECT_NE(rejected.error_message.find("HTTP 401"), std::string::npos);
+
+    strikecem::WorkerOptions valid_token_opts = no_token_opts;
+    valid_token_opts.auth_token = opts.auth_token;
+    strikecem::WorkerDaemon valid_token_worker(valid_token_opts);
+    const auto health = valid_token_worker.send_request("GET", "/api/v1/health");
+    EXPECT_EQ(health.value("status", ""), "ok");
+
+    server.stop();
+}
+
+TEST(Coordinator, RejectsMalformedAndOversizedContentLength) {
+    Workdir w;
+    const fs::path dummy_out = w.dir / "final.h5";
+    const fs::path cfg_file = write_json(w.dir / "config.json", make_test_config(dummy_out, 2, 1));
+    const fs::path shards_dir = w.dir / "shards";
+    ASSERT_EQ(call_cli({"shard", "--num-shards", "1", "--out-dir", shards_dir.string(),
+                        cfg_file.string()}), 0);
+
+    strikecem::CoordinatorOptions opts;
+    opts.manifest_path = (shards_dir / "shard_manifest.json").string();
+    opts.port = 0;
+    opts.auto_merge = false;
+    strikecem::CoordinatorServer server(opts);
+    server.start(true);
+
+    for (const std::string length : {"12x", "1048577"}) {
+        const int fd = socket(AF_INET, SOCK_STREAM, 0);
+        ASSERT_GE(fd, 0);
+        timeval timeout{2, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(static_cast<uint16_t>(server.bound_port()));
+        ASSERT_EQ(inet_pton(AF_INET, "127.0.0.1", &address.sin_addr), 1);
+        ASSERT_EQ(connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+
+        const std::string request =
+            "POST /api/v1/task/acquire HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
+            length + "\r\n\r\n";
+        ASSERT_EQ(send(fd, request.data(), request.size(), 0),
+                  static_cast<ssize_t>(request.size()));
+        char response[32];
+        EXPECT_EQ(recv(fd, response, sizeof(response), 0), 0);
+        close(fd);
+    }
+
+    strikecem::WorkerOptions worker_opts;
+    worker_opts.coordinator_url = "http://127.0.0.1:" + std::to_string(server.bound_port());
+    strikecem::WorkerDaemon worker(worker_opts);
+    EXPECT_EQ(worker.send_request("GET", "/api/v1/health").value("status", ""), "ok");
+    server.stop();
+}
+
 TEST(Coordinator, WorkerHeartbeatAndLeaseExpiry) {
     Workdir w;
     const fs::path dummy_out = w.dir / "final.h5";
@@ -263,6 +354,37 @@ TEST(Coordinator, WorkerHeartbeatAndLeaseExpiry) {
     });
     EXPECT_EQ(res3.value("status", ""), "acquired");
     EXPECT_EQ(res3.value("shard_id", 999), 0);
+
+    const fs::path shard_config = shards_dir / "shard_0000.json";
+    const fs::path shard_path = shards_dir / "shard_0000.h5";
+    ASSERT_EQ(call_cli({"run", shard_config.string()}), 0);
+    std::ifstream shard_file(shard_path, std::ios::binary);
+    ASSERT_TRUE(shard_file.good());
+    const std::string shard_bytes((std::istreambuf_iterator<char>(shard_file)),
+                                  std::istreambuf_iterator<char>());
+    const std::string checksum = strikecem::sha256_hex(shard_bytes);
+
+    // The expired worker cannot renew, fail, or complete a shard reassigned to B.
+    EXPECT_THROW(client.send_request("POST", "/api/v1/task/heartbeat", {
+        {"shard_id", 0}, {"worker_id", "worker_A"}
+    }), std::runtime_error);
+    EXPECT_THROW(client.send_request("POST", "/api/v1/task/fail", {
+        {"shard_id", 0}, {"worker_id", "worker_A"}, {"error", "stale worker"}
+    }), std::runtime_error);
+    EXPECT_THROW(client.send_request("POST", "/api/v1/task/complete", {
+        {"shard_id", 0}, {"worker_id", "worker_A"},
+        {"output_path", shard_path.string()}, {"checksum", checksum}
+    }), std::runtime_error);
+    auto still_leased = client.send_request("GET", "/api/v1/status");
+    EXPECT_EQ(still_leased.value("completed_shards", 99), 0);
+    EXPECT_EQ(still_leased.value("leased_shards", 99), 1);
+
+    const auto completed = client.send_request("POST", "/api/v1/task/complete", {
+        {"shard_id", 0}, {"worker_id", "worker_B"},
+        {"output_path", shard_path.string()}, {"checksum", checksum}
+    });
+    EXPECT_EQ(completed.value("status", ""), "ok");
+    EXPECT_EQ(completed.value("completed_count", 0), 1);
 
     server.stop();
 }

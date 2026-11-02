@@ -3,9 +3,11 @@
 // header and payload corruption detection, truncated file rejection,
 // CLI execution integration, and distributed shard merge with .scem.
 #include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <limits>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -14,6 +16,7 @@
 #include "strikecem/core/Config.hpp"
 #include "strikecem/distributed/Shard.hpp"
 #include "strikecem/io/BinaryTransport.hpp"
+#include "strikecem/io/Checksum.hpp"
 #include "strikecem/io/CsvWriter.hpp"
 #include "strikecem/io/Hdf5Reader.hpp"
 #include "strikecem/io/Hdf5Writer.hpp"
@@ -303,6 +306,37 @@ TEST(BinaryTransport, TruncatedFileDetection) {
     out.close();
 
     EXPECT_THROW(strikecem::read_scem_database(trunc_file.string()), strikecem::ReaderError);
+}
+
+TEST(BinaryTransport, RejectsOverflowedCountsAndOverlappingTables) {
+    Workdir work;
+    Pipeline p = run_pipeline(make_config((work.dir / "out.scem").string(), "scem"),
+                              work.dir / "cfg.json");
+    strikecem::write_scem_output(p.rc, p.plan, p.mesh, p.result);
+
+    auto mutate_header = [&](const fs::path& path, auto mutate) {
+        fs::copy_file(work.dir / "out.scem", path);
+        std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+        strikecem::ScemHeader header{};
+        file.read(reinterpret_cast<char*>(&header), sizeof(header));
+        mutate(header);
+        header.header_checksum = strikecem::fnv1a_64(
+            &header, offsetof(strikecem::ScemHeader, header_checksum));
+        file.seekp(0);
+        file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    };
+
+    const fs::path overflow_file = work.dir / "overflow.scem";
+    mutate_header(overflow_file, [](strikecem::ScemHeader& header) {
+        header.sample_count = std::numeric_limits<uint64_t>::max();
+    });
+    EXPECT_THROW(strikecem::read_scem_database(overflow_file.string()), strikecem::ReaderError);
+
+    const fs::path overlap_file = work.dir / "overlap.scem";
+    mutate_header(overlap_file, [](strikecem::ScemHeader& header) {
+        header.samples_offset = header.metadata_offset;
+    });
+    EXPECT_THROW(strikecem::read_scem_database(overlap_file.string()), strikecem::ReaderError);
 }
 
 TEST(BinaryTransport, CheckExistingScem) {
