@@ -1,11 +1,13 @@
 #include "strikecem/io/BinaryTransport.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 #ifdef __linux__
@@ -19,6 +21,18 @@ namespace strikecem {
 namespace {
 
 namespace fs = std::filesystem;
+
+bool checked_product(uint64_t count, uint64_t factor, uint64_t& product) {
+    if (factor != 0 && count > std::numeric_limits<uint64_t>::max() / factor) {
+        return false;
+    }
+    product = count * factor;
+    return true;
+}
+
+bool region_within_file(uint64_t offset, uint64_t bytes, uint64_t file_size) {
+    return offset >= sizeof(ScemHeader) && offset <= file_size && bytes <= file_size - offset;
+}
 
 std::string utc_now() {
     const auto now = std::chrono::system_clock::now();
@@ -265,6 +279,9 @@ ScemDatabase read_scem_database(const std::string& path) {
     if (header.version != 1) {
         throw ReaderError("unsupported SCEM format version: " + std::to_string(header.version));
     }
+    if (header.header_size != sizeof(ScemHeader)) {
+        throw ReaderError("invalid SCEM header size: " + path);
+    }
 
     if (header.endianness_marker == 0x04030201) {
         throw ReaderError("opposite endianness detected; byte swap not yet supported: " + path);
@@ -277,9 +294,52 @@ ScemDatabase read_scem_database(const std::string& path) {
         throw ReaderError("corrupted scem header checksum in " + path);
     }
 
-    const uint64_t total_expected_bytes = header.samples_offset + header.samples_bytes;
-    if (total_expected_bytes > static_cast<uint64_t>(file_size)) {
-        throw ReaderError("scem payload truncated or table offset out of bounds: " + path);
+    if (header.dtype != 0 && header.dtype != 1) {
+        throw ReaderError("unsupported SCEM sample dtype: " + std::to_string(header.dtype));
+    }
+
+    uint64_t expected_frequencies_bytes = 0;
+    uint64_t expected_directions_bytes = 0;
+    uint64_t expected_polarizations_bytes = 0;
+    uint64_t expected_samples_bytes = 0;
+    const uint64_t sample_record_size = header.dtype == 0
+                                            ? sizeof(ScemSampleRowF32)
+                                            : sizeof(ScemSampleRowF64);
+    if (!checked_product(header.frequency_count, sizeof(double), expected_frequencies_bytes) ||
+        !checked_product(header.direction_count, sizeof(ScemDirectionRecord),
+                         expected_directions_bytes) ||
+        !checked_product(header.polarization_count, sizeof(ScemPolarizationRecord),
+                         expected_polarizations_bytes) ||
+        !checked_product(header.sample_count, sample_record_size, expected_samples_bytes)) {
+        throw ReaderError("SCEM table size overflow: " + path);
+    }
+    if (header.frequencies_bytes != expected_frequencies_bytes ||
+        header.directions_bytes != expected_directions_bytes ||
+        header.polarizations_bytes != expected_polarizations_bytes ||
+        header.samples_bytes != expected_samples_bytes) {
+        throw ReaderError("SCEM table byte counts do not match record counts: " + path);
+    }
+
+    const uint64_t file_size_u64 = static_cast<uint64_t>(file_size);
+    std::vector<std::pair<uint64_t, uint64_t>> regions;
+    auto validate_section = [&](uint64_t offset, uint64_t bytes, const char* name) {
+        if (!region_within_file(offset, bytes, file_size_u64)) {
+            throw ReaderError(std::string("invalid SCEM ") + name + " range: " + path);
+        }
+        if (bytes > 0) regions.emplace_back(offset, offset + bytes);
+    };
+    validate_section(header.frequencies_offset, header.frequencies_bytes, "frequency table");
+    validate_section(header.directions_offset, header.directions_bytes, "direction table");
+    validate_section(header.polarizations_offset, header.polarizations_bytes, "polarization table");
+    validate_section(header.metadata_offset, header.metadata_bytes, "metadata");
+    validate_section(header.samples_offset, header.samples_bytes, "sample table");
+    std::sort(regions.begin(), regions.end());
+    uint64_t previous_end = sizeof(ScemHeader);
+    for (const auto& region : regions) {
+        if (region.first < previous_end) {
+            throw ReaderError("overlapping SCEM table regions: " + path);
+        }
+        previous_end = region.second;
     }
 
     // Verify payload data checksum
@@ -392,12 +452,25 @@ ScemDatabase read_scem_database(const std::string& path) {
         }
     }
 
+    for (const auto& row : db.rows) {
+        if (row.direction_index >= db.directions.size() ||
+            row.frequency_index >= db.frequencies_hz.size() ||
+            row.polarization_index >= db.polarizations.size()) {
+            throw ReaderError("SCEM sample index is outside its table: " + path);
+        }
+    }
+
     return db;
 }
 
 void validate_scem_complete(const ScemDatabase& db) {
-    const size_t expected_count =
-        db.frequencies_hz.size() * db.directions.size() * db.polarizations.size();
+    uint64_t expected_count = 0;
+    uint64_t frequency_direction_count = 0;
+    if (!checked_product(db.frequencies_hz.size(), db.directions.size(),
+                         frequency_direction_count) ||
+        !checked_product(frequency_direction_count, db.polarizations.size(), expected_count)) {
+        throw ReaderError("database sample count overflow");
+    }
     if (db.rows.size() != expected_count) {
         throw ReaderError("database incomplete: expected " + std::to_string(expected_count) +
                           " samples, got " + std::to_string(db.rows.size()));

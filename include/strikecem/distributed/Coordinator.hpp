@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -40,6 +41,7 @@ struct CoordinatorOptions {
     std::string output_path;
     std::string schema_path;
     std::string host = "127.0.0.1";
+    std::string auth_token;
     int port = 0; // 0 = pick available ephemeral port
     int lease_duration_seconds = 30;
     bool auto_merge = true;
@@ -80,6 +82,10 @@ private:
     int server_fd_ = -1;
     std::atomic<bool> running_{false};
     std::unique_ptr<std::thread> server_thread_;
+
+    std::mutex clients_mutex_;
+    std::condition_variable clients_cv_;
+    size_t active_clients_ = 0;
 
     mutable std::mutex mutex_;
     std::vector<CoordinatorTask> tasks_;

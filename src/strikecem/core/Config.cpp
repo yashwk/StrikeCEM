@@ -345,6 +345,17 @@ ResolvedConfig load_config(const std::string& config_path, const std::string& sc
     return rc;
 }
 
+int configured_max_bounces(const nlohmann::json& resolved) {
+    const auto& solver = resolved.at("solver");
+    if (solver.value("type", std::string("PO")) == "SBR") {
+        const auto sbr_options = solver.value("sbr", nlohmann::json::object());
+        if (sbr_options.contains("max_bounces")) {
+            return sbr_options["max_bounces"].get<int>();
+        }
+    }
+    return solver.value("po_options", nlohmann::json::object()).value("max_bounces", 1);
+}
+
 SamplePlan build_sample_plan(const json& resolved) {
     SamplePlan plan;
     if (resolved["frequency"].contains("sweep")) {

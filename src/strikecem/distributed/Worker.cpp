@@ -127,8 +127,11 @@ nlohmann::json WorkerDaemon::send_request(const std::string& method, const std::
     std::ostringstream req_stream;
     req_stream << method << " " << path << " HTTP/1.1\r\n"
                << "Host: " << host_ << ":" << port_ << "\r\n"
-               << "User-Agent: StrikeCEM-Worker/" << worker_id_ << "\r\n"
-               << "Content-Type: application/json\r\n"
+               << "User-Agent: StrikeCEM-Worker/" << worker_id_ << "\r\n";
+    if (!options_.auth_token.empty()) {
+        req_stream << "Authorization: Bearer " << options_.auth_token << "\r\n";
+    }
+    req_stream << "Content-Type: application/json\r\n"
                << "Content-Length: " << body_str.size() << "\r\n"
                << "Connection: close\r\n\r\n"
                << body_str;
@@ -150,6 +153,18 @@ nlohmann::json WorkerDaemon::send_request(const std::string& method, const std::
     }
 
     std::string res_body = raw_res.substr(header_end + 4);
+    const size_t status_end = raw_res.find("\r\n");
+    if (status_end == std::string::npos) {
+        throw OutputError("Invalid HTTP status from coordinator");
+    }
+    std::istringstream status_stream(raw_res.substr(0, status_end));
+    std::string http_version;
+    int status_code = 0;
+    status_stream >> http_version >> status_code;
+    if (status_code >= 400) {
+        throw OutputError("Coordinator returned HTTP " + std::to_string(status_code) +
+                          ": " + res_body);
+    }
     if (res_body.empty()) {
         return nlohmann::json::object();
     }
@@ -176,6 +191,11 @@ WorkerResult WorkerDaemon::run() {
         try {
             task_res = send_request("POST", "/api/v1/task/acquire", acquire_req);
         } catch (const std::exception& e) {
+            if (std::string(e.what()).find("HTTP 401") != std::string::npos) {
+                res.success = false;
+                res.error_message = e.what();
+                break;
+            }
             // Coordinator temporarily unreachable; back off and retry
             std::this_thread::sleep_for(std::chrono::milliseconds(options_.poll_interval_ms));
             continue;
@@ -283,7 +303,9 @@ WorkerResult WorkerDaemon::run() {
                     });
                     res.tasks_completed++;
                 } catch (const std::exception& e) {
+                    res.success = false;
                     res.error_message = "Failed to report task completion: " + std::string(e.what());
+                    running_.store(false);
                 }
             } else {
                 try {

@@ -538,7 +538,7 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         write_u64_attr(file, "shadowing",
                        rc.value["solver"]["po_options"].value("shadowing", false) ? 1 : 0);
         write_u64_attr(file, "max_bounces",
-                       rc.value["solver"]["po_options"].value("max_bounces", 1));
+                       configured_max_bounces(rc.value));
         write_u64_attr(file, "bounce_chains", result.chains_fired);
         write_u64_attr(file, "materials_enabled", material.enabled ? 1 : 0);
         write_u64_attr(file, "material_models_count", material.models.size());

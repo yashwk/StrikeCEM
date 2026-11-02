@@ -74,6 +74,9 @@ struct ResolvedConfig {
 // or MeshError (exit 3).
 ResolvedConfig load_config(const std::string& config_path, const std::string& schema_path);
 
+// Returns the bounce limit consumed by the selected mode. SBR contributions share the PO backend.
+int configured_max_bounces(const nlohmann::json& resolved);
+
 // Canonical bytes: nlohmann::json objects are std::map-ordered, so dump()
 // has sorted keys and stable number formatting.
 std::string canonical_json(const nlohmann::json& value);

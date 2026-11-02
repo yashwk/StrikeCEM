@@ -6,7 +6,7 @@ This tutorial explains how to consume StrikeCEM simulation outputs in Python and
 
 ## 1. Setting Up the Python SDK
 
-The Python SDK wraps `strikecem_lib` via ctypes with zero overhead.
+The Python SDK wraps `strikecem_lib` with ctypes and opens databases through the native library.
 
 Ensure your environment includes `strikecem_lib`:
 
@@ -24,59 +24,60 @@ print(strikecem.__version__)
 
 ---
 
-## 2. Querying an RCS Database in Real Time
+## 2. Querying an RCS Database
 
-Open any StrikeCEM HDF5 database:
+Open a StrikeCEM database and inspect its frequency and polarization channels:
 
 ```python
-from strikecem import Database, QueryRequest, InterpolationMode
+from strikecem import Database, InterpolationMode
 
-db = Database("naval_vessel.h5")
-
-# Inspect available channels and grid
-print("Frequencies:", db.frequencies_hz)
-print("Polarizations:", db.polarizations)
-print("Angle bounds: Azimuth", db.azimuth_range_deg, "Elevation", db.elevation_range_deg)
+with Database.open("naval_vessel.h5") as db:
+    print("Frequencies:", db.frequencies)
+    print("Polarizations:", db.polarizations)
 ```
 
-### Performing Sub-Microsecond Queries
+### Querying RCS
 
 ```python
-req = QueryRequest(
-    azimuth_deg=45.2,
-    elevation_deg=-2.5,
-    frequency_hz=10.0e9,
-    polarization="HH",
-    mode=InterpolationMode.Bicubic  # C^1 Hermite/Catmull-Rom spline
-)
-
-result = db.query(req)
-print(f"RCS: {result.rcs_dbsm:.2f} dBsm ({result.rcs_sqm:.4f} m^2)")
-print(f"Complex Scattering Amplitude: {result.scattering}")
+with Database.open("naval_vessel.h5") as db:
+    result = db.query(
+        az_deg=45.2,
+        el_deg=-2.5,
+        freq_hz=10.0e9,
+        pol="HH",
+        interpolation_mode=InterpolationMode.BICUBIC,
+    )
+    print(f"RCS: {result.rcs_dbsm:.2f} dBsm ({result.rcs_sqm:.4f} m^2)")
+    print(f"Complex scattering amplitude: {result.scattering}")
 ```
 
 ---
 
-## 3. Selecting the Optimal Interpolation Mode
+## 3. Choosing an Interpolation Mode
 
-StrikeCEM provides four interpolation algorithms tuned for real-time radar signatures:
+The Python enum exposes four interpolation modes:
 
-| Mode | Mathematical Formulation | Continuity | Latency | Recommended Use |
-|---|---|---|---|---|
-| `InterpolationMode.Nearest` | Closest angular sample | $C^0$ discontinuous | $< 0.1\,\mu\text{s}$ | Debugging, rapid testing |
-| `InterpolationMode.Bilinear` | 4-point bilinear on grid | $C^0$ continuous | $< 0.2\,\mu\text{s}$ | Fast flight simulators |
-| `InterpolationMode.Bicubic` | 16-point Hermite / Catmull-Rom | $C^1$ smooth | $< 0.6\,\mu\text{s}$ | High-fidelity RF simulation |
-| `InterpolationMode.SphericalSpline` | Wendland $C^2$ Compact Radial Basis | $C^2$ smooth | $< 1.8\,\mu\text{s}$ | Whole-sphere Fibonacci / unstructured grids |
+| Mode | Behavior |
+|---|---|
+| `InterpolationMode.NEAREST` | Returns the nearest stored direction. |
+| `InterpolationMode.LINEAR` | Uses linear interpolation on regular angle grids and spherical interpolation for unstructured directions. |
+| `InterpolationMode.BICUBIC` | Uses bicubic interpolation on regular angle grids and spherical interpolation for unstructured directions. |
+| `InterpolationMode.SPHERICAL` | Uses the spherical interpolation path. |
+
+`QueryRequest` is used for batch queries. For a single query, pass the coordinates and channel directly to `Database.query` as shown above. Query latency depends on the database and machine; benchmark with the intended workload.
 
 ```python
-# Query with smooth C^2 Wendland spherical spline
-result_smooth = db.query(QueryRequest(
+from strikecem import Database, InterpolationMode, QueryRequest
+
+request = QueryRequest(
     azimuth_deg=120.4,
     elevation_deg=15.1,
     frequency_hz=10.0e9,
     polarization="VV",
-    mode=InterpolationMode.SphericalSpline
-))
+)
+with Database.open("naval_vessel.h5") as db:
+    results = db.query_batch([request], interpolation_mode=InterpolationMode.SPHERICAL)
+    print(results[0].rcs_dbsm)
 ```
 
 ---

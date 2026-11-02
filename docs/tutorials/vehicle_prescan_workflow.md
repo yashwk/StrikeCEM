@@ -10,9 +10,11 @@ Real-world aerospace, naval, and ground vehicles exhibit heterogeneous electroma
 - **Broad planar plates** (wings, flat fuselage bulkheads) generate sharp specular flashes accurately captured by Physical Optics (PO).
 - **Curved surfaces** (radomes, nacelles, leading-edge fillets) generate creeping waves and phase slip captured by Fock curvature corrections.
 - **Sharp edges & wedges** (wing leading/trailing edges, control surface gaps) cause diffraction fringes modeled by Physical Theory of Diffraction (PTD) or Michaeli Equivalent Edge Currents (EEC).
-- **Concave cavities & re-entrant ducts** (jet engine intakes, cockpit cavities, corner reflectors) trap radar energy in multiple reflections requiring Shooting and Bouncing Rays (SBR).
+- **Concave cavities & re-entrant ducts** (jet engine intakes, cockpit cavities, corner reflectors) can produce multi-bounce returns, so the pre-scan may recommend enabling coherent multi-bounce contributions.
 
 Manually configuring these solver switches across complex meshes is error-prone. The pre-scan engine eliminates guesswork by inspecting the mesh topology and auto-tuning the configuration.
+
+The `SBR` configuration selects the bounce limit for coherent two- and three-bounce contributions in the shared PO solver path. It does not route the run to a separate general-purpose ray-tracing solver.
 
 ---
 
@@ -46,7 +48,7 @@ Feature Breakdown:
   - Cavity / Duct Interiors:   1320 (7.1545%)
 
 --- RECOMMENDED HYBRID SOLVER TUNING ---
-  - Solver Type:             SBR (Shooting & Bouncing Rays)
+  - Solver Type:             SBR multi-bounce configuration
   - Edge Correction Mode:    ptd_full
   - Shadowing Enabled:       true
   - Multi-Bounce Limit:      3

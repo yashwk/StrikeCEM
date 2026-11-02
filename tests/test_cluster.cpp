@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <thread>
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -184,12 +185,26 @@ TEST(Coordinator, HttpRestEndpoints) {
     EXPECT_EQ(hb_res.value("status", ""), "ok");
     EXPECT_TRUE(hb_res.value("lease_renewed", false));
 
-    // 5. POST /api/v1/task/complete
-    auto comp_res = client.send_request("POST", "/api/v1/task/complete", {
+    // 5. POST /api/v1/task/complete rejects an incorrect checksum.
+    const fs::path shard_path = shards_dir / "shard_0000.h5";
+    ASSERT_EQ(call_cli({"run", (shards_dir / "shard_0000.json").string()}), 0);
+    EXPECT_THROW(client.send_request("POST", "/api/v1/task/complete", {
         {"shard_id", 0},
         {"worker_id", "test_worker_1"},
-        {"output_path", (shards_dir / "shard_0000.h5").string()},
+        {"output_path", shard_path.string()},
         {"checksum", "deadbeef"}
+    }), std::runtime_error);
+
+    // A worker-provided checksum matching the shard file is accepted.
+    std::ifstream shard_file(shard_path, std::ios::binary);
+    ASSERT_TRUE(shard_file.good());
+    const std::string shard_bytes((std::istreambuf_iterator<char>(shard_file)),
+                                  std::istreambuf_iterator<char>());
+    const auto comp_res = client.send_request("POST", "/api/v1/task/complete", {
+        {"shard_id", 0},
+        {"worker_id", "test_worker_1"},
+        {"output_path", shard_path.string()},
+        {"checksum", strikecem::sha256_hex(shard_bytes)}
     });
     EXPECT_EQ(comp_res.value("status", ""), "ok");
     EXPECT_EQ(comp_res.value("completed_count", 0), 1);

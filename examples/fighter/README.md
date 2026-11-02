@@ -5,7 +5,7 @@ This directory contains a complete, self-contained demonstration and benchmark c
 It demonstrates the entire StrikeCEM simulation lifecycle:
 1. Procedural 3D mesh generation with full bilateral symmetry and 2-manifold closed topology (`fighter.obj`, `fighter_lod1.obj`, `fighter_lod2.obj`).
 2. Automated 3D electromagnetic feature pre-scan and hybrid solver tuning (`strikecem prescan`).
-3. Full monostatic Physical Optics (PO) and SBR + PTD fringe edge diffraction calculations.
+3. Monostatic PO-centered calculations with coherent multi-bounce and PTD fringe-edge options.
 4. Electrodynamic similitude scaling (1:5 geometric scale model at 50 GHz with automated $+13.98\,\text{dBsm}$ output renormalization).
 5. Production `.scempack` asset packaging with multi-LOD geometry embedding.
 6. 3D diagnostic visualizations (lit/shadow ray tracing, surface currents, shaded CAD).
@@ -27,7 +27,7 @@ The model (`fighter.obj`) represents an advanced twin-engine air superiority ste
   - $42^\circ$ planform leading-edge alignment across radome chine, strake (LERX), main wings, and all-moving horizontal tailerons.
   - Bubble cockpit canopy with smooth dorsal blending into central spine.
   - Twin canted vertical stabilizers ($28^\circ$ outward cant) to redirect broadside radar energy away from threat radars.
-  - Twin re-entrant caret engine air intakes with deep internal duct cavities for SBR multi-bounce radar trapping.
+  - Twin re-entrant caret engine air intakes with deep internal duct cavities that can produce multi-bounce radar returns.
   - Twin 2D thrust-vectoring exhaust nozzles with internal turbine cavity walls.
   - Planar faceted belly contours for internal weapons bay doors.
   - Perfect bilateral symmetry across the $xz$-plane ($y = 0$).
@@ -55,7 +55,7 @@ strikecem prescan fighter_baseline_po.json --report fighter_prescan.json
 
 **Pre-Scan Findings**:
 - Detects re-entrant intake duct and nozzle cavities ($984.4\,\text{m}^3$ estimated volume).
-- Automatically recommends **SBR** solver type, enables **Shadowing**, and sets **Multi-Bounce Limit to 3**.
+- Selects the **SBR** configuration, enabling the PO-backed coherent multi-bounce terms, shadowing, and a three-bounce limit.
 
 ### Step 3: Run Baseline PO Simulation
 
@@ -65,7 +65,7 @@ Simulate full $360^\circ$ azimuth sweep at 10 GHz (X-band) using naive Physical 
 strikecem run fighter_baseline_po.json --bench-profile bench_po.json
 ```
 
-### Step 4: Run Auto-Tuned Hybrid SBR+PTD Simulation
+### Step 4: Run the Auto-Tuned Multi-Bounce + PTD Configuration
 
 Simulate the same sweep using the auto-tuned hybrid configuration:
 

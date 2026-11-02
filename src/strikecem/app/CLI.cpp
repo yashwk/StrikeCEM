@@ -71,8 +71,10 @@ constexpr const char* kUsage =
     "               options: <config.json> [-o PATH] [--workers N] [--devices d1,d2] [--work-dir DIR] [--keep-shards]\n"
     "  coordinate   run distributed cluster campaign coordinator HTTP REST broker\n"
     "               options: --manifest PATH [-o PATH] [--port P] [--host H] [--lease SEC] [--auto-exit]\n"
+    "               set STRIKECEM_COORDINATOR_TOKEN for authenticated/non-loopback access\n"
     "  worker       run headless cluster worker daemon connecting to coordinator\n"
     "               options: --coordinator URL [--device DEV] [--worker-id ID] [--poll-ms MS] [--max-tasks N]\n"
+    "               set the same STRIKECEM_COORDINATOR_TOKEN on workers\n"
     "  cluster      generate HPC/cloud job scripts:\n"
     "               generate-slurm --manifest PATH --output PATH [--partition P] [--cpus N] [--time T]\n"
     "               generate-k8s   --manifest PATH --output PATH [--image IMG] [--coordinator URL] [--parallelism N]\n"
@@ -339,6 +341,9 @@ int cmd_coordinate(const std::string& manifest_path, const std::string& output_p
     opts.manifest_path = manifest_path;
     opts.output_path = output_path;
     opts.host = host.empty() ? "127.0.0.1" : host;
+    if (const char* token = std::getenv("STRIKECEM_COORDINATOR_TOKEN")) {
+        opts.auth_token = token;
+    }
     opts.port = port;
     opts.lease_duration_seconds = lease_sec > 0 ? lease_sec : 30;
     opts.schema_path = schema_path;
@@ -375,6 +380,9 @@ int cmd_worker(const std::string& coord_url, const std::string& device,
     WorkerOptions opts;
     opts.coordinator_url = coord_url;
     opts.device = device.empty() ? "cpu" : device;
+    if (const char* token = std::getenv("STRIKECEM_COORDINATOR_TOKEN")) {
+        opts.auth_token = token;
+    }
     opts.worker_id = worker_id;
     opts.poll_interval_ms = poll_ms > 0 ? poll_ms : 200;
     opts.max_tasks = max_tasks;
@@ -568,6 +576,7 @@ int cmd_render(const std::string& input_path, const std::string& output_path,
                    rc.value["solver"]["po_options"]["shadowing"].is_boolean()) {
             go.shadowing = rc.value["solver"]["po_options"]["shadowing"].get<bool>();
         }
+        go.max_bounces = configured_max_bounces(rc.value);
         if (rc.value.contains("materials")) {
             const ResolvedMaterials resolved_mat = resolve_materials(rc.value, mesh);
             material.enabled = resolved_mat.has_materials;
@@ -1202,7 +1211,7 @@ int run(int argc, char** argv) {
             std::cout << "fringe_edges: " << edge_model.edges.size() << "\n";
         }
         GoOptions go{rc.value["solver"]["po_options"].value("shadowing", false),
-                     rc.value["solver"]["po_options"].value("max_bounces", 1)};
+                     configured_max_bounces(rc.value)};
 
         if (command == "vtk") {
             const std::string vtu_file = output_path.empty() ? "diag.vtu" : output_path;

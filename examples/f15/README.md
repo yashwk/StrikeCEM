@@ -5,7 +5,7 @@ This directory contains a complete, self-contained demonstration and benchmark c
 It demonstrates the entire StrikeCEM simulation lifecycle:
 1. Procedural 3D mesh generation with full bilateral symmetry and 2-manifold closed topology (`f15.obj`, `f15_lod1.obj`, `f15_lod2.obj`).
 2. Automated 3D electromagnetic feature pre-scan and hybrid solver tuning (`strikecem prescan`).
-3. Full monostatic Physical Optics (PO) and SBR + PTD fringe edge diffraction calculations (`f15_baseline_po.h5`, `f15_hybrid.h5`).
+3. Monostatic PO-centered calculations with coherent multi-bounce and PTD fringe-edge options (`f15_baseline_po.h5`, `f15_hybrid.h5`).
 4. Electrodynamic similitude scaling (1:5 geometric scale model at 50 GHz with automated $+13.98\,\text{dBsm}$ output renormalization).
 5. Production `.scempack` asset packaging with multi-LOD geometry embedding (`f15.scempack`).
 6. 3D diagnostic visualizations (lit/shadow ray tracing, surface currents, shaded CAD).
@@ -82,7 +82,7 @@ Generates 2-manifold models with 0 degenerate triangles and 0 non-manifold edges
 ./build/release/strikecem --bench-profile examples/f15/bench_po.json run examples/f15/f15_baseline_po.json
 ```
 
-### Step 4: Run Auto-Tuned Hybrid SBR+PTD Simulation
+### Step 4: Run the Auto-Tuned Multi-Bounce + PTD Configuration
 ```bash
 ./build/release/strikecem --bench-profile examples/f15/bench_hybrid.json run examples/f15/f15_hybrid.json
 ```

@@ -478,6 +478,9 @@ scem_query_result_t RcsQueryEngine::query(double az_deg, double el_deg, double f
 scem_query_result_t RcsQueryEngine::query(double az_deg, double el_deg, double freq_hz,
                                          const std::string& pol,
                                          InterpolationMode mode) const {
+    if (!std::isfinite(az_deg) || !std::isfinite(el_deg) || !std::isfinite(freq_hz)) {
+        throw ReaderError("query azimuth, elevation, and frequency must be finite");
+    }
     if (frequencies_.empty() || directions_.empty() || polarizations_.empty()) {
         throw ReaderError("empty database");
     }
@@ -618,6 +621,10 @@ SCEM_API scem_status_t scem_database_query(scem_database_t* db, double az_deg, d
         strikecem::set_last_error("invalid argument to scem_database_query");
         return SCEM_ERROR_INVALID_ARGUMENT;
     }
+    if (!std::isfinite(az_deg) || !std::isfinite(el_deg) || !std::isfinite(freq_hz)) {
+        strikecem::set_last_error("query azimuth, elevation, and frequency must be finite");
+        return SCEM_ERROR_INVALID_ARGUMENT;
+    }
     try {
         *out_result = db->engine->query(az_deg, el_deg, freq_hz, pol);
         return SCEM_OK;
@@ -637,6 +644,11 @@ SCEM_API scem_status_t scem_database_query_batch(scem_database_t* db,
     if (!db || !requests || !out_results) return SCEM_ERROR_INVALID_ARGUMENT;
     for (size_t i = 0; i < count; ++i) {
         const auto& req = requests[i];
+        if (!std::isfinite(req.azimuth_deg) || !std::isfinite(req.elevation_deg) ||
+            !std::isfinite(req.frequency_hz)) {
+            strikecem::set_last_error("query azimuth, elevation, and frequency must be finite");
+            return SCEM_ERROR_INVALID_ARGUMENT;
+        }
         try {
             out_results[i] = db->engine->query(req.azimuth_deg, req.elevation_deg,
                                                req.frequency_hz, req.polarization);

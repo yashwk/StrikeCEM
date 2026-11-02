@@ -100,7 +100,7 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                                               ? fringe.edges->edges.size()
                                               : 0},
                          {"shadowing", rc.value["solver"]["po_options"].value("shadowing", false)},
-                         {"max_bounces", rc.value["solver"]["po_options"].value("max_bounces", 1)},
+                         {"max_bounces", configured_max_bounces(rc.value)},
                          {"bounce_chains", result.chains_fired},
                          {"materials", {{"enabled", material.enabled},
                                         {"tag_coverage", rc.value.contains("materials") ? rc.value["materials"].value("tag_coverage", "none") : "none"},

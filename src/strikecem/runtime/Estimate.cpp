@@ -117,7 +117,7 @@ ResourceEstimate estimate_resources(const nlohmann::json& resolved, const Sample
     est.fits = static_cast<double>(est.total_bytes) <= est.limit_bytes;
     est.operation_count = tris * rows * kOpsPerTriSample;
     if (resolved["solver"]["po_options"].value("shadowing", false) ||
-        resolved["solver"]["po_options"].value("max_bounces", 1) > 1)
+        configured_max_bounces(resolved) > 1)
         est.warnings.emplace_back("GO corrections are excluded from the operation count; "
                                   "treat calibrated runtime ranges as lower bounds");
     if (resolved.contains("materials")) {

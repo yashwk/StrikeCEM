@@ -1,13 +1,20 @@
 #include "strikecem/distributed/Coordinator.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
+#include <cctype>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <netinet/in.h>
+#include <openssl/evp.h>
 #include <sstream>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <system_error>
 #include <unistd.h>
 
 #include "strikecem/io/OutputError.hpp"
@@ -15,6 +22,90 @@
 namespace fs = std::filesystem;
 
 namespace strikecem {
+
+namespace {
+
+std::string sha256_file(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return {};
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return {};
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return {};
+    }
+
+    char buffer[65536];
+    while (true) {
+        file.read(buffer, sizeof(buffer));
+        const std::streamsize count = file.gcount();
+        if (count > 0 && EVP_DigestUpdate(ctx, buffer, static_cast<size_t>(count)) != 1) {
+            EVP_MD_CTX_free(ctx);
+            return {};
+        }
+        if (file.eof()) break;
+        if (!file) {
+            EVP_MD_CTX_free(ctx);
+            return {};
+        }
+    }
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size = 0;
+    if (EVP_DigestFinal_ex(ctx, digest, &digest_size) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return {};
+    }
+    EVP_MD_CTX_free(ctx);
+
+    std::ostringstream result;
+    result << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < digest_size; ++i) {
+        result << std::setw(2) << static_cast<unsigned int>(digest[i]);
+    }
+    return result.str();
+}
+
+bool same_normalized_path(const std::string& a, const std::string& b) {
+    std::error_code ec_a, ec_b;
+    const fs::path absolute_a = fs::absolute(a, ec_a);
+    const fs::path absolute_b = fs::absolute(b, ec_b);
+    if (ec_a || ec_b) return false;
+    const fs::path path_a = fs::weakly_canonical(absolute_a, ec_a);
+    const fs::path path_b = fs::weakly_canonical(absolute_b, ec_b);
+    return !ec_a && !ec_b && path_a == path_b;
+}
+
+bool has_authorization(const std::string& request, const std::string& token) {
+    const size_t headers_end = request.find("\r\n\r\n");
+    if (headers_end == std::string::npos) return false;
+    size_t line_start = request.find("\r\n");
+    if (line_start == std::string::npos || line_start >= headers_end) return false;
+    line_start += 2;
+
+    while (line_start < headers_end) {
+        const size_t line_end = request.find("\r\n", line_start);
+        if (line_end == std::string::npos || line_end > headers_end) break;
+        const size_t colon = request.find(':', line_start);
+        if (colon != std::string::npos && colon < line_end) {
+            std::string name = request.substr(line_start, colon - line_start);
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            if (name == "authorization") {
+                size_t value_start = colon + 1;
+                while (value_start < line_end && request[value_start] == ' ') ++value_start;
+                const std::string value = request.substr(value_start, line_end - value_start);
+                return value == "Bearer " + token;
+            }
+        }
+        line_start = line_end + 2;
+    }
+    return false;
+}
+
+} // namespace
 
 CoordinatorServer::CoordinatorServer(const CoordinatorOptions& options)
     : options_(options) {
@@ -139,16 +230,29 @@ nlohmann::json CoordinatorServer::complete_task(size_t shard_id, const std::stri
                                                const std::string& output_path,
                                                const std::string& checksum) {
     std::lock_guard<std::mutex> lock(mutex_);
+    check_expired_leases_locked();
     for (auto& task : tasks_) {
         if (task.shard_id == shard_id) {
             if (task.state == TaskState::Completed) {
                 return {{"status", "ok"}, {"already_completed", true}};
             }
-            task.state = TaskState::Completed;
-            task.checksum = checksum;
-            if (!output_path.empty()) {
-                task.output_path = output_path;
+            if (task.state != TaskState::Leased || task.worker_id != worker_id) {
+                return {{"status", "error"}, {"message", "Task not leased to this worker"}};
             }
+            if (output_path.empty() || !same_normalized_path(task.output_path, output_path)) {
+                return {{"status", "error"}, {"message", "Reported output path does not match shard"}};
+            }
+            std::string reported_checksum = checksum;
+            std::transform(reported_checksum.begin(), reported_checksum.end(),
+                           reported_checksum.begin(), [](unsigned char ch) {
+                               return static_cast<char>(std::tolower(ch));
+                           });
+            const std::string actual_checksum = sha256_file(task.output_path);
+            if (actual_checksum.empty() || reported_checksum != actual_checksum) {
+                return {{"status", "error"}, {"message", "Shard output checksum mismatch"}};
+            }
+            task.state = TaskState::Completed;
+            task.checksum = actual_checksum;
             completed_count_++;
 
             bool merged = false;
@@ -181,8 +285,12 @@ nlohmann::json CoordinatorServer::complete_task(size_t shard_id, const std::stri
 nlohmann::json CoordinatorServer::fail_task(size_t shard_id, const std::string& worker_id,
                                            const std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    check_expired_leases_locked();
     for (auto& task : tasks_) {
         if (task.shard_id == shard_id) {
+            if (task.state != TaskState::Leased || task.worker_id != worker_id) {
+                return {{"status", "error"}, {"message", "Task not leased to this worker"}};
+            }
             task.state = TaskState::Pending;
             task.worker_id.clear();
             task.retry_count++;
@@ -233,6 +341,16 @@ bool CoordinatorServer::is_campaign_complete() const {
 void CoordinatorServer::start(bool background) {
     if (running_.load()) return;
 
+    in_addr listen_addr{};
+    if (inet_pton(AF_INET, options_.host.c_str(), &listen_addr) != 1) {
+        throw OutputError("Coordinator host must be an IPv4 address: " + options_.host);
+    }
+    const bool loopback = (ntohl(listen_addr.s_addr) >> 24) == 127;
+    if (!loopback && options_.auth_token.empty()) {
+        throw OutputError("binding the coordinator beyond loopback requires "
+                          "STRIKECEM_COORDINATOR_TOKEN");
+    }
+
     server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd_ < 0) {
         throw OutputError("Failed to create coordinator server socket");
@@ -244,7 +362,7 @@ void CoordinatorServer::start(bool background) {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(options_.port);
-    inet_pton(AF_INET, options_.host.c_str(), &addr.sin_addr);
+    addr.sin_addr = listen_addr;
 
     if (bind(server_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         ::close(server_fd_);
@@ -278,19 +396,21 @@ void CoordinatorServer::start(bool background) {
 }
 
 void CoordinatorServer::stop() {
-    if (!running_.load()) return;
     running_.store(false);
 
     if (server_fd_ >= 0) {
         shutdown(server_fd_, SHUT_RDWR);
         ::close(server_fd_);
-        server_fd_ = -1;
     }
 
     if (server_thread_ && server_thread_->joinable()) {
         server_thread_->join();
         server_thread_.reset();
     }
+    server_fd_ = -1;
+
+    std::unique_lock<std::mutex> lock(clients_mutex_);
+    clients_cv_.wait(lock, [this]() { return active_clients_ == 0; });
 }
 
 void CoordinatorServer::server_loop() {
@@ -302,10 +422,33 @@ void CoordinatorServer::server_loop() {
             if (!running_.load()) break;
             continue;
         }
-
-        std::thread([this, client_fd]() {
-            handle_client(client_fd);
-        }).detach();
+        const timeval timeout{5, 0};
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex_);
+            ++active_clients_;
+        }
+        try {
+            std::thread([this, client_fd]() {
+                try {
+                    handle_client(client_fd);
+                } catch (...) {
+                    ::close(client_fd);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(clients_mutex_);
+                    --active_clients_;
+                }
+                clients_cv_.notify_all();
+            }).detach();
+        } catch (...) {
+            ::close(client_fd);
+            {
+                std::lock_guard<std::mutex> lock(clients_mutex_);
+                --active_clients_;
+            }
+            clients_cv_.notify_all();
+        }
     }
 }
 
@@ -313,26 +456,56 @@ void CoordinatorServer::handle_client(int client_fd) {
     std::string raw_req;
     char buf[4096];
     ssize_t bytes_read = 0;
+    bool request_complete = false;
+    bool has_content_length = false;
+    size_t expected_body_len = 0;
 
     while ((bytes_read = recv(client_fd, buf, sizeof(buf), 0)) > 0) {
         raw_req.append(buf, bytes_read);
+        constexpr size_t max_request_bytes = 1024 * 1024;
+        if (raw_req.size() > max_request_bytes) {
+            ::close(client_fd);
+            return;
+        }
         if (raw_req.find("\r\n\r\n") != std::string::npos) {
             // Check if Content-Length body has arrived
             size_t header_end = raw_req.find("\r\n\r\n");
             size_t cl_pos = raw_req.find("Content-Length:");
             if (cl_pos == std::string::npos) cl_pos = raw_req.find("content-length:");
             if (cl_pos != std::string::npos && cl_pos < header_end) {
-                size_t num_start = raw_req.find_first_of("0123456789", cl_pos);
+                size_t num_start = raw_req.find(':', cl_pos);
+                if (num_start != std::string::npos) ++num_start;
+                while (num_start < header_end &&
+                       (raw_req[num_start] == ' ' || raw_req[num_start] == '\t')) {
+                    ++num_start;
+                }
+                if (num_start == std::string::npos || num_start >= header_end) {
+                    ::close(client_fd);
+                    return;
+                }
                 size_t num_end = raw_req.find("\r\n", num_start);
-                size_t content_len = std::stoull(raw_req.substr(num_start, num_end - num_start));
+                if (num_end == std::string::npos || num_end > header_end) num_end = header_end;
+                uint64_t content_len = 0;
+                const char* begin = raw_req.data() + num_start;
+                const char* end = raw_req.data() + num_end;
+                const auto parsed = std::from_chars(begin, end, content_len);
+                if (parsed.ec != std::errc{} || parsed.ptr != end ||
+                    header_end + 4 > max_request_bytes ||
+                    content_len > max_request_bytes - (header_end + 4)) {
+                    ::close(client_fd);
+                    return;
+                }
+                has_content_length = true;
+                expected_body_len = static_cast<size_t>(content_len);
                 size_t body_len = raw_req.size() - (header_end + 4);
                 if (body_len < content_len) continue;
             }
+            request_complete = true;
             break;
         }
     }
 
-    if (raw_req.empty()) {
+    if (raw_req.empty() || !request_complete) {
         ::close(client_fd);
         return;
     }
@@ -343,8 +516,8 @@ void CoordinatorServer::handle_client(int client_fd) {
 
     std::string body;
     size_t body_pos = raw_req.find("\r\n\r\n");
-    if (body_pos != std::string::npos) {
-        body = raw_req.substr(body_pos + 4);
+    if (body_pos != std::string::npos && has_content_length) {
+        body = raw_req.substr(body_pos + 4, expected_body_len);
     }
 
     nlohmann::json req_json;
@@ -359,7 +532,10 @@ void CoordinatorServer::handle_client(int client_fd) {
     nlohmann::json res_json;
     int status_code = 200;
 
-    if (path == "/api/v1/health") {
+    if (!options_.auth_token.empty() && !has_authorization(raw_req, options_.auth_token)) {
+        status_code = 401;
+        res_json = {{"error", "Unauthorized"}};
+    } else if (path == "/api/v1/health") {
         res_json = {{"status", "ok"}, {"run_id", run_id_}, {"version", "1.0"}};
     } else if (path == "/api/v1/status") {
         res_json = get_status();
@@ -387,9 +563,17 @@ void CoordinatorServer::handle_client(int client_fd) {
         res_json = {{"error", "Not Found"}, {"path", path}};
     }
 
+    if (status_code == 200 && res_json.is_object() &&
+        res_json.value("status", std::string()) == "error") {
+        status_code = 400;
+    }
+
     const std::string res_body = res_json.dump();
     std::ostringstream res_stream;
-    res_stream << "HTTP/1.1 " << status_code << " OK\r\n"
+    const char* reason = status_code == 200 ? "OK" :
+                         status_code == 401 ? "Unauthorized" :
+                         status_code == 404 ? "Not Found" : "Bad Request";
+    res_stream << "HTTP/1.1 " << status_code << " " << reason << "\r\n"
                << "Content-Type: application/json\r\n"
                << "Content-Length: " << res_body.size() << "\r\n"
                << "Connection: close\r\n\r\n"

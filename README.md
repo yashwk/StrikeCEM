@@ -1,6 +1,6 @@
 # StrikeCEM: High-Performance Computational Electromagnetics & RCS Engine
 
-StrikeCEM is an industrial-grade high-frequency computational electromagnetics (CEM) simulation suite and real-time radar cross section (RCS) query engine. Designed for aerospace, naval, and defense simulation systems (including StrikeEngine integration), StrikeCEM scales from local single-workstation multi-GPU runs to high-performance computing (HPC) clusters and cloud batch deployments.
+StrikeCEM is a high-frequency computational electromagnetics (CEM) simulator and radar cross section (RCS) query engine. It calculates scattering signatures from 3D surface meshes and supports local CPU/CUDA runs, distributed campaigns, and runtime database queries.
 
 ---
 
@@ -11,7 +11,7 @@ StrikeCEM is an industrial-grade high-frequency computational electromagnetics (
 | **Physics & Solvers** | **Physical Optics (PO)** | Gordon closed-form planar facet integration with monostatic and bistatic scattering modes. |
 | | **PTD & Michaeli EEC** | Physical Theory of Diffraction (PTD) and Michaeli Equivalent Edge Currents along sharp wedges with Gauss-Legendre quadrature. |
 | | **Fock Curvature Correction** | Frequency-dependent asymptotic Fock curvature factors restoring physical creeping-wave behavior on curved surfaces. |
-| | **Coherent SBR** | Shooting and Bouncing Rays (SBR) multi-bounce ray tracing with complex dielectric Fresnel reflection coefficients and BVH acceleration. |
+| | **Coherent multi-bounce** | The `SBR` configuration enables coherent two- and three-bounce contributions in the shared PO solver path. It does not dispatch to a separate general-purpose ray-tracing solver. |
 | | **Electromagnetic Similitude** | Sinclair electrodynamic scaling ($s_g, 1/s_g, +20\log_{10}(1/s_g)\,\text{dB}$) for scale-model simulation and chamber measurement projection. |
 | **Geometry & Meshing** | **Automated Vehicle Pre-Scan** | Deep geometric scan classifying planar specular, curved, sharp edge, and cavity interior facets with hybrid solver parameter auto-tuning. |
 | | **Bilateral Symmetry** | Spatial hash detection of planar target symmetry ($xz, yz, xy$), cutting solve runtime and memory footprint in half. |
@@ -26,7 +26,7 @@ StrikeCEM is an industrial-grade high-frequency computational electromagnetics (
 | | **HPC & Cloud Generators** | Native generator for Slurm job arrays (`#SBATCH --array`) and Kubernetes batch jobs (`batch/v1 Job`). |
 | **Storage & Runtime** | **Thread-Safe HDF5 & CSV** | High-throughput HDF5 with chunk checksums and resume support, plus CSV with JSON sidecars. |
 | | **Asset Bundler (`.scempack`)** | Single-file tamper-verified asset archive packaging RCS databases, LOD meshes, and JSON metadata with cryptographic SHA-256 validation. |
-| | **Spherical Splines & Python SDK** | Real-time sub-microsecond $C^1$ Hermite and $C^2$ Wendland spherical spline query engine in Python and C ABI. |
+| | **RCS query SDK** | C ABI and Python bindings query stored signatures using nearest, linear, bicubic, or spherical interpolation. |
 
 ---
 
@@ -42,7 +42,7 @@ strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...
 |---|---|---|
 | `validate` | `strikecem validate config.json` | Validates configuration against JSON schema and inspects mesh hashes. |
 | `estimate` | `strikecem estimate config.json` | Validates configuration, counts sample plan, and computes memory/runtime estimates. |
-| `run` | `strikecem run config.json [--scale S]` | Executes full CEM simulation pipeline (PO/SBR/PTD) with optional similitude scaling. |
+| `run` | `strikecem run config.json [--scale S]` | Runs the PO-centered high-frequency solver with configured edge, curvature, material, and multi-bounce options. |
 | `prescan` | `strikecem prescan <mesh\|config.json> [--report R] [--auto-tune-config T]` | Analyzes vehicle features (cavities, edges, curves) and outputs auto-tuned solver configs. |
 | `run-parallel` | `strikecem run-parallel config.json [--workers N] [--devices d1,d2]` | Dispatches local parallel solve across multiple CPU threads or CUDA devices. |
 | `shard` | `strikecem shard config.json --num-shards N --out-dir D` | Partitions sample plan into N deterministic shard configurations with a manifest. |
@@ -53,6 +53,10 @@ strikecem [--schema PATH] [--bench-profile PATH] <command> [options...] <args...
 | `bundle` | `strikecem bundle --rcs db.h5 --mesh m.obj [--lod name=path] -o pkg.scempack` | Packages RCS databases and LOD geometry into a single `.scempack` file. |
 | `vtk` | `strikecem vtk config.json --output surface.vtu` | Exports 3D per-facet induced currents and lit/shadow diagnostics to ParaView VTU. |
 | `export-mesh` | `strikecem export-mesh config.json -o out.obj --format obj` | Exports procedural or normalized geometry to standalone OBJ/STL format. |
+| `isar` | `strikecem isar database.h5 --image isar.png` | Forms a 2D range-Doppler ISAR image from a frequency-azimuth sweep. |
+| `sar` | `strikecem sar config.json --output sar.png` | Synthesizes a SAR image using the selected platform and scene settings. |
+| `render` | `strikecem render config.json --mode currents` | Renders surface currents, lit/shadow state, or shaded geometry. |
+| `report` | `strikecem report database.h5 -o report.html` | Creates a standalone HTML radar-signature report. |
 
 ### Companion Analysis Tools
 
@@ -104,27 +108,21 @@ strikecem bundle --rcs uav_tuned.h5 --mesh models/uav.obj -o uav_target.scempack
 
 ## Python SDK Quickstart
 
-The Python SDK provides real-time, sub-microsecond radar cross section queries with $C^1$ bicubic and $C^2$ Wendland spherical spline interpolation:
+The Python SDK queries stored databases through the native C ABI. Choose an interpolation mode for each query:
 
 ```python
-import strikecem
-from strikecem import Database, QueryRequest, InterpolationMode
+from strikecem import Database, InterpolationMode
 
-# Open simulation database
-db = Database("uav_tuned.h5")
-
-# Query RCS at arbitrary continuous angle
-req = QueryRequest(
-    azimuth_deg=34.8,
-    elevation_deg=-2.1,
-    frequency_hz=10.0e9,
-    polarization="HH",
-    mode=InterpolationMode.Bicubic  # C^1 Hermite spline
-)
-
-result = db.query(req)
-print(f"RCS: {result.rcs_dbsm:.2f} dBsm ({result.rcs_sqm:.4f} m^2)")
-print(f"Scattering: {result.scattering}")
+with Database.open("uav_tuned.h5") as db:
+    result = db.query(
+        az_deg=34.8,
+        el_deg=-2.1,
+        freq_hz=10.0e9,
+        pol="HH",
+        interpolation_mode=InterpolationMode.BICUBIC,
+    )
+    print(f"RCS: {result.rcs_dbsm:.2f} dBsm ({result.rcs_sqm:.4f} m^2)")
+    print(f"Scattering: {result.scattering}")
 ```
 
 ---
@@ -149,7 +147,7 @@ cmake --preset release
 # Build all binaries and libraries
 cmake --build --preset release --parallel
 
-# Execute comprehensive test suite (332 tests)
+# Execute the configured test suite
 ctest --test-dir build/release --output-on-failure
 ```
 

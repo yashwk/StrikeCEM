@@ -1,10 +1,13 @@
 #include "strikecem/io/AssetBundle.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/OutputError.hpp"
@@ -13,12 +16,45 @@ namespace strikecem {
 
 namespace fs = std::filesystem;
 
+namespace {
+
+bool range_within_file(uint64_t offset, uint64_t size, uint64_t file_size) {
+    return offset <= file_size && size <= file_size - offset;
+}
+
+bool safe_entry_name(const std::string& name) {
+    if (name.empty() || name.find('\0') != std::string::npos ||
+        name.find('\\') != std::string::npos) {
+        return false;
+    }
+
+    const fs::path path(name);
+    if (path.is_absolute() || path.has_root_name() || path.has_root_directory()) return false;
+    for (const auto& component : path) {
+        if (component.empty() || component == "." || component == "..") return false;
+    }
+    return true;
+}
+
+bool is_within_directory(const fs::path& root, const fs::path& candidate) {
+    const fs::path relative = candidate.lexically_relative(root);
+    return !relative.empty() && *relative.begin() != fs::path("..") && !relative.is_absolute();
+}
+
+} // namespace
+
 void AssetBundleWriter::set_manifest(const nlohmann::json& manifest) {
     manifest_ = manifest;
 }
 
 void AssetBundleWriter::add_entry(const std::string& name, const std::string& mime_type,
                                  const std::vector<uint8_t>& data) {
+    if (!safe_entry_name(name)) throw OutputError("invalid bundle entry path: " + name);
+    if (std::any_of(entries_.begin(), entries_.end(), [&](const auto& entry) {
+            return entry.name == name;
+        })) {
+        throw OutputError("duplicate bundle entry path: " + name);
+    }
     entries_.push_back({name, mime_type, data});
 }
 
@@ -38,6 +74,9 @@ void AssetBundleWriter::add_entry_file(const std::string& name, const std::strin
 }
 
 void AssetBundleWriter::write_to_file(const std::string& output_path) {
+    if (entries_.size() > std::numeric_limits<uint32_t>::max()) {
+        throw OutputError("too many entries for asset bundle format");
+    }
     ScemPackHeader hdr{};
     hdr.entry_count = static_cast<uint32_t>(entries_.size());
 
@@ -81,34 +120,27 @@ void AssetBundleWriter::write_to_file(const std::string& output_path) {
         table_json.push_back(j);
     }
 
-    std::string table_str = table_json.dump();
     hdr.table_offset = hdr.manifest_offset + hdr.manifest_bytes;
-    hdr.table_bytes = table_str.size();
+    hdr.table_bytes = table_json.dump().size();
 
-    // Now compute true payload offsets
-    current_payload_offset = hdr.table_offset + hdr.table_bytes;
-    for (size_t i = 0; i < records.size(); ++i) {
-        records[i].offset = current_payload_offset;
-        table_json[i]["offset"] = current_payload_offset;
-        current_payload_offset += records[i].size;
-    }
-
-    // Re-serialize table with final offsets (string length is stable or close; pad if needed)
-    table_str = table_json.dump();
-    while (table_str.size() < hdr.table_bytes) {
-        table_str.push_back(' '); // pad spaces within JSON padding
-    }
-    if (table_str.size() > hdr.table_bytes) {
-        // Expand and recompute offsets
-        hdr.table_bytes = table_str.size();
+    // Offsets affect the serialized table size; iterate until the payload start stabilizes.
+    std::string table_str;
+    while (true) {
+        if (hdr.table_offset > std::numeric_limits<uint64_t>::max() - hdr.table_bytes) {
+            throw OutputError("asset bundle table size overflow");
+        }
         current_payload_offset = hdr.table_offset + hdr.table_bytes;
         for (size_t i = 0; i < records.size(); ++i) {
             records[i].offset = current_payload_offset;
             table_json[i]["offset"] = current_payload_offset;
+            if (records[i].size > std::numeric_limits<uint64_t>::max() - current_payload_offset) {
+                throw OutputError("asset bundle payload size overflow");
+            }
             current_payload_offset += records[i].size;
         }
         table_str = table_json.dump();
-        while (table_str.size() < hdr.table_bytes) table_str.push_back(' ');
+        if (table_str.size() == hdr.table_bytes) break;
+        hdr.table_bytes = table_str.size();
     }
 
     hdr.total_bundle_bytes = current_payload_offset;
@@ -137,6 +169,12 @@ AssetBundleReader AssetBundleReader::open_file(const std::string& bundle_path, b
     std::ifstream in(bundle_path, std::ios::binary);
     if (!in) throw OutputError("cannot open asset bundle file: " + bundle_path);
 
+    in.seekg(0, std::ios::end);
+    const std::streamoff end_pos = in.tellg();
+    if (end_pos < 0) throw OutputError("cannot determine asset bundle size: " + bundle_path);
+    const uint64_t file_size = static_cast<uint64_t>(end_pos);
+    in.seekg(0, std::ios::beg);
+
     ScemPackHeader hdr{};
     in.read(reinterpret_cast<char*>(&hdr), sizeof(ScemPackHeader));
     if (in.gcount() != sizeof(ScemPackHeader)) {
@@ -149,14 +187,33 @@ AssetBundleReader AssetBundleReader::open_file(const std::string& bundle_path, b
     if (hdr.version != 1) {
         throw OutputError("unsupported .scempack version: " + std::to_string(hdr.version));
     }
+    if (hdr.endianness_marker != 0x01020304) {
+        throw OutputError("unsupported .scempack endianness");
+    }
     if (hdr.header_size != sizeof(ScemPackHeader)) {
         throw OutputError("invalid .scempack header size");
     }
+    if (hdr.total_bundle_bytes != file_size) {
+        throw OutputError("invalid .scempack total size");
+    }
+    if (hdr.manifest_offset != sizeof(ScemPackHeader) ||
+        !range_within_file(hdr.manifest_offset, hdr.manifest_bytes, file_size)) {
+        throw OutputError("invalid .scempack manifest range");
+    }
+    const uint64_t manifest_end = hdr.manifest_offset + hdr.manifest_bytes;
+    if (hdr.table_offset != manifest_end ||
+        !range_within_file(hdr.table_offset, hdr.table_bytes, file_size)) {
+        throw OutputError("invalid .scempack table range");
+    }
+    const uint64_t table_end = hdr.table_offset + hdr.table_bytes;
 
     // Read manifest
     in.seekg(hdr.manifest_offset);
     std::string manifest_str(hdr.manifest_bytes, '\0');
     in.read(manifest_str.data(), hdr.manifest_bytes);
+    if (static_cast<uint64_t>(in.gcount()) != hdr.manifest_bytes) {
+        throw OutputError("truncated .scempack manifest");
+    }
     nlohmann::json manifest;
     try {
         manifest = nlohmann::json::parse(manifest_str);
@@ -168,14 +225,22 @@ AssetBundleReader AssetBundleReader::open_file(const std::string& bundle_path, b
     in.seekg(hdr.table_offset);
     std::string table_str(hdr.table_bytes, '\0');
     in.read(table_str.data(), hdr.table_bytes);
+    if (static_cast<uint64_t>(in.gcount()) != hdr.table_bytes) {
+        throw OutputError("truncated .scempack entry table");
+    }
     nlohmann::json table_json;
     try {
         table_json = nlohmann::json::parse(table_str);
     } catch (const std::exception& e) {
         throw OutputError("corrupted bundle table JSON: " + std::string(e.what()));
     }
+    if (!table_json.is_array() || table_json.size() != hdr.entry_count) {
+        throw OutputError("invalid .scempack entry table");
+    }
 
     std::vector<BundleEntryRecord> entries;
+    std::unordered_set<std::string> names;
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
     for (const auto& item : table_json) {
         BundleEntryRecord rec;
         rec.name = item["name"].get<std::string>();
@@ -183,8 +248,26 @@ AssetBundleReader AssetBundleReader::open_file(const std::string& bundle_path, b
         rec.offset = item["offset"].get<uint64_t>();
         rec.size = item["size"].get<uint64_t>();
         rec.sha256_hex = item["sha256"].get<std::string>();
+        if (!safe_entry_name(rec.name)) {
+            throw OutputError("invalid .scempack entry path: " + rec.name);
+        }
+        if (!names.insert(rec.name).second) {
+            throw OutputError("duplicate .scempack entry path: " + rec.name);
+        }
+        if (rec.offset < table_end || !range_within_file(rec.offset, rec.size, file_size)) {
+            throw OutputError("invalid .scempack entry range: " + rec.name);
+        }
+        ranges.emplace_back(rec.offset, rec.offset + rec.size);
         entries.push_back(rec);
     }
+
+    std::sort(ranges.begin(), ranges.end());
+    uint64_t previous_end = table_end;
+    for (const auto& range : ranges) {
+        if (range.first < previous_end) throw OutputError("overlapping .scempack entry ranges");
+        previous_end = range.second;
+    }
+    if (previous_end != file_size) throw OutputError("invalid .scempack payload extent");
 
     AssetBundleReader reader;
     reader.bundle_path_ = bundle_path;
@@ -217,7 +300,11 @@ std::vector<uint8_t> AssetBundleReader::read_entry_bytes(const std::string& name
     std::ifstream in(bundle_path_, std::ios::binary);
     if (!in) throw OutputError("cannot open bundle file: " + bundle_path_);
 
-    in.seekg(info->offset);
+    if (info->size > std::vector<uint8_t>().max_size()) {
+        throw OutputError("bundle entry is too large to read: " + name);
+    }
+    in.seekg(static_cast<std::streamoff>(info->offset));
+    if (!in) throw OutputError("invalid bundle entry offset for: " + name);
     std::vector<uint8_t> buf(info->size);
     if (info->size > 0) {
         in.read(reinterpret_cast<char*>(buf.data()), info->size);
@@ -235,10 +322,40 @@ std::string AssetBundleReader::read_entry_text(const std::string& name) const {
 
 void AssetBundleReader::extract_all(const std::string& dest_dir) const {
     fs::create_directories(dest_dir);
+    const fs::path root = fs::weakly_canonical(dest_dir);
     for (const auto& e : entries_) {
+        if (!safe_entry_name(e.name)) {
+            throw OutputError("invalid bundle entry path: " + e.name);
+        }
+        const fs::path relative_path(e.name);
+        fs::path parent = root;
+        for (const auto& component : relative_path.parent_path()) {
+            parent /= component;
+            if (fs::exists(parent)) {
+                if (fs::is_symlink(parent) || !fs::is_directory(parent)) {
+                    throw OutputError("bundle extraction path is not a safe directory: " + e.name);
+                }
+            } else if (!fs::create_directory(parent) && !fs::is_directory(parent)) {
+                throw OutputError("cannot create bundle extraction directory: " + parent.string());
+            }
+            if (!is_within_directory(root, fs::weakly_canonical(parent))) {
+                throw OutputError("bundle extraction path escapes destination: " + e.name);
+            }
+        }
+        fs::path target = root / relative_path;
+        if (fs::is_symlink(target)) {
+            throw OutputError("bundle extraction path escapes destination: " + e.name);
+        }
+        if (fs::exists(target) &&
+            !is_within_directory(root, fs::weakly_canonical(target))) {
+            throw OutputError("bundle extraction path escapes destination: " + e.name);
+        }
+        if (fs::exists(target)) {
+            if (!fs::is_regular_file(target) || !fs::remove(target)) {
+                throw OutputError("cannot replace existing bundle path: " + e.name);
+            }
+        }
         auto data = read_entry_bytes(e.name);
-        fs::path target = fs::path(dest_dir) / e.name;
-        fs::create_directories(target.parent_path());
         std::ofstream out(target, std::ios::binary | std::ios::trunc);
         if (!out) throw OutputError("cannot extract bundle entry to: " + target.string());
         if (!data.empty()) {

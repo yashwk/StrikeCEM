@@ -13,7 +13,7 @@ The model (`ucav.obj`) represents a tailless cranked-kite blended wing body (BWB
 - **Stealth Features**:
   - Swept leading edges ($50^\circ$ sweep) and trailing edges for edge current diffraction (PTD/EEC).
   - Continuous blended fuselage with curved forward chines (Fock curvature factor).
-  - Dorsal re-entrant engine intake duct with internal sidewalls (SBR multi-bounce).
+  - Dorsal re-entrant engine intake duct with internal sidewalls that can produce multi-bounce returns.
   - Bilateral symmetry across the $xz$-plane ($y = 0$).
 
 ---
@@ -31,7 +31,7 @@ strikecem prescan ucav.obj --report ucav_prescan.json --auto-tune-config ucav_hy
 **Pre-Scan Findings**:
 - Detects re-entrant intake duct cavity facets and computes cavity volume ($54.5\,\text{m}^3$).
 - Detects sharp swept leading/trailing edge facets.
-- Automatically selects **SBR** solver type, enables **PTD Full** edge diffraction, enables **Curvature Correction**, enables **Shadowing**, and sets **Multi-Bounce Limit to 3**.
+- Selects the **SBR** configuration for PO-backed coherent multi-bounce terms, enables **PTD Full** edge diffraction, **Curvature Correction**, and **Shadowing**, and sets a three-bounce limit.
 
 ### Step 2: Run Baseline PO Simulation
 
