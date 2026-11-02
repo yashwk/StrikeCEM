@@ -144,10 +144,12 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
     const double mu_r = medium["mu_r"].get<double>();
     if (medium["sigma"].get<double>() != 0.0)
         out.warnings.push_back("medium conductivity is ignored in v1 PO");
-    if (go.shadowing)
-        out.warnings.push_back(
-            "GO shadowing enabled: hard shadow boundaries without edge diffraction; "
-            "multi-bounce not included");
+    if (go.shadowing) {
+        std::string warning = "GO shadowing enabled: hard shadow boundaries";
+        if (!fringe.enabled) warning += "; edge diffraction is disabled";
+        if (go.max_bounces < 2) warning += "; multi-bounce is disabled";
+        out.warnings.push_back(std::move(warning));
+    }
     bool has_multi_material = material.enabled && !material.facet_material_indices.empty();
     bool any_non_pec = false;
     if (material.enabled) {
@@ -729,24 +731,9 @@ PoResult solve_typed(const NormalizedMesh& mesh, const SamplePlan& plan,
                                    std::to_string(fringe_skipped.load()) +
                                    " edge-sample(s): no transverse frame (end-on incidence)");
         }
-        if (fringe.edges != nullptr) {
-            bool has_non_pec = false;
-            for (const auto& edge : fringe.edges->edges) {
-                if (edge.tri0 >= 0 && static_cast<size_t>(edge.tri0) < mesh.triangle_tags.size() &&
-                    mesh.triangle_tags[edge.tri0] != "pec") {
-                    has_non_pec = true;
-                    break;
-                }
-                if (edge.tri1 >= 0 && static_cast<size_t>(edge.tri1) < mesh.triangle_tags.size() &&
-                    mesh.triangle_tags[edge.tri1] != "pec") {
-                    has_non_pec = true;
-                    break;
-                }
-            }
-            if (has_non_pec) {
-                out.warnings.push_back("edge diffraction enabled with non-PEC faces; PTD assumes PEC wedge");
-            }
-        }
+        if (fringe.edges != nullptr && use_material)
+            out.warnings.push_back(
+                "edge diffraction enabled with non-PEC faces; PTD assumes PEC wedge");
     }
     out.chains_fired = chains_fired.load();
     return out;

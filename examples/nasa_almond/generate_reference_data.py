@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""
-Generate canonical IEEE MoM / RATSCAT benchmark datasets for the NASA Almond.
-Pure Python implementation with no external dependencies.
+"""Generate synthetic, illustrative angular envelopes for the NASA Almond.
 
-Reference:
-  A. C. Woo, H. T. G. Wang, M. J. Schuh, M. L. Sanders,
-  "EM Programmer's Notebook: Benchmark Radar Targets for the Validation of
-   Computational Electromagnetics Programs", IEEE Antennas & Propagation
-  Magazine, Vol. 35, No. 1, Feb 1993, pp. 84-89.
+These hand-authored curves are not digitized MoM results or chamber
+measurements and must not be used to claim physics validation. The published
+NASA benchmark is a separate data source; this script does not reproduce it.
 """
 
 import json
@@ -40,9 +36,11 @@ def generate_almond_reference_data():
         vv_119.append(clip(base_vv + ripple_vv, -45.0, 0.0))
 
     data_119 = {
-        "benchmark": "NASA Almond PEC",
-        "reference": "Woo et al., IEEE AP-S 1993",
-        "method": "Method of Moments (MoM) / RATSCAT Anechoic Chamber",
+        "benchmark": "Synthetic NASA Almond illustration (not validation data)",
+        "reference": "No external data source; illustrative values only",
+        "method": "Hand-authored synthetic envelope; not MoM or measurement data",
+        "data_status": "synthetic_illustration",
+        "validation_eligible": False,
         "frequency_hz": 1.19e9,
         "elevation_deg": 0.0,
         "azimuth_deg": az_119,
@@ -78,9 +76,11 @@ def generate_almond_reference_data():
         vv_30.append(clip(base_vv + ripple_vv, -50.0, 0.0))
 
     data_30 = {
-        "benchmark": "NASA Almond PEC",
-        "reference": "Woo et al., IEEE AP-S 1993",
-        "method": "Method of Moments (MoM) / RATSCAT Anechoic Chamber",
+        "benchmark": "Synthetic NASA Almond illustration (not validation data)",
+        "reference": "No external data source; illustrative values only",
+        "method": "Hand-authored synthetic envelope; not MoM or measurement data",
+        "data_status": "synthetic_illustration",
+        "validation_eligible": False,
         "frequency_hz": 3.00e9,
         "elevation_deg": 0.0,
         "azimuth_deg": az_30,
@@ -116,9 +116,11 @@ def generate_almond_reference_data():
         vv_992.append(clip(base_vv + ripple_vv, -60.0, 0.0))
 
     data_992 = {
-        "benchmark": "NASA Almond PEC",
-        "reference": "Woo et al., IEEE AP-S 1993",
-        "method": "Method of Moments (MoM) / RATSCAT Anechoic Chamber",
+        "benchmark": "Synthetic NASA Almond illustration (not validation data)",
+        "reference": "No external data source; illustrative values only",
+        "method": "Hand-authored synthetic envelope; not MoM or measurement data",
+        "data_status": "synthetic_illustration",
+        "validation_eligible": False,
         "frequency_hz": 9.92e9,
         "elevation_deg": 0.0,
         "azimuth_deg": az_992,
@@ -135,7 +137,7 @@ def generate_almond_reference_data():
     with open(os.path.join(base_dir, "nasa_almond_mom_9_92ghz.json"), "w") as f:
         json.dump(data_992, f, indent=2)
 
-    print("Generated IEEE MoM benchmark datasets for NASA Almond (1.19 GHz, 3.0 GHz, 9.92 GHz).")
+    print("Generated synthetic illustrative Almond envelopes; these are not validation data.")
 
 
 if __name__ == "__main__":

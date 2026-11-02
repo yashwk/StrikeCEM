@@ -193,7 +193,8 @@ TEST(GoldenBenchmarks, DihedralRamCoatingAttenuation) {
 }
 
 // ============================================================================
-// GOLDEN BENCHMARK 1: NASA Almond Standard Target (Woo et al., IEEE AP-S 1993)
+// NASA Almond checks. The generated angular anchors are synthetic regression
+// values, not independent MoM or chamber references.
 // ============================================================================
 
 TEST(GoldenBenchmarks, NasaAlmondGeometryConformity) {
@@ -224,7 +225,7 @@ TEST(GoldenBenchmarks, NasaAlmondGeometryConformity) {
     EXPECT_EQ(boundary_edges, 0u) << "Almond mesh should be a closed watertight manifold";
 }
 
-TEST(GoldenBenchmarks, NasaAlmondBroadsideSpecular) {
+TEST(GoldenBenchmarks, NasaAlmondLegacyBroadsideRegressionAnchor) {
     const std::string almond_path = "examples/nasa_almond/nasa_almond.obj";
     std::ifstream f(almond_path);
     if (!f.good()) {
@@ -237,12 +238,12 @@ TEST(GoldenBenchmarks, NasaAlmondBroadsideSpecular) {
     const strikecem::FringeOptions fringe{true, &edge_model, "ptd_full"};
     const strikecem::GoOptions go{true, 1};
 
-    // 1.19 GHz Broadside (IEEE MoM ground truth is -10.5 dBsm)
+    // Legacy synthetic regression anchor; this is not a physics-validation result.
     const auto plan_119 = make_single_plan(1.19e9, 90.0, 0.0, "HH");
     const auto res_119 = strikecem::solve_po(mesh, plan_119, rc.value, fringe, go);
     EXPECT_NEAR(to_dbsm(res_119.samples[0].rcs_sqm), -10.5, 3.5);
 
-    // 9.92 GHz Broadside (IEEE MoM ground truth is -21.0 dBsm)
+    // Legacy synthetic regression anchor; this is not a physics-validation result.
     const auto plan_992 = make_single_plan(9.92e9, 90.0, 0.0, "HH");
     const auto res_992 = strikecem::solve_po(mesh, plan_992, rc.value, fringe, go);
     EXPECT_NEAR(to_dbsm(res_992.samples[0].rcs_sqm), -21.0, 3.5);

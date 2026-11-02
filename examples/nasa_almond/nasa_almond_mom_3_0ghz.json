@@ -1,7 +1,9 @@
 {
-  "benchmark": "NASA Almond PEC",
-  "reference": "Woo et al., IEEE AP-S 1993",
-  "method": "Method of Moments (MoM) / RATSCAT Anechoic Chamber",
+  "benchmark": "Synthetic NASA Almond illustration (not validation data)",
+  "reference": "No external data source; illustrative values only",
+  "method": "Hand-authored synthetic envelope; not MoM or measurement data",
+  "data_status": "synthetic_illustration",
+  "validation_eligible": false,
   "frequency_hz": 3000000000.0,
   "elevation_deg": 0.0,
   "azimuth_deg": [
