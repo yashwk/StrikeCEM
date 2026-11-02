@@ -217,13 +217,15 @@ WorkerResult WorkerDaemon::run() {
             const size_t shard_id = task_res["shard_id"].get<size_t>();
             const std::string cfg_path = task_res["config_path"].get<std::string>();
             const std::string out_path = task_res["output_path"].get<std::string>();
+            const std::string lease_token = task_res.at("lease_token").get<std::string>();
             const int lease_sec = task_res.value("lease_duration_seconds", 30);
 
             // Heartbeat thread to keep lease alive during execution
             std::atomic<bool> task_running{true};
             std::mutex cv_mtx;
             std::condition_variable cv;
-            std::thread heartbeat_thread([this, shard_id, lease_sec, &task_running, &cv_mtx, &cv]() {
+            std::thread heartbeat_thread([this, shard_id, lease_token, lease_sec,
+                                          &task_running, &cv_mtx, &cv]() {
                 const int hb_interval = std::max(1, lease_sec / 3);
                 while (task_running.load()) {
                     std::unique_lock<std::mutex> lock(cv_mtx);
@@ -234,7 +236,8 @@ WorkerResult WorkerDaemon::run() {
                     try {
                         send_request("POST", "/api/v1/task/heartbeat", {
                             {"shard_id", shard_id},
-                            {"worker_id", worker_id_}
+                            {"worker_id", worker_id_},
+                            {"lease_token", lease_token}
                         });
                     } catch (...) {
                         // Suppress transient heartbeat network glitches
@@ -298,6 +301,7 @@ WorkerResult WorkerDaemon::run() {
                     send_request("POST", "/api/v1/task/complete", {
                         {"shard_id", shard_id},
                         {"worker_id", worker_id_},
+                        {"lease_token", lease_token},
                         {"output_path", out_path},
                         {"checksum", checksum}
                     });
@@ -312,6 +316,7 @@ WorkerResult WorkerDaemon::run() {
                     send_request("POST", "/api/v1/task/fail", {
                         {"shard_id", shard_id},
                         {"worker_id", worker_id_},
+                        {"lease_token", lease_token},
                         {"error", solve_err}
                     });
                 } catch (...) {}

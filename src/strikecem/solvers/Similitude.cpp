@@ -135,6 +135,18 @@ SimilitudeConfig parse_similitude_config(const nlohmann::json& config_json) {
 
 SimilitudeSummary apply_similitude(ResolvedConfig& rc, SamplePlan& plan, NormalizedMesh& mesh,
                                    const SimilitudeConfig& sim_cfg) {
+    std::string input_config_hash = rc.hash;
+    if (rc.value.contains("run") && rc.value["run"].contains("shard")) {
+        const auto& shard = rc.value["run"]["shard"];
+        if (shard.contains("source_config_hash"))
+            input_config_hash = shard["source_config_hash"].get<std::string>();
+        else if (shard.contains("parent_config_hash"))
+            input_config_hash = shard["parent_config_hash"].get<std::string>();
+    }
+    const std::string input_geometry_hash = mesh.geometry_hash;
+    const std::string input_normalized_mesh_hash = mesh.normalized_mesh_hash;
+    const std::string input_sample_plan_hash = plan.hash;
+
     if (sim_cfg.enabled) {
         auto& effective = rc.value["similitude"];
         effective["enabled"] = true;
@@ -151,6 +163,31 @@ SimilitudeSummary apply_similitude(ResolvedConfig& rc, SamplePlan& plan, Normali
     sum.geometric_scale = sim_cfg.geometric_scale;
     sum.rcs_scale_factor = 1.0 / (sim_cfg.geometric_scale * sim_cfg.geometric_scale);
     sum.rcs_offset_dbsm = 20.0 * std::log10(1.0 / sim_cfg.geometric_scale);
+    auto record_provenance = [&]() {
+        if (!sim_cfg.enabled) return;
+        const std::string direction = sim_cfg.direction == SimilitudeDirection::ModelToFull
+                                          ? "model_to_full" : "full_to_model";
+        rc.provenance["similitude"] = {
+            {"geometric_scale", sim_cfg.geometric_scale},
+            {"direction", direction},
+            {"frequency_scale", sum.frequency_scale},
+            {"rcs_scale_factor", sum.rcs_scale_factor},
+            {"rcs_offset_dbsm", sum.rcs_offset_dbsm},
+            {"auto_rescale_rcs", sim_cfg.auto_rescale_rcs},
+            {"input_frequency_hz", sum.input_frequency_hz},
+            {"scaled_frequency_hz", sum.scaled_frequency_hz},
+            {"input_bbox_diagonal_m", sum.input_bbox_diagonal_m},
+            {"scaled_bbox_diagonal_m", sum.scaled_bbox_diagonal_m},
+            {"input_config_hash", input_config_hash},
+            {"effective_config_hash", rc.hash},
+            {"input_geometry_hash", input_geometry_hash},
+            {"scaled_geometry_hash", mesh.geometry_hash},
+            {"input_normalized_mesh_hash", input_normalized_mesh_hash},
+            {"scaled_normalized_mesh_hash", mesh.normalized_mesh_hash},
+            {"input_sample_plan_hash", input_sample_plan_hash},
+            {"scaled_sample_plan_hash", plan.hash}
+        };
+    };
 
     const auto& bmin = mesh.report.bbox_min;
     const auto& bmax = mesh.report.bbox_max;
@@ -167,6 +204,7 @@ SimilitudeSummary apply_similitude(ResolvedConfig& rc, SamplePlan& plan, Normali
         sum.scaled_frequency_hz = sum.input_frequency_hz;
         sum.scaled_bbox_diagonal_m = sum.input_bbox_diagonal_m;
         sum.frequency_scale = 1.0;
+        record_provenance();
         return sum;
     }
 
@@ -192,6 +230,8 @@ SimilitudeSummary apply_similitude(ResolvedConfig& rc, SamplePlan& plan, Normali
     if (!plan.frequencies_hz.empty()) {
         sum.scaled_frequency_hz = plan.frequencies_hz.front();
     }
+
+    record_provenance();
 
     return sum;
 }

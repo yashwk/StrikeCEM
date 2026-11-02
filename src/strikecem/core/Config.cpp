@@ -378,6 +378,17 @@ int configured_max_bounces(const nlohmann::json& resolved) {
     return solver.value("po_options", nlohmann::json::object()).value("max_bounces", 1);
 }
 
+nlohmann::json configured_solver_dispatch(const nlohmann::json& resolved) {
+    const std::string type = resolved.at("solver").value("type", std::string("PO"));
+    const int max_bounces = configured_max_bounces(resolved);
+    return {
+        {"type", type},
+        {"engine", "physical_optics"},
+        {"mode", max_bounces > 1 ? "coherent_multibounce" : "single_bounce"},
+        {"max_bounces", max_bounces}
+    };
+}
+
 SamplePlanCounts count_sample_plan(const json& resolved) {
     SamplePlanCounts counts;
     const auto& frequency = resolved.at("frequency");

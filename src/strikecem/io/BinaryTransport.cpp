@@ -101,13 +101,13 @@ void write_scem_output(const ResolvedConfig& rc, const SamplePlan& plan,
                                {"polarizations", plan.polarizations},
                                {"samples", plan.sample_count()},
                                {"hash", plan.hash}};
-    metadata["solver"] = {{"type", rc.value["solver"]["type"]},
-                          {"precision", rc.value["solver"]["precision"]},
-                          {"edge_correction",
-                           rc.value["solver"]["po_options"].value("edge_correction", "none")},
-                          {"fringe_edges", fringe.enabled && fringe.edges != nullptr
-                                               ? fringe.edges->edges.size()
-                                               : 0}};
+    metadata["solver"] = configured_solver_dispatch(rc.value);
+    metadata["solver"]["precision"] = rc.value["solver"]["precision"];
+    metadata["solver"]["edge_correction"] =
+        rc.value["solver"]["po_options"].value("edge_correction", "none");
+    metadata["solver"]["fringe_edges"] = fringe.enabled && fringe.edges != nullptr
+                                               ? fringe.edges->edges.size() : 0;
+    if (!rc.provenance.empty()) metadata["provenance"] = rc.provenance;
     if (material.enabled) {
         metadata["materials"] = {{"enabled", true}, {"models_count", material.models.size()}};
     }
@@ -297,6 +297,9 @@ ScemDatabase read_scem_database(const std::string& path) {
     if (header.dtype != 0 && header.dtype != 1) {
         throw ReaderError("unsupported SCEM sample dtype: " + std::to_string(header.dtype));
     }
+    if (header.metadata_bytes == 0) {
+        throw ReaderError("SCEM metadata section must not be empty: " + path);
+    }
 
     uint64_t expected_frequencies_bytes = 0;
     uint64_t expected_directions_bytes = 0;
@@ -321,40 +324,50 @@ ScemDatabase read_scem_database(const std::string& path) {
     }
 
     const uint64_t file_size_u64 = static_cast<uint64_t>(file_size);
-    std::vector<std::pair<uint64_t, uint64_t>> regions;
+    uint64_t expected_offset = sizeof(ScemHeader);
     auto validate_section = [&](uint64_t offset, uint64_t bytes, const char* name) {
-        if (!region_within_file(offset, bytes, file_size_u64)) {
-            throw ReaderError(std::string("invalid SCEM ") + name + " range: " + path);
+        if (offset != expected_offset ||
+            !region_within_file(offset, bytes, file_size_u64)) {
+            throw ReaderError(std::string("invalid or non-contiguous SCEM ") + name +
+                              " range: " + path);
         }
-        if (bytes > 0) regions.emplace_back(offset, offset + bytes);
+        expected_offset += bytes;
     };
     validate_section(header.frequencies_offset, header.frequencies_bytes, "frequency table");
     validate_section(header.directions_offset, header.directions_bytes, "direction table");
     validate_section(header.polarizations_offset, header.polarizations_bytes, "polarization table");
     validate_section(header.metadata_offset, header.metadata_bytes, "metadata");
     validate_section(header.samples_offset, header.samples_bytes, "sample table");
-    std::sort(regions.begin(), regions.end());
-    uint64_t previous_end = sizeof(ScemHeader);
-    for (const auto& region : regions) {
-        if (region.first < previous_end) {
-            throw ReaderError("overlapping SCEM table regions: " + path);
-        }
-        previous_end = region.second;
-    }
-
-    // Verify payload data checksum
-    std::vector<char> payload(file_size - sizeof(ScemHeader));
-    in.seekg(sizeof(ScemHeader), std::ios::beg);
-    if (!payload.empty()) {
-        in.read(payload.data(), payload.size());
-        if (!in) throw ReaderError("failed reading scem payload bytes: " + path);
-        const uint64_t computed_data_cs = fnv1a_64(payload.data(), payload.size());
-        if (computed_data_cs != header.data_checksum) {
-            throw ReaderError("corrupted scem data checksum in " + path);
-        }
+    if (expected_offset != file_size_u64) {
+        throw ReaderError("SCEM file has unreferenced payload bytes: " + path);
     }
 
     ScemDatabase db;
+    if (header.frequency_count > std::vector<double>().max_size() ||
+        header.direction_count > std::vector<Direction>().max_size() ||
+        header.polarization_count > std::vector<std::string>().max_size() ||
+        header.sample_count > std::vector<Hdf5SampleRow>().max_size() ||
+        header.metadata_bytes > std::string().max_size()) {
+        throw ReaderError("SCEM counts exceed supported in-memory limits: " + path);
+    }
+
+    // Stream the checksum so an input file does not need a second full-size buffer.
+    uint64_t computed_data_cs = 14695981039346656037ULL;
+    in.seekg(sizeof(ScemHeader), std::ios::beg);
+    char checksum_buffer[64 * 1024];
+    uint64_t checksum_remaining = file_size_u64 - sizeof(ScemHeader);
+    while (checksum_remaining > 0) {
+        const auto count = static_cast<std::streamsize>(
+            std::min<uint64_t>(checksum_remaining, sizeof(checksum_buffer)));
+        in.read(checksum_buffer, count);
+        if (in.gcount() != count) throw ReaderError("failed reading SCEM payload: " + path);
+        computed_data_cs = fnv1a_64(checksum_buffer, static_cast<size_t>(count), computed_data_cs);
+        checksum_remaining -= static_cast<uint64_t>(count);
+    }
+    if (computed_data_cs != header.data_checksum) {
+        throw ReaderError("corrupted scem data checksum in " + path);
+    }
+
     db.version = header.version;
     db.dtype = header.dtype;
     db.payload_checksum = header.data_checksum;
@@ -362,50 +375,68 @@ ScemDatabase read_scem_database(const std::string& path) {
     // Frequencies
     db.frequencies_hz.resize(header.frequency_count);
     if (header.frequencies_bytes > 0) {
-        std::memcpy(db.frequencies_hz.data(),
-                    payload.data() + (header.frequencies_offset - sizeof(ScemHeader)),
-                    header.frequencies_bytes);
+        in.clear();
+        in.seekg(static_cast<std::streamoff>(header.frequencies_offset), std::ios::beg);
+        in.read(reinterpret_cast<char*>(db.frequencies_hz.data()),
+                static_cast<std::streamsize>(header.frequencies_bytes));
+        if (in.gcount() != static_cast<std::streamsize>(header.frequencies_bytes))
+            throw ReaderError("truncated SCEM frequency table: " + path);
     }
 
     // Directions
-    std::vector<ScemDirectionRecord> dir_recs(header.direction_count);
-    if (header.directions_bytes > 0) {
-        std::memcpy(dir_recs.data(),
-                    payload.data() + (header.directions_offset - sizeof(ScemHeader)),
-                    header.directions_bytes);
-    }
     db.directions.resize(header.direction_count);
-    for (size_t i = 0; i < header.direction_count; ++i) {
-        db.directions[i].id = static_cast<uint32_t>(i);
-        db.directions[i].azimuth_deg = dir_recs[i].azimuth_deg;
-        db.directions[i].elevation_deg = dir_recs[i].elevation_deg;
-        db.directions[i].k_hat = geom::Vec3d{dir_recs[i].k_x, dir_recs[i].k_y, dir_recs[i].k_z};
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(header.directions_offset), std::ios::beg);
+    std::vector<ScemDirectionRecord> direction_chunk(4096);
+    for (size_t base = 0; base < header.direction_count;) {
+        const size_t count = std::min(direction_chunk.size(),
+                                      static_cast<size_t>(header.direction_count) - base);
+        const auto bytes = static_cast<std::streamsize>(count * sizeof(ScemDirectionRecord));
+        in.read(reinterpret_cast<char*>(direction_chunk.data()), bytes);
+        if (in.gcount() != bytes) throw ReaderError("truncated SCEM direction table: " + path);
+        for (size_t j = 0; j < count; ++j) {
+            const auto& rec = direction_chunk[j];
+            auto& direction = db.directions[base + j];
+            direction.id = static_cast<uint32_t>(base + j);
+            direction.azimuth_deg = rec.azimuth_deg;
+            direction.elevation_deg = rec.elevation_deg;
+            direction.k_hat = geom::Vec3d{rec.k_x, rec.k_y, rec.k_z};
+        }
+        base += count;
     }
 
     // Polarizations
-    std::vector<ScemPolarizationRecord> pol_recs(header.polarization_count);
-    if (header.polarizations_bytes > 0) {
-        std::memcpy(pol_recs.data(),
-                    payload.data() + (header.polarizations_offset - sizeof(ScemHeader)),
-                    header.polarizations_bytes);
-    }
     db.polarizations.resize(header.polarization_count);
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(header.polarizations_offset), std::ios::beg);
+    std::vector<ScemPolarizationRecord> polarization_records(header.polarization_count);
+    if (header.polarizations_bytes > 0) {
+        in.read(reinterpret_cast<char*>(polarization_records.data()),
+                static_cast<std::streamsize>(header.polarizations_bytes));
+        if (in.gcount() != static_cast<std::streamsize>(header.polarizations_bytes))
+            throw ReaderError("truncated SCEM polarization table: " + path);
+    }
     for (size_t i = 0; i < header.polarization_count; ++i) {
         char name[9] = {0};
-        std::memcpy(name, pol_recs[i].name, sizeof(pol_recs[i].name));
+        std::memcpy(name, polarization_records[i].name, sizeof(polarization_records[i].name));
         db.polarizations[i] = std::string(name);
     }
 
     // Metadata
     if (header.metadata_bytes > 0) {
-        const std::string meta_str(
-            payload.data() + (header.metadata_offset - sizeof(ScemHeader)),
-            header.metadata_bytes);
+        std::string meta_str(static_cast<size_t>(header.metadata_bytes), '\0');
+        in.clear();
+        in.seekg(static_cast<std::streamoff>(header.metadata_offset), std::ios::beg);
+        in.read(meta_str.data(), static_cast<std::streamsize>(header.metadata_bytes));
+        if (in.gcount() != static_cast<std::streamsize>(header.metadata_bytes))
+            throw ReaderError("truncated SCEM metadata: " + path);
         try {
             db.metadata = nlohmann::json::parse(meta_str);
         } catch (const std::exception& e) {
             throw ReaderError(std::string("failed parsing scem metadata JSON: ") + e.what());
         }
+        if (!db.metadata.is_object())
+            throw ReaderError("SCEM metadata must be a JSON object: " + path);
     }
 
     // Samples
@@ -419,44 +450,47 @@ ScemDatabase read_scem_database(const std::string& path) {
         }
     };
 
-    db.rows.resize(header.sample_count);
-    if (header.dtype == 0) { // float32
-        const auto* raw_rows = reinterpret_cast<const ScemSampleRowF32*>(
-            payload.data() + (header.samples_offset - sizeof(ScemHeader)));
-        for (size_t i = 0; i < header.sample_count; ++i) {
-            db.rows[i].sample_id = raw_rows[i].sample_id;
-            db.rows[i].direction_index = raw_rows[i].direction_index;
-            db.rows[i].frequency_index = raw_rows[i].frequency_index;
-            db.rows[i].polarization_index = raw_rows[i].polarization_index;
-            db.rows[i].scattering_real = raw_rows[i].scattering_real;
-            db.rows[i].scattering_imag = raw_rows[i].scattering_imag;
-            db.rows[i].rcs_sqm = raw_rows[i].rcs_sqm;
-            db.rows[i].rcs_dbsm = raw_rows[i].rcs_dbsm;
-            db.rows[i].valid = (raw_rows[i].valid != 0);
-            db.rows[i].status = status_from_code(raw_rows[i].status_code);
-        }
-    } else { // float64
-        const auto* raw_rows = reinterpret_cast<const ScemSampleRowF64*>(
-            payload.data() + (header.samples_offset - sizeof(ScemHeader)));
-        for (size_t i = 0; i < header.sample_count; ++i) {
-            db.rows[i].sample_id = raw_rows[i].sample_id;
-            db.rows[i].direction_index = raw_rows[i].direction_index;
-            db.rows[i].frequency_index = raw_rows[i].frequency_index;
-            db.rows[i].polarization_index = raw_rows[i].polarization_index;
-            db.rows[i].scattering_real = raw_rows[i].scattering_real;
-            db.rows[i].scattering_imag = raw_rows[i].scattering_imag;
-            db.rows[i].rcs_sqm = raw_rows[i].rcs_sqm;
-            db.rows[i].rcs_dbsm = raw_rows[i].rcs_dbsm;
-            db.rows[i].valid = (raw_rows[i].valid != 0);
-            db.rows[i].status = status_from_code(raw_rows[i].status_code);
-        }
-    }
-
-    for (const auto& row : db.rows) {
-        if (row.direction_index >= db.directions.size() ||
-            row.frequency_index >= db.frequencies_hz.size() ||
-            row.polarization_index >= db.polarizations.size()) {
+    db.rows.resize(static_cast<size_t>(header.sample_count));
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(header.samples_offset), std::ios::beg);
+    auto copy_row = [&](const auto& source, Hdf5SampleRow& destination) {
+        destination.sample_id = source.sample_id;
+        destination.direction_index = source.direction_index;
+        destination.frequency_index = source.frequency_index;
+        destination.polarization_index = source.polarization_index;
+        destination.scattering_real = source.scattering_real;
+        destination.scattering_imag = source.scattering_imag;
+        destination.rcs_sqm = source.rcs_sqm;
+        destination.rcs_dbsm = source.rcs_dbsm;
+        destination.valid = source.valid != 0;
+        destination.status = status_from_code(source.status_code);
+        if (destination.direction_index >= db.directions.size() ||
+            destination.frequency_index >= db.frequencies_hz.size() ||
+            destination.polarization_index >= db.polarizations.size()) {
             throw ReaderError("SCEM sample index is outside its table: " + path);
+        }
+    };
+
+    constexpr size_t kRowsPerChunk = 8192;
+    if (header.dtype == 0) {
+        std::vector<ScemSampleRowF32> rows(std::min<size_t>(kRowsPerChunk, db.rows.size()));
+        for (size_t base = 0; base < db.rows.size();) {
+            const size_t count = std::min(rows.size(), db.rows.size() - base);
+            const auto bytes = static_cast<std::streamsize>(count * sizeof(ScemSampleRowF32));
+            in.read(reinterpret_cast<char*>(rows.data()), bytes);
+            if (in.gcount() != bytes) throw ReaderError("truncated SCEM sample table: " + path);
+            for (size_t i = 0; i < count; ++i) copy_row(rows[i], db.rows[base + i]);
+            base += count;
+        }
+    } else {
+        std::vector<ScemSampleRowF64> rows(std::min<size_t>(kRowsPerChunk, db.rows.size()));
+        for (size_t base = 0; base < db.rows.size();) {
+            const size_t count = std::min(rows.size(), db.rows.size() - base);
+            const auto bytes = static_cast<std::streamsize>(count * sizeof(ScemSampleRowF64));
+            in.read(reinterpret_cast<char*>(rows.data()), bytes);
+            if (in.gcount() != bytes) throw ReaderError("truncated SCEM sample table: " + path);
+            for (size_t i = 0; i < count; ++i) copy_row(rows[i], db.rows[base + i]);
+            base += count;
         }
     }
 
@@ -496,6 +530,9 @@ bool check_existing_scem(const ResolvedConfig& rc, const SamplePlan& plan,
         if (db.metadata.value("config_hash", "") != rc.hash) return false;
         if (db.metadata.value("geometry_hash", "") != mesh.geometry_hash) return false;
         if (db.metadata.value("normalized_mesh_hash", "") != mesh.normalized_mesh_hash) return false;
+        if (!rc.provenance.empty() &&
+            db.metadata.value("provenance", nlohmann::json::object()) != rc.provenance)
+            return false;
         if (db.metadata.contains("sample_plan") &&
             db.metadata["sample_plan"].value("hash", "") != plan.hash) return false;
         return true;

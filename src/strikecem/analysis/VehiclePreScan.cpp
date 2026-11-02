@@ -258,7 +258,9 @@ std::string VehiclePreScanReport::to_text_summary() const {
        << "  - Sharp Leading Edges/Wedges: " << edge_facets << " (" << edge_percent << "%)\n"
        << "  - Cavity / Duct Interiors:   " << cavity_facets << " (" << cavity_percent << "%)\n\n"
        << "--- RECOMMENDED HYBRID SOLVER TUNING ---\n"
-       << "  - Solver Type:             " << ((cavity_facets > 0) ? "SBR (Shooting & Bouncing Rays)" : "PO (Physical Optics)") << "\n"
+       << "  - Solver Mode:             " << ((cavity_facets > 0)
+                                                   ? "PO engine with coherent SBR multi-bounce"
+                                                   : "PO (single-bounce)") << "\n"
        << "  - Edge Correction Mode:    " << recommended_edge_correction << "\n"
        << "  - Shadowing Enabled:       " << (recommended_shadowing ? "true" : "false") << "\n"
        << "  - Multi-Bounce Limit:      " << recommended_max_bounces << "\n"

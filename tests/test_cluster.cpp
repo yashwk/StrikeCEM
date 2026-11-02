@@ -179,11 +179,13 @@ TEST(Coordinator, HttpRestEndpoints) {
     });
     EXPECT_EQ(acq_res.value("status", ""), "acquired");
     EXPECT_EQ(acq_res.value("shard_id", 999), 0);
+    const std::string lease_token = acq_res.at("lease_token").get<std::string>();
 
     // 4. POST /api/v1/task/heartbeat
     auto hb_res = client.send_request("POST", "/api/v1/task/heartbeat", {
         {"shard_id", 0},
-        {"worker_id", "test_worker_1"}
+        {"worker_id", "test_worker_1"},
+        {"lease_token", lease_token}
     });
     EXPECT_EQ(hb_res.value("status", ""), "ok");
     EXPECT_TRUE(hb_res.value("lease_renewed", false));
@@ -194,6 +196,7 @@ TEST(Coordinator, HttpRestEndpoints) {
     EXPECT_THROW(client.send_request("POST", "/api/v1/task/complete", {
         {"shard_id", 0},
         {"worker_id", "test_worker_1"},
+        {"lease_token", lease_token},
         {"output_path", shard_path.string()},
         {"checksum", "deadbeef"}
     }), std::runtime_error);
@@ -206,6 +209,7 @@ TEST(Coordinator, HttpRestEndpoints) {
     const auto comp_res = client.send_request("POST", "/api/v1/task/complete", {
         {"shard_id", 0},
         {"worker_id", "test_worker_1"},
+        {"lease_token", lease_token},
         {"output_path", shard_path.string()},
         {"checksum", strikecem::sha256_hex(shard_bytes)}
     });

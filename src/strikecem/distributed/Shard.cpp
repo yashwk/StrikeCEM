@@ -18,6 +18,7 @@
 #include "strikecem/io/Hdf5Writer.hpp"
 #include "strikecem/io/OutputError.hpp"
 #include "strikecem/solvers/Material.hpp"
+#include "strikecem/solvers/Similitude.hpp"
 
 namespace strikecem {
 
@@ -65,6 +66,7 @@ struct ShardData {
     std::string sample_plan_hash;
     std::string run_id;
     nlohmann::json config_json;
+    nlohmann::json provenance = nlohmann::json::object();
     std::vector<PoSampleResult> samples;
 };
 
@@ -87,6 +89,7 @@ ShardData read_csv_shard(const fs::path& csv_path) {
             if (sidecar.contains("resolved_config")) {
                 sd.config_json = sidecar["resolved_config"];
             }
+            if (sidecar.contains("provenance")) sd.provenance = sidecar["provenance"];
         }
     }
 
@@ -125,6 +128,9 @@ ShardData read_hdf5_shard(const fs::path& h5_path) {
         const std::string cfg_str = read_str_attr(file, "config_json");
         if (!cfg_str.empty()) {
             sd.config_json = nlohmann::json::parse(cfg_str);
+        }
+        if (file.attrExists("provenance_json")) {
+            sd.provenance = nlohmann::json::parse(read_str_attr(file, "provenance_json"));
         }
 
         H5::Group samples = file.openGroup("/samples");
@@ -193,6 +199,7 @@ ShardData read_scem_shard(const fs::path& scem_path) {
         if (db.metadata.contains("resolved_config")) {
             sd.config_json = db.metadata["resolved_config"];
         }
+        if (db.metadata.contains("provenance")) sd.provenance = db.metadata["provenance"];
         sd.samples.reserve(db.rows.size());
         for (const auto& r : db.rows) {
             PoSampleResult psr;
@@ -268,6 +275,11 @@ ShardManifest create_shards(const ResolvedConfig& rc, const SamplePlan& plan,
             {"worker_identity", "worker-" + std::to_string(s)},
             {"parent_config_hash", rc.hash}
         };
+        if (rc.provenance.contains("similitude") &&
+            rc.provenance["similitude"].contains("input_config_hash")) {
+            shard_json["run"]["shard"]["source_config_hash"] =
+                rc.provenance["similitude"]["input_config_hash"];
+        }
 
         std::ofstream cfg_out(shard_cfg_path);
         if (!cfg_out) throw OutputError("cannot write shard config: " + shard_cfg_path.string());
@@ -290,6 +302,8 @@ ShardManifest create_shards(const ResolvedConfig& rc, const SamplePlan& plan,
     manifest_j["run_id"] = manifest.run_id;
     manifest_j["config_path"] = manifest.config_path;
     manifest_j["config_hash"] = manifest.config_hash;
+    manifest_j["resolved_config"] = rc.value;
+    if (!rc.provenance.empty()) manifest_j["provenance"] = rc.provenance;
     manifest_j["geometry_hash"] = manifest.geometry_hash;
     manifest_j["normalized_mesh_hash"] = manifest.normalized_mesh_hash;
     manifest_j["sample_plan_hash"] = manifest.sample_plan_hash;
@@ -360,6 +374,7 @@ void merge_shards(const std::string& manifest_or_shard_path,
     std::string expected_norm_hash = manifest_meta.is_object() ? manifest_meta.value("normalized_mesh_hash", "") : "";
     std::string expected_plan_hash = manifest_meta.is_object() ? manifest_meta.value("sample_plan_hash", "") : "";
     nlohmann::json parent_config;
+    nlohmann::json parent_provenance = nlohmann::json::object();
 
     std::map<uint64_t, PoSampleResult> merged_by_id;
 
@@ -377,6 +392,8 @@ void merge_shards(const std::string& manifest_or_shard_path,
         if (parent_config.is_null() && !sd.config_json.is_null()) {
             parent_config = sd.config_json;
         }
+        if (parent_provenance.empty() && !sd.provenance.empty())
+            parent_provenance = sd.provenance;
 
         if (expected_cfg_hash.empty()) expected_cfg_hash = sd.config_hash;
         else if (!sd.config_hash.empty() && sd.config_hash != expected_cfg_hash)
@@ -385,6 +402,10 @@ void merge_shards(const std::string& manifest_or_shard_path,
         if (expected_geom_hash.empty()) expected_geom_hash = sd.geometry_hash;
         else if (!sd.geometry_hash.empty() && sd.geometry_hash != expected_geom_hash)
             throw OutputError("merge rejected: geometry_hash mismatch in " + sp.string());
+
+        if (expected_norm_hash.empty()) expected_norm_hash = sd.normalized_mesh_hash;
+        else if (!sd.normalized_mesh_hash.empty() && sd.normalized_mesh_hash != expected_norm_hash)
+            throw OutputError("merge rejected: normalized_mesh_hash mismatch in " + sp.string());
 
         if (expected_plan_hash.empty()) expected_plan_hash = sd.sample_plan_hash;
         else if (!sd.sample_plan_hash.empty() && sd.sample_plan_hash != expected_plan_hash)
@@ -424,23 +445,61 @@ void merge_shards(const std::string& manifest_or_shard_path,
         merged_result.samples.push_back(merged_by_id[id]);
     }
 
-    // Construct parent ResolvedConfig
+    // Construct the effective parent config, including any CLI similitude override.
     ResolvedConfig rc;
-    if (!schema_path.empty() && from_manifest && manifest_meta.contains("config_path") &&
-        fs::exists(manifest_meta["config_path"].get<std::string>())) {
-        rc = load_config(manifest_meta["config_path"].get<std::string>(), schema_path);
+    const bool has_manifest_config = from_manifest && manifest_meta.contains("resolved_config") &&
+                                     manifest_meta["resolved_config"].is_object();
+    if (has_manifest_config) {
+        rc.value = manifest_meta["resolved_config"];
+        rc.schema_version = rc.value.value("scem_schema_version", "1.0");
+        rc.hash = sha256_hex(canonical_json(rc.value));
+        if (!expected_cfg_hash.empty() && rc.hash != expected_cfg_hash)
+            throw OutputError("merge rejected: resolved manifest config hash mismatch");
     } else if (!parent_config.is_null() && parent_config.is_object()) {
         rc.value = parent_config;
+        rc.value["run"].erase("shard");
         rc.schema_version = parent_config.value("scem_schema_version", "1.0");
         rc.hash = expected_cfg_hash;
+    } else if (!schema_path.empty() && from_manifest && manifest_meta.contains("config_path") &&
+               fs::exists(manifest_meta["config_path"].get<std::string>())) {
+        rc = load_config(manifest_meta["config_path"].get<std::string>(), schema_path);
     } else {
         throw OutputError("merge rejected: cannot resolve parent configuration");
     }
 
-    rc.value["output"]["path"] = output_path;
     rc.value["run"].erase("shard");
 
     SamplePlan plan = build_sample_plan(rc.value);
+    fs::path config_dir = fs::path(output_path).parent_path();
+    if (from_manifest && manifest_meta.contains("config_path"))
+        config_dir = fs::path(manifest_meta["config_path"].get<std::string>()).parent_path();
+    else if (!from_manifest)
+        config_dir = first_path.parent_path();
+    NormalizedMesh mesh = load_normalized_mesh(rc.value, config_dir, rc.schema_version);
+    const SimilitudeConfig sim_cfg = parse_similitude_config(rc.value);
+    if (sim_cfg.enabled) apply_similitude(rc, plan, mesh, sim_cfg);
+
+    if (has_manifest_config && !expected_cfg_hash.empty() && rc.hash != expected_cfg_hash)
+        throw OutputError("merge rejected: effective config hash mismatch after similitude");
+    if (!has_manifest_config && !expected_cfg_hash.empty()) {
+        rc.hash = expected_cfg_hash;
+        if (rc.provenance.contains("similitude"))
+            rc.provenance["similitude"]["effective_config_hash"] = rc.hash;
+    }
+    if (!expected_geom_hash.empty() && mesh.geometry_hash != expected_geom_hash)
+        throw OutputError("merge rejected: reconstructed geometry_hash mismatch");
+    if (!expected_norm_hash.empty() && mesh.normalized_mesh_hash != expected_norm_hash)
+        throw OutputError("merge rejected: reconstructed normalized_mesh_hash mismatch");
+    if (!expected_plan_hash.empty() && plan.hash != expected_plan_hash)
+        throw OutputError("merge rejected: reconstructed sample_plan_hash mismatch");
+
+    if (from_manifest && manifest_meta.contains("provenance") &&
+        manifest_meta["provenance"].is_object())
+        rc.provenance = manifest_meta["provenance"];
+    else if (!parent_provenance.empty())
+        rc.provenance = parent_provenance;
+
+    rc.value["output"]["path"] = output_path;
     const size_t npol = plan.polarizations.size();
     const size_t ndir = plan.directions.size();
     for (auto& s : merged_result.samples) {
@@ -449,7 +508,6 @@ void merge_shards(const std::string& manifest_or_shard_path,
         s.direction_id = static_cast<uint32_t>(u_idx % ndir);
         s.frequency_id = static_cast<uint32_t>(u_idx / ndir);
     }
-    NormalizedMesh mesh = load_normalized_mesh(rc.value, fs::path(output_path).parent_path(), rc.schema_version);
     const DesignerIdentity designer = {};
     EdgeModel edge_model;
     FringeOptions fringe;

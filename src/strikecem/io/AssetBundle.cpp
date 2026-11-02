@@ -4,10 +4,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+#include <openssl/evp.h>
 
 #include "strikecem/core/Config.hpp"
 #include "strikecem/io/OutputError.hpp"
@@ -17,6 +19,10 @@ namespace strikecem {
 namespace fs = std::filesystem;
 
 namespace {
+
+constexpr uint64_t kMaxBundleEntries = 100'000;
+constexpr uint64_t kMaxManifestBytes = 16 * 1024 * 1024;
+constexpr uint64_t kMaxTableBytes = 64 * 1024 * 1024;
 
 bool range_within_file(uint64_t offset, uint64_t size, uint64_t file_size) {
     return offset <= file_size && size <= file_size - offset;
@@ -39,6 +45,49 @@ bool safe_entry_name(const std::string& name) {
 bool is_within_directory(const fs::path& root, const fs::path& candidate) {
     const fs::path relative = candidate.lexically_relative(root);
     return !relative.empty() && *relative.begin() != fs::path("..") && !relative.is_absolute();
+}
+
+std::string sha256_range(std::ifstream& in, uint64_t offset, uint64_t size,
+                         EVP_MD_CTX* aggregate) {
+    EVP_MD_CTX* entry = EVP_MD_CTX_new();
+    if (!entry || EVP_DigestInit_ex(entry, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(entry);
+        throw OutputError("cannot initialize bundle SHA-256 verification");
+    }
+
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!in) {
+        EVP_MD_CTX_free(entry);
+        throw OutputError("invalid bundle entry offset");
+    }
+
+    char buffer[64 * 1024];
+    uint64_t remaining = size;
+    while (remaining > 0) {
+        const auto count = static_cast<std::streamsize>(
+            std::min<uint64_t>(remaining, sizeof(buffer)));
+        in.read(buffer, count);
+        if (in.gcount() != count ||
+            EVP_DigestUpdate(entry, buffer, static_cast<size_t>(count)) != 1 ||
+            EVP_DigestUpdate(aggregate, buffer, static_cast<size_t>(count)) != 1) {
+            EVP_MD_CTX_free(entry);
+            throw OutputError("failed reading bundle payload for SHA-256 verification");
+        }
+        remaining -= static_cast<uint64_t>(count);
+    }
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size = 0;
+    const bool finalized = EVP_DigestFinal_ex(entry, digest, &digest_size) == 1;
+    EVP_MD_CTX_free(entry);
+    if (!finalized) throw OutputError("cannot finalize bundle SHA-256 verification");
+
+    std::ostringstream result;
+    result << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < digest_size; ++i)
+        result << std::setw(2) << static_cast<unsigned int>(digest[i]);
+    return result.str();
 }
 
 } // namespace
@@ -74,7 +123,7 @@ void AssetBundleWriter::add_entry_file(const std::string& name, const std::strin
 }
 
 void AssetBundleWriter::write_to_file(const std::string& output_path) {
-    if (entries_.size() > std::numeric_limits<uint32_t>::max()) {
+    if (entries_.size() > kMaxBundleEntries) {
         throw OutputError("too many entries for asset bundle format");
     }
     ScemPackHeader hdr{};
@@ -82,6 +131,8 @@ void AssetBundleWriter::write_to_file(const std::string& output_path) {
 
     // Serialize manifest
     std::string manifest_str = manifest_.dump(2);
+    if (manifest_str.size() > kMaxManifestBytes)
+        throw OutputError("asset bundle manifest exceeds the format size limit");
     hdr.manifest_offset = sizeof(ScemPackHeader);
     hdr.manifest_bytes = manifest_str.size();
 
@@ -100,7 +151,9 @@ void AssetBundleWriter::write_to_file(const std::string& output_path) {
         rec.name = e.name;
         rec.mime_type = e.mime_type;
         rec.size = e.data.size();
-        std::string bytes_str(reinterpret_cast<const char*>(e.data.data()), e.data.size());
+        std::string bytes_str;
+        if (!e.data.empty())
+            bytes_str.assign(reinterpret_cast<const char*>(e.data.data()), e.data.size());
         rec.sha256_hex = sha256_hex(bytes_str);
         all_payloads.append(bytes_str);
         records.push_back(rec);
@@ -122,6 +175,8 @@ void AssetBundleWriter::write_to_file(const std::string& output_path) {
 
     hdr.table_offset = hdr.manifest_offset + hdr.manifest_bytes;
     hdr.table_bytes = table_json.dump().size();
+    if (hdr.table_bytes > kMaxTableBytes)
+        throw OutputError("asset bundle table exceeds the format size limit");
 
     // Offsets affect the serialized table size; iterate until the payload start stabilizes.
     std::string table_str;
@@ -139,6 +194,8 @@ void AssetBundleWriter::write_to_file(const std::string& output_path) {
             current_payload_offset += records[i].size;
         }
         table_str = table_json.dump();
+        if (table_str.size() > kMaxTableBytes)
+            throw OutputError("asset bundle table exceeds the format size limit");
         if (table_str.size() == hdr.table_bytes) break;
         hdr.table_bytes = table_str.size();
     }
@@ -195,6 +252,12 @@ AssetBundleReader AssetBundleReader::open_file(const std::string& bundle_path, b
     }
     if (hdr.total_bundle_bytes != file_size) {
         throw OutputError("invalid .scempack total size");
+    }
+    if (hdr.entry_count > kMaxBundleEntries || hdr.manifest_bytes > kMaxManifestBytes ||
+        hdr.table_bytes > kMaxTableBytes ||
+        hdr.manifest_bytes > std::numeric_limits<size_t>::max() ||
+        hdr.table_bytes > std::numeric_limits<size_t>::max()) {
+        throw OutputError(".scempack metadata exceeds the supported size limits");
     }
     if (hdr.manifest_offset != sizeof(ScemPackHeader) ||
         !range_within_file(hdr.manifest_offset, hdr.manifest_bytes, file_size)) {
@@ -264,7 +327,8 @@ AssetBundleReader AssetBundleReader::open_file(const std::string& bundle_path, b
     std::sort(ranges.begin(), ranges.end());
     uint64_t previous_end = table_end;
     for (const auto& range : ranges) {
-        if (range.first < previous_end) throw OutputError("overlapping .scempack entry ranges");
+        if (range.first != previous_end)
+            throw OutputError("overlapping or non-contiguous .scempack entry ranges");
         previous_end = range.second;
     }
     if (previous_end != file_size) throw OutputError("invalid .scempack payload extent");
@@ -300,7 +364,8 @@ std::vector<uint8_t> AssetBundleReader::read_entry_bytes(const std::string& name
     std::ifstream in(bundle_path_, std::ios::binary);
     if (!in) throw OutputError("cannot open bundle file: " + bundle_path_);
 
-    if (info->size > std::vector<uint8_t>().max_size()) {
+    if (info->size > std::vector<uint8_t>().max_size() ||
+        info->size > std::numeric_limits<size_t>::max()) {
         throw OutputError("bundle entry is too large to read: " + name);
     }
     in.seekg(static_cast<std::streamoff>(info->offset));
@@ -368,24 +433,39 @@ bool AssetBundleReader::verify_integrity() const {
     std::ifstream in(bundle_path_, std::ios::binary);
     if (!in) throw OutputError("cannot open bundle file: " + bundle_path_);
 
-    std::string all_payloads;
+    EVP_MD_CTX* aggregate = EVP_MD_CTX_new();
+    if (!aggregate || EVP_DigestInit_ex(aggregate, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(aggregate);
+        throw OutputError("cannot initialize bundle SHA-256 verification");
+    }
     for (const auto& e : entries_) {
-        in.seekg(e.offset);
-        std::string payload(e.size, '\0');
-        if (e.size > 0) {
-            in.read(payload.data(), e.size);
-            if (static_cast<uint64_t>(in.gcount()) != e.size) {
-                throw OutputError("bundle payload truncated for: " + e.name);
-            }
+        std::string entry_hash;
+        try {
+            entry_hash = sha256_range(in, e.offset, e.size, aggregate);
+        } catch (...) {
+            EVP_MD_CTX_free(aggregate);
+            throw;
         }
-        if (sha256_hex(payload) != e.sha256_hex) {
+        if (entry_hash != e.sha256_hex) {
+            EVP_MD_CTX_free(aggregate);
             throw OutputError("SHA-256 verification failed for entry: " + e.name);
         }
-        all_payloads.append(payload);
     }
 
-    std::string total_hash = sha256_hex(all_payloads);
-    if (std::memcmp(header_.payload_sha256, total_hash.data(), 64) != 0) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size = 0;
+    const bool finalized = EVP_DigestFinal_ex(aggregate, digest, &digest_size) == 1;
+    EVP_MD_CTX_free(aggregate);
+    if (!finalized || digest_size != 32) {
+        throw OutputError("cannot finalize bundle SHA-256 verification");
+    }
+    static constexpr char hex[] = "0123456789abcdef";
+    char total_hash[64];
+    for (size_t i = 0; i < 32; ++i) {
+        total_hash[i * 2] = hex[digest[i] >> 4];
+        total_hash[i * 2 + 1] = hex[digest[i] & 0x0f];
+    }
+    if (std::memcmp(header_.payload_sha256, total_hash, sizeof(total_hash)) != 0) {
         throw OutputError("total payload SHA-256 verification failed for bundle");
     }
     return true;

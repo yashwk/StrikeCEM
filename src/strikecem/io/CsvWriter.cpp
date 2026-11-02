@@ -92,22 +92,25 @@ void write_csv_and_sidecar(const ResolvedConfig& rc, const SamplePlan& plan,
                               {"polarizations", plan.polarizations},
                               {"samples", plan.sample_count()},
                               {"hash", plan.hash}};
-    sidecar["solver"] = {{"type", rc.value["solver"]["type"]},
-                         {"precision", rc.value["solver"]["precision"]},
-                         {"edge_correction",
-                          rc.value["solver"]["po_options"].value("edge_correction", "none")},
-                         {"fringe_edges", fringe.enabled && fringe.edges != nullptr
-                                              ? fringe.edges->edges.size()
-                                              : 0},
-                         {"shadowing", rc.value["solver"]["po_options"].value("shadowing", false)},
-                         {"max_bounces", configured_max_bounces(rc.value)},
-                         {"bounce_chains", result.chains_fired},
-                         {"materials", {{"enabled", material.enabled},
-                                        {"tag_coverage", rc.value.contains("materials") ? rc.value["materials"].value("tag_coverage", "none") : "none"},
-                                        {"models_count", material.models.size()}}},
-                         {"deterministic", rc.value["execution"]["deterministic"]},
-                         {"backend", rc.value["execution"].value("accelerator", "cpu")},
-                         {"device", cuda::active_device_name(rc.value)}};
+    sidecar["solver"] = configured_solver_dispatch(rc.value);
+    sidecar["solver"]["precision"] = rc.value["solver"]["precision"];
+    sidecar["solver"]["edge_correction"] =
+        rc.value["solver"]["po_options"].value("edge_correction", "none");
+    sidecar["solver"]["fringe_edges"] = fringe.enabled && fringe.edges != nullptr
+                                                ? fringe.edges->edges.size() : 0;
+    sidecar["solver"]["shadowing"] =
+        rc.value["solver"]["po_options"].value("shadowing", false);
+    sidecar["solver"]["bounce_chains"] = result.chains_fired;
+    sidecar["solver"]["materials"] = {
+        {"enabled", material.enabled},
+        {"tag_coverage", rc.value.contains("materials")
+                              ? rc.value["materials"].value("tag_coverage", "none") : "none"},
+        {"models_count", material.models.size()}
+    };
+    sidecar["solver"]["deterministic"] = rc.value["execution"]["deterministic"];
+    sidecar["solver"]["backend"] = rc.value["execution"].value("accelerator", "cpu");
+    sidecar["solver"]["device"] = cuda::active_device_name(rc.value);
+    if (!rc.provenance.empty()) sidecar["provenance"] = rc.provenance;
     sidecar["mesh"] = {{"path", rc.value["model"].value("path", "analytic_assembly")},
                        {"units", rc.value["model"]["units"]},
                        {"vertices", mesh.report.vertex_count},

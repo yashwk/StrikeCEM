@@ -11,6 +11,7 @@
 #include <iostream>
 #include <netinet/in.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include <sstream>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -27,6 +28,17 @@ namespace {
 
 constexpr size_t kMaxRequestBytes = 1024 * 1024;
 constexpr size_t kMaxHeaderBytes = 64 * 1024;
+
+std::string new_lease_token() {
+    unsigned char bytes[32];
+    if (RAND_bytes(bytes, sizeof(bytes)) != 1)
+        throw OutputError("cannot generate a coordinator lease token");
+    std::ostringstream token;
+    token << std::hex << std::setfill('0');
+    for (unsigned char byte : bytes)
+        token << std::setw(2) << static_cast<unsigned int>(byte);
+    return token.str();
+}
 
 bool parse_content_length(const std::string& request, size_t header_end,
                           bool& has_content_length, size_t& expected_body_len) {
@@ -212,6 +224,7 @@ void CoordinatorServer::check_expired_leases_locked() {
         if (task.state == TaskState::Leased && now > task.lease_expires_at) {
             task.state = TaskState::Pending;
             task.worker_id.clear();
+            task.lease_token.clear();
             task.retry_count++;
         }
     }
@@ -232,6 +245,7 @@ nlohmann::json CoordinatorServer::acquire_task(const std::string& worker_id,
 
     for (auto& task : tasks_) {
         if (task.state == TaskState::Pending) {
+            task.lease_token = new_lease_token();
             task.state = TaskState::Leased;
             task.worker_id = worker_id;
             task.lease_expires_at = std::chrono::steady_clock::now() +
@@ -243,6 +257,7 @@ nlohmann::json CoordinatorServer::acquire_task(const std::string& worker_id,
                 {"shard_id", task.shard_id},
                 {"config_path", task.config_path},
                 {"output_path", task.output_path},
+                {"lease_token", task.lease_token},
                 {"lease_duration_seconds", options_.lease_duration_seconds},
                 {"device_info", device_info}
             };
@@ -256,13 +271,20 @@ nlohmann::json CoordinatorServer::acquire_task(const std::string& worker_id,
     };
 }
 
-nlohmann::json CoordinatorServer::heartbeat_task(size_t shard_id, const std::string& worker_id) {
+bool CoordinatorServer::has_lease(const CoordinatorTask& task, const std::string& worker_id,
+                                  const std::string& lease_token) const {
+    return task.state == TaskState::Leased && task.worker_id == worker_id &&
+           !lease_token.empty() && task.lease_token == lease_token;
+}
+
+nlohmann::json CoordinatorServer::heartbeat_task(size_t shard_id, const std::string& worker_id,
+                                                 const std::string& lease_token) {
     std::lock_guard<std::mutex> lock(mutex_);
     check_expired_leases_locked();
 
     for (auto& task : tasks_) {
         if (task.shard_id == shard_id) {
-            if (task.state == TaskState::Leased && task.worker_id == worker_id) {
+            if (has_lease(task, worker_id, lease_token)) {
                 task.lease_expires_at = std::chrono::steady_clock::now() +
                                         std::chrono::seconds(options_.lease_duration_seconds);
                 return {{"status", "ok"}, {"lease_renewed", true}};
@@ -275,16 +297,20 @@ nlohmann::json CoordinatorServer::heartbeat_task(size_t shard_id, const std::str
 }
 
 nlohmann::json CoordinatorServer::complete_task(size_t shard_id, const std::string& worker_id,
-                                               const std::string& output_path,
-                                               const std::string& checksum) {
+                                                const std::string& lease_token,
+                                                const std::string& output_path,
+                                                const std::string& checksum) {
     std::lock_guard<std::mutex> lock(mutex_);
     check_expired_leases_locked();
     for (auto& task : tasks_) {
         if (task.shard_id == shard_id) {
             if (task.state == TaskState::Completed) {
-                return {{"status", "ok"}, {"already_completed", true}};
+                if (!lease_token.empty() && task.worker_id == worker_id &&
+                    task.lease_token == lease_token)
+                    return {{"status", "ok"}, {"already_completed", true}};
+                return {{"status", "error"}, {"message", "Task lease token is invalid"}};
             }
-            if (task.state != TaskState::Leased || task.worker_id != worker_id) {
+            if (!has_lease(task, worker_id, lease_token)) {
                 return {{"status", "error"}, {"message", "Task not leased to this worker"}};
             }
             if (output_path.empty() || !same_normalized_path(task.output_path, output_path)) {
@@ -331,16 +357,18 @@ nlohmann::json CoordinatorServer::complete_task(size_t shard_id, const std::stri
 }
 
 nlohmann::json CoordinatorServer::fail_task(size_t shard_id, const std::string& worker_id,
+                                           const std::string& lease_token,
                                            const std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
     check_expired_leases_locked();
     for (auto& task : tasks_) {
         if (task.shard_id == shard_id) {
-            if (task.state != TaskState::Leased || task.worker_id != worker_id) {
+            if (!has_lease(task, worker_id, lease_token)) {
                 return {{"status", "error"}, {"message", "Task not leased to this worker"}};
             }
             task.state = TaskState::Pending;
             task.worker_id.clear();
+            task.lease_token.clear();
             task.retry_count++;
             return {
                 {"status", "ok"},
@@ -614,18 +642,21 @@ void CoordinatorServer::handle_client(int client_fd) {
         } else if (path == "/api/v1/task/heartbeat" && method == "POST") {
             const size_t sid = req_json.value("shard_id", size_t(0));
             const std::string wid = req_json.value("worker_id", "");
-            res_json = heartbeat_task(sid, wid);
+            const std::string token = req_json.value("lease_token", "");
+            res_json = heartbeat_task(sid, wid, token);
         } else if (path == "/api/v1/task/complete" && method == "POST") {
             const size_t sid = req_json.value("shard_id", size_t(0));
             const std::string wid = req_json.value("worker_id", "");
+            const std::string token = req_json.value("lease_token", "");
             const std::string out_path = req_json.value("output_path", "");
             const std::string csum = req_json.value("checksum", "");
-            res_json = complete_task(sid, wid, out_path, csum);
+            res_json = complete_task(sid, wid, token, out_path, csum);
         } else if (path == "/api/v1/task/fail" && method == "POST") {
             const size_t sid = req_json.value("shard_id", size_t(0));
             const std::string wid = req_json.value("worker_id", "");
+            const std::string token = req_json.value("lease_token", "");
             const std::string err = req_json.value("error", "unknown error");
-            res_json = fail_task(sid, wid, err);
+            res_json = fail_task(sid, wid, token, err);
         } else {
             status_code = 404;
             res_json = {{"error", "Not Found"}, {"path", path}};

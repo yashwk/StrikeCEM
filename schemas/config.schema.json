@@ -199,7 +199,7 @@
       "additionalProperties": false,
       "required": ["type"],
       "properties": {
-        "type": {"type": "string", "enum": ["PO", "SBR"], "default": "PO"},
+        "type": {"type": "string", "enum": ["PO", "SBR"], "default": "PO", "description": "Solver mode. SBR selects coherent multi-bounce settings in the Physical Optics engine; it is not a separate general-purpose ray-tracing backend."},
         "precision": {"type": "string", "enum": ["float32", "float64", "mixed"], "default": "float64"},
         "rcs_units": {"const": "dBsm", "default": "dBsm", "description": "Compatibility field; v1 output always contains both square metres and dBsm."},
         "edge_correction": {"type": "string", "enum": ["none", "fringe", "ptd_lite", "ptd_full"], "default": "none"},
@@ -208,7 +208,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "max_bounces": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1}
+            "max_bounces": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1, "description": "Coherent bounce limit handled by the Physical Optics engine."}
           }
         },
         "po_options": {
@@ -432,7 +432,8 @@
             "num_shards": {"type": "integer", "minimum": 1},
             "run_id": {"type": "string"},
             "worker_identity": {"type": "string"},
-            "parent_config_hash": {"type": "string"}
+            "parent_config_hash": {"type": "string"},
+            "source_config_hash": {"type": "string"}
           }
         }
       }

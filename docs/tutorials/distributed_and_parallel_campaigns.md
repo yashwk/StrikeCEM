@@ -57,6 +57,7 @@ strikecem coordinate --manifest ./shards/manifest.json \
 
 - `--lease 300`: Each shard is leased for 300 seconds. If a worker node crashes or disconnects, the lease expires and the shard is automatically returned to the pending queue.
 - `--auto-exit`: Coordinator terminates cleanly after 100% of shards are solved and merged.
+- `POST /api/v1/task/acquire` returns a random `lease_token`; clients must send it with heartbeat, completion, and failure requests. Expired or reassigned leases reject old tokens.
 
 ### Step 3: Launch Headless Workers
 

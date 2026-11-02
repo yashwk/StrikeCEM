@@ -33,6 +33,7 @@ struct CoordinatorTask {
     std::string config_path;
     std::string output_path;
     std::string checksum;
+    std::string lease_token;
     std::chrono::steady_clock::time_point lease_expires_at;
     int retry_count = 0;
 };
@@ -63,10 +64,13 @@ public:
 
     // Direct programmatic API
     nlohmann::json acquire_task(const std::string& worker_id, const std::string& device_info);
-    nlohmann::json heartbeat_task(size_t shard_id, const std::string& worker_id);
+    nlohmann::json heartbeat_task(size_t shard_id, const std::string& worker_id,
+                                  const std::string& lease_token);
     nlohmann::json complete_task(size_t shard_id, const std::string& worker_id,
-                                 const std::string& output_path, const std::string& checksum);
-    nlohmann::json fail_task(size_t shard_id, const std::string& worker_id, const std::string& error);
+                                 const std::string& lease_token, const std::string& output_path,
+                                 const std::string& checksum);
+    nlohmann::json fail_task(size_t shard_id, const std::string& worker_id,
+                             const std::string& lease_token, const std::string& error);
     nlohmann::json get_status() const;
 
     bool is_campaign_complete() const;
@@ -77,6 +81,8 @@ private:
     void client_worker_loop();
     void handle_client(int client_fd);
     void check_expired_leases_locked();
+    bool has_lease(const CoordinatorTask& task, const std::string& worker_id,
+                   const std::string& lease_token) const;
 
     CoordinatorOptions options_;
     std::string run_id_;

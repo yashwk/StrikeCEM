@@ -435,6 +435,8 @@ void check_resume_identity(H5::H5File& file, const ResolvedConfig& rc, const Sam
     expect("solver_type", rc.value["solver"]["type"].get<std::string>(), "solver type");
     expect("solver_precision", rc.value["solver"]["precision"].get<std::string>(),
            "solver precision");
+    if (!rc.provenance.empty())
+        expect("provenance_json", rc.provenance.dump(), "runtime transformation provenance");
 }
 
 } // namespace
@@ -529,7 +531,10 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         write_str_attr(file, "geometry_hash", mesh.geometry_hash);
         write_str_attr(file, "normalized_mesh_hash", mesh.normalized_mesh_hash);
         write_str_attr(file, "sample_plan_hash", plan.hash);
+        const nlohmann::json solver_dispatch = configured_solver_dispatch(rc.value);
         write_str_attr(file, "solver_type", rc.value["solver"]["type"].get<std::string>());
+        write_str_attr(file, "solver_engine", solver_dispatch["engine"].get<std::string>());
+        write_str_attr(file, "solver_mode", solver_dispatch["mode"].get<std::string>());
         write_str_attr(file, "edge_correction",
                        rc.value["solver"]["po_options"].value("edge_correction", "none"));
         write_u64_attr(file, "fringe_edges",
@@ -540,6 +545,8 @@ void write_hdf5_output(const ResolvedConfig& rc, const SamplePlan& plan,
         write_u64_attr(file, "max_bounces",
                        configured_max_bounces(rc.value));
         write_u64_attr(file, "bounce_chains", result.chains_fired);
+        if (!rc.provenance.empty())
+            write_str_attr(file, "provenance_json", rc.provenance.dump());
         write_u64_attr(file, "materials_enabled", material.enabled ? 1 : 0);
         write_u64_attr(file, "material_models_count", material.models.size());
         std::string d_id = designer.design_id;

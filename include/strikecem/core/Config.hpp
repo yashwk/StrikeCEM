@@ -73,6 +73,7 @@ struct ResolvedConfig {
     nlohmann::json value; // defaults materialized; the execution contract
     std::string hash;     // SHA-256 hex of the canonical serialization
     std::string schema_version = "1.0";
+    nlohmann::json provenance = nlohmann::json::object(); // runtime transformations, not config identity
     // Run-control path, validated by the schema but stripped from value so
     // resuming the same database does not change its identity hash.
     std::string resume_from_checkpoint;
@@ -85,6 +86,7 @@ ResolvedConfig load_config(const std::string& config_path, const std::string& sc
 
 // Returns the bounce limit consumed by the selected mode. SBR contributions share the PO backend.
 int configured_max_bounces(const nlohmann::json& resolved);
+nlohmann::json configured_solver_dispatch(const nlohmann::json& resolved);
 
 // Canonical bytes: nlohmann::json objects are std::map-ordered, so dump()
 // has sorted keys and stable number formatting.

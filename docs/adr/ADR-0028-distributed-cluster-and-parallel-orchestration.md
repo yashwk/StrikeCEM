@@ -25,9 +25,10 @@ Industrial radar cross section campaigns encompass tens of thousands of directio
      - `GET /api/v1/health`: Broker status and campaign run identifier.
      - `GET /api/v1/status`: Comprehensive campaign telemetry (pending, leased, completed shard counts, progress percentage).
      - `POST /api/v1/task/acquire`: Leases next pending shard to requesting worker with configurable lease duration.
-     - `POST /api/v1/task/heartbeat`: Renews active shard leases during long-running solves.
-     - `POST /api/v1/task/complete`: Records shard completion with SHA-256 checksum verification and triggers automated fail-closed reduction upon 100% completion.
-     - `POST /api/v1/task/fail`: Resets task state for resilient retry upon worker or node crash.
+     - `POST /api/v1/task/heartbeat`: Renews active shard leases during long-running solves using the lease token returned at acquisition.
+     - `POST /api/v1/task/complete`: Records shard completion with the lease token and SHA-256 checksum verification, then triggers fail-closed reduction upon 100% completion.
+     - `POST /api/v1/task/fail`: Resets task state for resilient retry using the active lease token.
+   - Each acquisition receives a cryptographically random lease token; expiry or reassignment invalidates the previous token.
    - Fault tolerance: automatically reclaims expired leases when worker nodes disconnect or fail to send heartbeats.
    - Supports ephemeral port binding (`port = 0`) via `getsockname()` to prevent port collisions in parallel CI environments.
 
